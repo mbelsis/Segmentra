@@ -132,7 +132,7 @@ At minimum, set these for the `segmentra-app` container:
 - `JWT_SECRET` (long random secret)
 - `SEGMENTRA_KEK_B64` (recommended: base64 of a **32-byte** key for AES-256-GCM encryption)
 - `BUNDLES_DIR` (inside container; defaults to `./data/bundles` when running locally, but in container we use `/bundles`)
-- `ANSIBLE_RUNNER_CONTAINER` (default `segmentra-ansible-runner`)
+      - `ANSIBLE_RUNNER_CONTAINER` (default `segmentra-ansible-runner`) — only needed if using Ansible executor
 
 **Example (generate a KEK):**
 ```bash
@@ -151,9 +151,9 @@ docker compose up -d
 ```
 
 This starts:
-- `segmentra-db` (PostgreSQL)
-- `segmentra-ansible-runner` (ansible-core + playbooks)
-- `segmentra-app` (API; and UI build artifacts are present under `apps/web/dist`)
+- `segmentra-db` (PostgreSQL) — exposed on host port `15432`
+- `segmentra-ansible-runner` (ansible-core + playbooks) — only needed if using Ansible executor
+- `segmentra-app` (API + UI) — API on port `8080`, UI served from `apps/web/dist`
 
 ### 3) Run migrations + seed roles (required)
 Run these on the host (or in a one-off container) with `DATABASE_URL` pointing at the production DB:
@@ -174,14 +174,41 @@ You have two options:
 - **Bootstrap**: temporarily set `SEGMENTRA_BOOTSTRAP_TOKEN`, call `/api/admin/bootstrap`, then remove the token.
 
 ### 5) Accessing the UI in production
-In v1, the UI is served by the Vite dev server during development. In production you typically do one of:
+The UI build artifacts are included in the `segmentra-app` container. The API serves the UI at the root path (`/`) and API endpoints under `/api/*`.
 
-- **Reverse proxy** (recommended): serve the built UI via nginx and proxy `/api/*` to the API container.
-- **Separate UI container**: build and serve `apps/web/dist` via nginx.
+For production, a reverse proxy (nginx) is recommended:
+- Serve static files from `apps/web/dist`
+- Proxy `/api/*` requests to the API container on port 8080
 
-If you want, tell me your preferred approach and I’ll add a production-ready nginx config + compose service.
+Alternatively, you can access the UI directly from the API container, but a reverse proxy provides better security and performance.
 
 ---
+
+## Deployment Executors
+
+Segmentra supports two deployment executors, selectable in Admin → Deployment Executor:
+
+### Ansible (Default, Recommended)
+- Uses Ansible playbook for deployments
+- Better error handling and automatic rollback
+- Parallel execution across hosts
+- Requires Ansible container (`segmentra-ansible-runner`)
+- Uses `become: true` (sudo) for all privileged operations
+- Requires Docker socket mounting (`/var/run/docker.sock`)
+
+### SSH Direct
+- Lightweight direct SSH/SCP execution
+- No Ansible dependency
+- Requires `ssh` and `scp` commands on the API host (included in container)
+- Uses `sudo` prefix for all privileged operations
+- Runs sequentially (one host at a time)
+- Suitable for simpler environments or when Ansible is not available
+
+Both executors:
+- Support sudo-capable accounts (not root)
+- Create backups before applying rules
+- Attempt rollback on failure
+- Work with nftables and iptables
 
 ## Security / operational notes (prod)
 
@@ -189,6 +216,8 @@ If you want, tell me your preferred approach and I’ll add a production-ready n
 - Set a strong `JWT_SECRET` and store it securely.
 - Set a stable `SEGMENTRA_KEK_B64` (if you rotate it without re-encrypting, encrypted secrets become unreadable).
 - Back up Postgres volume (`segmentra_pgdata`) regularly.
-- Deployments use Docker socket mounting (`/var/run/docker.sock`) so the API can execute ansible inside the runner container. Treat the API container as **high trust** and restrict host access accordingly.
+- **SSH Credentials**: Use sudo-capable accounts (not root). Most modern Linux distributions disable root SSH login. Ensure passwordless sudo is configured for firewall commands (`nft`, `iptables`, `iptables-restore`).
+- **Ansible Executor**: Requires Docker socket mounting (`/var/run/docker.sock`). Treat the API container as **high trust**.
+- **SSH Direct Executor**: No Docker socket needed, but requires `ssh` and `scp` commands (included in container).
 
 

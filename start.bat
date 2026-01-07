@@ -4,7 +4,8 @@ setlocal
 REM Segmentra dev launcher (Windows)
 cd /d "%~dp0"
 
-echo [segmentra] Starting dev environment...
+set "MODE=%~1"
+echo [segmentra] Starting dev environment... (mode=%MODE%)
 
 REM Avoid parenthesized blocks to prevent common batch parser errors.
 if not exist node_modules echo [segmentra] Installing dependencies (npm install)...
@@ -25,7 +26,7 @@ if not "%SEGMENTRA_DATABASE_URL%"=="" set "DATABASE_URL=%SEGMENTRA_DATABASE_URL%
 if "%SEGMENTRA_DATABASE_URL%"=="" set "DATABASE_URL=postgres://segmentra:segmentra@127.0.0.1:15432/segmentra"
 
 if "%JWT_SECRET%"=="" set "JWT_SECRET=change-me-to-a-long-random-string"
-if "%SEGMENTRA_BOOTSTRAP_TOKEN%"=="" set "SEGMENTRA_BOOTSTRAP_TOKEN=dev-bootstrap-token"
+if /I "%MODE%"=="dev" if "%SEGMENTRA_BOOTSTRAP_TOKEN%"=="" set "SEGMENTRA_BOOTSTRAP_TOKEN=dev-bootstrap-token"
 
 echo [segmentra] Using DATABASE_URL=%DATABASE_URL%
 
@@ -48,12 +49,31 @@ start "segmentra-web" cmd /k "cd /d ""%~dp0apps\web"" && npm run dev"
 echo.
 echo [segmentra] API health: http://localhost:8080/api/health
 echo.
-echo [segmentra] To access the UI without LDAP (bootstrap):
-echo   1) Wait for API to be up, then run in PowerShell:
-echo      $body = @{ token="%SEGMENTRA_BOOTSTRAP_TOKEN%"; username="bootstrap_admin" } ^| ConvertTo-Json
-echo      Invoke-RestMethod -Method Post -Uri "http://localhost:8080/api/admin/bootstrap" -ContentType "application/json" -Body $body
-echo   2) Copy token, then in browser DevTools console:
-echo      localStorage.setItem('segmentra_token','PASTE_TOKEN'); location.reload()
+if /I "%MODE%"=="dev" goto :bootstrap
+echo [segmentra] Tip: run "start.bat dev" to bootstrap a JWT and bypass LDAP in the UI.
+goto :done
+
+:bootstrap
+echo [segmentra] Dev mode: bootstrapping admin token (no LDAP)...
+set "TRY=0"
+
+:wait_api
+set /a TRY=TRY+1
+if %TRY% GTR 60 goto :bootstrap_fail
+powershell -NoProfile -Command "$ErrorActionPreference='Stop'; Invoke-RestMethod -Uri 'http://localhost:8080/api/health' | Out-Null"
+if errorlevel 1 (
+  timeout /t 1 /nobreak >nul
+  goto :wait_api
+)
+
+powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $body=@{token='%SEGMENTRA_BOOTSTRAP_TOKEN%';username='bootstrap_admin'}|ConvertTo-Json; $r=Invoke-RestMethod -Method Post -Uri 'http://localhost:8080/api/admin/bootstrap' -ContentType 'application/json' -Body $body; if ($null -ne $r.token) { $r.token | Out-File -Encoding ascii .dev-admin-jwt.txt; Write-Host ('[segmentra] Wrote JWT to .dev-admin-jwt.txt'); Write-Host ('[segmentra] In browser DevTools console run:'); Write-Host (\"localStorage.setItem('segmentra_token','\" + $r.token + \"'); location.reload()\"); } else { Write-Host '[segmentra] Bootstrap did not return a token (maybe already initialized).'; }"
+goto :done
+
+:bootstrap_fail
+echo [segmentra] Could not reach API /api/health to bootstrap. You can bootstrap manually later.
+goto :done
+
+:done
 echo.
 
 endlocal

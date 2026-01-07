@@ -5,7 +5,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 
 import { compileHostPolicy } from '@segmentra/compiler';
-import { runAnsiblePlaybook } from '@segmentra/executor';
+import { runAnsiblePlaybook, runSshDeployment, type SshHost } from '@segmentra/executor';
 
 import { pool } from '../db/pool.js';
 import { env } from '../lib/env.js';
@@ -54,6 +54,18 @@ deploymentsRouter.post('/deployments', async (req, res) => {
   const parsed = createDeploymentSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
   const b = parsed.data;
+
+  // Validate that the policy version is APPROVED
+  const versionRes = await pool.query(`SELECT status FROM policy_versions WHERE id=$1`, [b.policyVersionId]);
+  if (!versionRes.rows[0]) {
+    return res.status(404).json({ error: 'policy_version_not_found' });
+  }
+  if (versionRes.rows[0].status !== 'APPROVED') {
+    return res.status(400).json({ 
+      error: 'policy_version_not_approved',
+      message: `Policy version must be APPROVED to deploy. Current status: ${versionRes.rows[0].status}`
+    });
+  }
 
   const targetIds = await resolveTargets(b.targetQuery);
   const { rows } = await pool.query(
@@ -262,7 +274,7 @@ async function generateBundle(deploymentId: string) {
     const policyFileRunnerPath = `/bundles/${deploymentId}/host_rules/${h.hostname}.${ext}`;
 
     inventoryLines.push(
-      `${h.hostname} ansible_host=${String(h.mgmt_ip)} ansible_port=${h.ssh_port} ansible_user=${cred.username} ansible_ssh_private_key_file=/bundles/${deploymentId}/ssh_key segmentra_policy_file=${policyFileRunnerPath}`
+      `${h.hostname} ansible_host=${String(h.mgmt_ip)} ansible_port=${h.ssh_port} ansible_user=${cred.username} ansible_ssh_private_key_file=/bundles/${deploymentId}/ssh_key ansible_become=yes ansible_become_method=sudo segmentra_policy_file=${policyFileRunnerPath}`
     );
   }
 
@@ -288,44 +300,143 @@ deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
 
   const { bundleDir } = await generateBundle(deploymentId);
 
-  const executionIdRes = await pool.query(
-    `INSERT INTO execution_runs (deployment_id, executor_type, command)
-     VALUES ($1,'ansible_cli',$2)
-     RETURNING id`,
-    [deploymentId, 'docker exec ... ansible-playbook']
+  // Get executor setting
+  const executorRes = await pool.query(
+    `SELECT value FROM system_settings WHERE key='deployment_executor'`
   );
-  const executionId = executionIdRes.rows[0].id;
-  const stdoutPath = path.join(bundleDir, 'ansible.stdout.log');
-  const stderrPath = path.join(bundleDir, 'ansible.stderr.log');
+  const executor = executorRes.rows[0]?.value ?? 'ansible';
 
-  const result = await runAnsiblePlaybook({
-    runnerContainer: env.ANSIBLE_RUNNER_CONTAINER,
-    inventoryPath: `/bundles/${deploymentId}/inventory.ini`,
-    playbookPath: `/runner/playbooks/apply-firewall.yml`,
-    stdoutPath,
-    stderrPath
-  });
+  const stdoutPath = path.join(bundleDir, executor === 'ssh' ? 'ssh.stdout.log' : 'ansible.stdout.log');
+  const stderrPath = path.join(bundleDir, executor === 'ssh' ? 'ssh.stderr.log' : 'ansible.stderr.log');
 
-  await pool.query(
-    `UPDATE execution_runs
-     SET exit_code=$2, stdout_path=$3, stderr_path=$4, finished_at=now(), status='DONE'
-     WHERE id=$1`,
-    [executionId, result.exitCode, stdoutPath, stderrPath]
-  );
+  let ok = false;
+  let exitCode = 1;
+  let executionId: string;
 
-  const ok = result.exitCode === 0;
-  await pool.query(
-    `UPDATE deployment_hosts
-     SET status=$2, finished_at=now(), message=$3
-     WHERE deployment_id=$1`,
-    [deploymentId, ok ? 'SUCCEEDED' : 'FAILED', ok ? 'ok' : 'ansible_failed']
-  );
+  if (executor === 'ssh') {
+    // SSH Direct executor
+    const executionIdRes = await pool.query(
+      `INSERT INTO execution_runs (deployment_id, executor_type, command)
+       VALUES ($1,'ssh_direct',$2)
+       RETURNING id`,
+      [deploymentId, 'ssh/scp direct execution']
+    );
+    executionId = executionIdRes.rows[0].id;
+
+    // Get SSH credential
+    const credRes = await pool.query(
+      `SELECT * FROM ssh_credentials WHERE scope_type='GLOBAL' ORDER BY created_at DESC LIMIT 1`
+    );
+    const cred = credRes.rows[0];
+    if (!cred) {
+      await pool.query(`UPDATE execution_runs SET status='DONE', finished_at=now() WHERE id=$1`, [executionId]);
+      await pool.query(`UPDATE deployments SET status='FAILED', finished_at=now() WHERE id=$1`, [deploymentId]);
+      return res.status(400).json({ error: 'missing_ssh_credential' });
+    }
+
+    const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
+    const keyPath = path.join(bundleDir, 'ssh_key');
+    fs.writeFileSync(keyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
+
+    // Get hosts and policy files
+    const hostRows = await pool.query(
+      `SELECT h.id, h.hostname, h.mgmt_ip, h.ssh_port, h.firewall_backend
+       FROM deployment_hosts dh
+       JOIN hosts h ON h.id = dh.host_id
+       WHERE dh.deployment_id=$1`,
+      [deploymentId]
+    );
+
+    const sshHosts: SshHost[] = [];
+    for (const h of hostRows.rows as any[]) {
+      const backend = h.firewall_backend === 'iptables' ? 'iptables' : 'nftables';
+      const ext = backend === 'nftables' ? 'nft' : 'iptables';
+      const policyFilePath = path.join(bundleDir, 'host_rules', `${h.hostname}.${ext}`);
+      
+      if (fs.existsSync(policyFilePath)) {
+        sshHosts.push({
+          hostname: h.hostname,
+          ip: String(h.mgmt_ip),
+          port: h.ssh_port || 22,
+          username: cred.username,
+          privateKeyPath: keyPath,
+          policyFilePath,
+          backend
+        });
+      }
+    }
+
+    const results = await runSshDeployment({
+      hosts: sshHosts,
+      stdoutPath,
+      stderrPath
+    });
+
+    // Update deployment_hosts based on results
+    const failedHosts = results.filter(r => !r.success);
+    ok = failedHosts.length === 0;
+    exitCode = ok ? 0 : 1;
+
+    for (const result of results) {
+      const host = hostRows.rows.find((h: any) => h.hostname === result.hostname);
+      if (host) {
+        await pool.query(
+          `UPDATE deployment_hosts
+           SET status=$2, finished_at=now(), message=$3
+           WHERE deployment_id=$1 AND host_id=$4`,
+          [deploymentId, result.success ? 'SUCCEEDED' : 'FAILED', result.success ? 'ok' : 'ssh_failed', host.id]
+        );
+      }
+    }
+
+    await pool.query(
+      `UPDATE execution_runs
+       SET exit_code=$2, stdout_path=$3, stderr_path=$4, finished_at=now(), status='DONE'
+       WHERE id=$1`,
+      [executionId, exitCode, stdoutPath, stderrPath]
+    );
+  } else {
+    // Ansible executor (default)
+    const executionIdRes = await pool.query(
+      `INSERT INTO execution_runs (deployment_id, executor_type, command)
+       VALUES ($1,'ansible_cli',$2)
+       RETURNING id`,
+      [deploymentId, 'docker exec ... ansible-playbook']
+    );
+    executionId = executionIdRes.rows[0].id;
+
+    const result = await runAnsiblePlaybook({
+      runnerContainer: env.ANSIBLE_RUNNER_CONTAINER,
+      inventoryPath: `/bundles/${deploymentId}/inventory.ini`,
+      playbookPath: `/runner/playbooks/apply-firewall.yml`,
+      stdoutPath,
+      stderrPath
+    });
+
+    exitCode = result.exitCode;
+    ok = exitCode === 0;
+
+    await pool.query(
+      `UPDATE execution_runs
+       SET exit_code=$2, stdout_path=$3, stderr_path=$4, finished_at=now(), status='DONE'
+       WHERE id=$1`,
+      [executionId, exitCode, stdoutPath, stderrPath]
+    );
+
+    await pool.query(
+      `UPDATE deployment_hosts
+       SET status=$2, finished_at=now(), message=$3
+       WHERE deployment_id=$1`,
+      [deploymentId, ok ? 'SUCCEEDED' : 'FAILED', ok ? 'ok' : 'ansible_failed']
+    );
+  }
+
   await pool.query(
     `UPDATE deployments SET status=$2, finished_at=now() WHERE id=$1`,
     [deploymentId, ok ? 'SUCCEEDED' : 'FAILED']
   );
 
-  res.json({ ok, exitCode: result.exitCode, executionId });
+  res.json({ ok, exitCode, executionId });
 });
 
 deploymentsRouter.post('/deployments/:deploymentId/cancel', async (req, res) => {

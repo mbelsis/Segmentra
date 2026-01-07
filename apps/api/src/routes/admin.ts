@@ -146,4 +146,30 @@ adminRouter.post('/ad-group-role-map', requireAuth, requireRole('admin'), async 
   res.json({ map: rows[0] });
 });
 
+adminRouter.get('/executor-setting', requireAuth, requireRole('admin'), async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT value FROM system_settings WHERE key='deployment_executor'`
+  );
+  const executor = rows[0]?.value ?? 'ansible';
+  res.json({ executor });
+});
+
+const executorSettingSchema = z.object({
+  executor: z.enum(['ansible', 'ssh'])
+});
+
+adminRouter.put('/executor-setting', requireAuth, requireRole('admin'), async (req, res) => {
+  const parsed = executorSettingSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
+
+  const { rows } = await pool.query(
+    `INSERT INTO system_settings (key, value, updated_at)
+     VALUES ('deployment_executor', $1, now())
+     ON CONFLICT (key) DO UPDATE SET value=$1, updated_at=now()
+     RETURNING value`,
+    [parsed.data.executor]
+  );
+  res.json({ executor: rows[0].value });
+});
+
 

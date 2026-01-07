@@ -5,13 +5,24 @@ const API_BASE = (import.meta as any).env?.VITE_API_URL ?? 'http://localhost:808
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = getToken();
   const headers = new Headers(init.headers);
-  headers.set('content-type', 'application/json');
+  if (init.body !== undefined) headers.set('content-type', 'application/json');
   if (token) headers.set('authorization', `Bearer ${token}`);
 
   const resp = await fetch(`${API_BASE}${path}`, { ...init, headers });
   if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
-    throw new Error(`${resp.status} ${resp.statusText} ${text}`);
+    let errorMessage = `${resp.status} ${resp.statusText}`;
+    try {
+      const json = await resp.json();
+      if (json.error) {
+        errorMessage = json.message || json.error;
+      } else if (json.message) {
+        errorMessage = json.message;
+      }
+    } catch {
+      const text = await resp.text().catch(() => '');
+      if (text) errorMessage = `${errorMessage}: ${text}`;
+    }
+    throw new Error(errorMessage);
   }
   return (await resp.json()) as T;
 }
@@ -23,18 +34,33 @@ export const api = {
 
   hosts: () => request<{ hosts: any[] }>('/hosts'),
   createHost: (b: any) => request<{ host: any }>('/hosts', { method: 'POST', body: JSON.stringify(b) }),
+  updateHost: (id: string, b: any) => request<{ host: any }>(`/hosts/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
 
   tags: () => request<{ tags: any[] }>('/tags'),
+  createTag: (b: any) => request<{ tag: any }>('/tags', { method: 'POST', body: JSON.stringify(b) }),
+  updateTag: (id: string, b: any) => request<{ tag: any }>(`/tags/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
+  deleteTag: (id: string) => request<{ ok: boolean }>(`/tags/${id}`, { method: 'DELETE' }),
   vlans: () => request<{ vlans: any[] }>('/vlans'),
+  createVlan: (b: any) => request<{ vlan: any }>('/vlans', { method: 'POST', body: JSON.stringify(b) }),
+  updateVlan: (id: string, b: any) => request<{ vlan: any }>(`/vlans/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
+  deleteVlan: (id: string) => request<{ ok: boolean }>(`/vlans/${id}`, { method: 'DELETE' }),
 
   policySets: () => request<{ policySets: any[] }>('/policy-sets'),
+  policySet: (id: string) => request<{ policySet: any }>(`/policy-sets/${id}`),
   createPolicySet: (b: any) => request<{ policySet: any }>('/policy-sets', { method: 'POST', body: JSON.stringify(b) }),
   versions: (policySetId: string) => request<{ versions: any[] }>(`/policy-sets/${policySetId}/versions`),
   createVersion: (policySetId: string, b: any) =>
     request<{ version: any }>(`/policy-sets/${policySetId}/versions`, { method: 'POST', body: JSON.stringify(b) }),
+  version: (versionId: string) => request<{ version: any }>(`/policy-versions/${versionId}`),
+  updateVersion: (versionId: string, b: any) =>
+    request<{ version: any }>(`/policy-versions/${versionId}`, { method: 'PUT', body: JSON.stringify(b) }),
   rules: (versionId: string) => request<{ rules: any[] }>(`/policy-versions/${versionId}/rules`),
   addRule: (versionId: string, b: any) =>
     request<{ rule: any }>(`/policy-versions/${versionId}/rules`, { method: 'POST', body: JSON.stringify(b) }),
+  updateRule: (ruleId: string, b: any) =>
+    request<{ rule: any }>(`/policy-rules/${ruleId}`, { method: 'PUT', body: JSON.stringify(b) }),
+  deleteRule: (ruleId: string) =>
+    request<{ ok: boolean }>(`/policy-rules/${ruleId}`, { method: 'DELETE' }),
   submitApproval: (versionId: string) =>
     request<{ version: any }>(`/policy-versions/${versionId}/submit-approval`, { method: 'POST' }),
   approve: (versionId: string) => request<{ version: any }>(`/policy-versions/${versionId}/approve`, { method: 'POST' }),
@@ -49,14 +75,49 @@ export const api = {
   startDeployment: (deploymentId: string) => request<any>(`/deployments/${deploymentId}/start`, { method: 'POST' }),
   deploymentHosts: (deploymentId: string) => request<{ hosts: any[] }>(`/deployments/${deploymentId}/hosts`),
 
-  audit: () => request<{ events: any[] }>('/audit'),
+  audit: (params?: { actor?: string; action?: string; entityType?: string; from?: string; to?: string }) => {
+    const query = new URLSearchParams();
+    if (params?.actor) query.append('actor', params.actor);
+    if (params?.action) query.append('action', params.action);
+    if (params?.entityType) query.append('entityType', params.entityType);
+    if (params?.from) query.append('from', params.from);
+    if (params?.to) query.append('to', params.to);
+    const queryString = query.toString();
+    return request<{ events: any[] }>(`/audit${queryString ? `?${queryString}` : ''}`);
+  },
 
   ldapSettings: () => request<{ ldapSettings: any }>('/admin/ldap-settings'),
   putLdapSettings: (b: any) => request<{ ldapSettings: any }>('/admin/ldap-settings', { method: 'PUT', body: JSON.stringify(b) }),
   addGroupMap: (b: any) => request<{ map: any }>('/admin/ad-group-role-map', { method: 'POST', body: JSON.stringify(b) }),
+  executorSetting: () => request<{ executor: string }>('/admin/executor-setting'),
+  putExecutorSetting: (b: any) => request<{ executor: string }>('/admin/executor-setting', { method: 'PUT', body: JSON.stringify(b) }),
 
   sshCredentials: () => request<{ sshCredentials: any[] }>('/ssh-credentials'),
-  createSshCredential: (b: any) => request<{ sshCredential: any }>('/ssh-credentials', { method: 'POST', body: JSON.stringify(b) })
+  createSshCredential: (b: any) => request<{ sshCredential: any }>('/ssh-credentials', { method: 'POST', body: JSON.stringify(b) }),
+
+  dashboardStats: () => request<{
+    totalDeployments: number;
+    runningDeployments: number;
+    successRate: number;
+    statusBreakdown: Array<{ status: string; count: number }>;
+    topDeployers: Array<{ userId: string; username: string; displayName: string | null; deploymentCount: number }>;
+    recentDeployments: any[];
+    currentDeployments: Array<{
+      id: string;
+      status: string;
+      mode: string;
+      targetCount: number;
+      createdAt: string;
+      startedAt: string | null;
+      policySetName: string | null;
+      versionNumber: number | null;
+      totalHosts: number;
+      succeededHosts: number;
+      failedHosts: number;
+      runningHosts: number;
+      progressPercent: number;
+    }>;
+  }>('/dashboard/stats')
 };
 
 

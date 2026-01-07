@@ -7,6 +7,7 @@ import { LoginPage } from './pages/LoginPage'
 import { DashboardPage } from './pages/DashboardPage'
 import { InventoryPage } from './pages/InventoryPage'
 import { PolicySetsPage } from './pages/PolicySetsPage'
+import { PolicySetDetailPage } from './pages/PolicySetDetailPage'
 import { PolicyVersionPage } from './pages/PolicyVersionPage'
 import { ApprovalsPage } from './pages/ApprovalsPage'
 import { DeploymentsPage } from './pages/DeploymentsPage'
@@ -29,6 +30,7 @@ function App() {
           <Route index element={<DashboardPage />} />
           <Route path="inventory" element={<InventoryPage />} />
           <Route path="policies" element={<PolicySetsPage />} />
+          <Route path="policy-set/:policySetId" element={<PolicySetDetailPage />} />
           <Route path="policy-version/:versionId" element={<PolicyVersionPage />} />
           <Route path="approvals" element={<ApprovalsPage />} />
           <Route path="deployments" element={<DeploymentsPage />} />

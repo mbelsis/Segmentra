@@ -1,8 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { api } from '../lib/api';
-import { setToken } from '../lib/auth';
+import { getToken, setToken } from '../lib/auth';
 
 export function LoginPage() {
   const navigate = useNavigate();
@@ -10,10 +10,26 @@ export function LoginPage() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    const token = getToken();
+    if (!token) return;
+    api
+      .me()
+      .then(() => navigate('/', { replace: true }))
+      .catch(() => undefined);
+  }, [navigate]);
+
   return (
     <div className="card" style={{ maxWidth: 420, margin: '40px auto' }}>
       <h2>Login</h2>
       <div style={{ display: 'grid', gap: 8 }}>
+        <div style={{ fontSize: 12, opacity: 0.75 }}>
+          If you already set <code>segmentra_token</code> in localStorage (bootstrap/dev), go to{' '}
+          <a href="/" onClick={(e) => { e.preventDefault(); navigate('/'); }}>
+            Dashboard
+          </a>
+          .
+        </div>
         <label>
           Username
           <input value={username} onChange={(e) => setUsername(e.target.value)} />
@@ -28,7 +44,7 @@ export function LoginPage() {
             try {
               const r = await api.login(username, password);
               setToken(r.token);
-              navigate('/');
+              navigate('/', { replace: true });
             } catch (e: any) {
               setError(String(e?.message ?? e));
             }

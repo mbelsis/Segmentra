@@ -6,7 +6,7 @@ This repository is a **TypeScript monorepo**:
 - **API**: Express + PostgreSQL (`apps/api`)
 - **UI**: React (Vite) (`apps/web`)
 - **Compiler**: policy → per-host firewall rules (`packages/compiler`)
-- **Executor**: Ansible CLI runner wrapper (`packages/executor`)
+- **Executor**: Ansible CLI runner wrapper + SSH direct executor (`packages/executor`)
 - **DB**: migrations + seed scripts (`packages/db`)
 
 ---
@@ -26,13 +26,13 @@ apps/
       components/              # App shell, auth gate
       pages/                   # Dashboard/Inventory/Policies/...
 infra/
-  app/Dockerfile               # App container (installs docker client)
-  ansible-runner/              # Ansible container + playbooks
+  app/Dockerfile               # App container (installs docker client + openssh-client)
+  ansible-runner/              # Ansible container + playbooks (only needed for Ansible executor)
 packages/
   db/                          # node-pg-migrate migrations + seed scripts
   shared/                      # shared TS types
   compiler/                    # nftables/iptables rendering
-  executor/                    # docker exec ansible-playbook wrapper
+  executor/                    # Ansible CLI runner + SSH direct executor
 docker-compose.yml             # Postgres + app + ansible-runner
 ```
 
@@ -53,12 +53,14 @@ Base URL: `http://localhost:8080/api`
 - `GET /admin/ldap-settings`
 - `PUT /admin/ldap-settings`
 - `POST /admin/ad-group-role-map`
+- `GET /admin/executor-setting` — Get deployment executor preference (ansible/ssh)
+- `PUT /admin/executor-setting` — Set deployment executor preference
 
 ### Inventory (Operator/Admin role required)
-- `GET /hosts?hostname=&tag=&vlan=&ip=&env=&backend=`
-- `POST /hosts`
-- `GET /hosts/:id`
-- `PUT /hosts/:id`
+- `GET /hosts?hostname=&tag=&vlan=&ip=&env=&backend=` — Returns hosts with tags and VLAN info
+- `POST /hosts` — Body: `{ hostname, mgmtIp?, vlanId?, tagIds[]?, ... }`
+- `GET /hosts/:id` — Returns host with tags and VLAN info
+- `PUT /hosts/:id` — Body: `{ hostname?, mgmtIp?, vlanId?, tagIds[]?, ... }`
 - `DELETE /hosts/:id` (soft delete via `enabled=false`)
 
 - `GET /tags`
@@ -102,12 +104,12 @@ Base URL: `http://localhost:8080/api`
 - `GET /policy-versions/:versionId/render/host/:hostId` (per-host nft/iptables preview)
 
 ### Deployments
-- `POST /deployments` — Body: `{ policyVersionId, mode, targetQuery, canarySize?, batchSize? }`
+- `POST /deployments` — Body: `{ policyVersionId, mode, targetQuery, canarySize?, batchSize? }` (policy version must be APPROVED)
 - `GET /deployments`
 - `GET /deployments/:deploymentId`
 - `GET /deployments/:deploymentId/hosts`
 - `GET /deployments/:deploymentId/artifacts`
-- `POST /deployments/:deploymentId/start` (creates bundle + runs ansible)
+- `POST /deployments/:deploymentId/start` — Creates bundle + runs executor (Ansible or SSH Direct, based on admin setting)
 - `POST /deployments/:deploymentId/cancel` (best-effort v1)
 - `POST /deployments/:deploymentId/retry-failed` (v1 helper)
 - `GET /executions/:executionId/logs`
@@ -138,26 +140,29 @@ Migrations live in `packages/db/migrations/`.
 - `tags`: `id`, `name`, `description`
 - `vlans`: `id`, `vlan_tag`, `name`, `description`
 - `hosts`: `id`, `hostname`, `mgmt_ip`, `ssh_port`, `environment`, `os_family`, `firewall_backend`, `vlan_id`, `enabled`, `created_at`, `updated_at`
-- `host_tags`: `host_id`, `tag_id`
+- `host_tags`: `host_id`, `tag_id` — many-to-many relationship for assigning tags to hosts
 - `host_interfaces`: `host_id`, `name`, `role`, `ip_address`, `cidr`, `vlan_id`, `is_primary`, `enabled`, `created_at`
 
 ### Policies
 - `policy_sets`: `name`, `description`, `scope_type` (`TAG|VLAN|HOST_LIST`), `scope_tag_id`, `scope_vlan_id`, `created_by`, `created_at`
-- `policy_set_hosts`: `policy_set_id`, `host_id`
+- `policy_set_hosts`: `policy_set_id`, `host_id` — only used when `scope_type=HOST_LIST`
 - `policy_versions`: `policy_set_id`, `version_number`, `status`, `change_summary`, `created_by`, timestamps for submit/approve/reject, interface scope fields, `is_high_risk`
 - `policy_rules`: rule definition + interface override fields + `direction` (`IN|OUT|BOTH`)
 
 ### Deployments & execution
-- `deployments`: `policy_version_id`, `mode`, `target_query`, `target_count`, `status`, approvals fields, `canary_size`, `batch_size`, timestamps
-- `deployment_hosts`: per-host status + outcome fields
-- `deployment_artifacts`: bundle metadata (`bundle_path`, `bundle_hash`, `manifest`)
-- `execution_runs`: executor command, stdout/stderr paths, exit code, status/timestamps
+- `deployments`: `policy_version_id` (must be APPROVED), `mode` (`CANARY|PROGRESSIVE|FULL`), `target_query` (JSONB with `tags[]`, `vlans[]`, `hosts[]`), `target_count`, `status`, approvals fields, `canary_size`, `batch_size`, timestamps
+- `deployment_hosts`: per-host status + outcome fields (`status`, `started_at`, `finished_at`, `message`, `applied_hash`, `rollback_performed`)
+- `deployment_artifacts`: bundle metadata (`bundle_path`, `bundle_hash`, `manifest` JSONB)
+- `execution_runs`: `executor_type` (`ansible_cli` or `ssh_direct`), command, stdout/stderr paths, exit code, status/timestamps
 
 ### Auditing
 - `audit_events`: `actor_user_id`, `action`, `entity_type`, `entity_id`, `timestamp`, `ip_address`, `metadata`
 
 ### Secrets / SSH
 - `ssh_credentials`: `name`, `username`, secret references, `scope_type` (`GLOBAL|TAG|VLAN|HOST`), `scope_id`, `created_at`
+
+### System Settings
+- `system_settings`: `key` (primary key), `value`, `description`, `updated_at` — Stores executor preference and other system-wide settings
 
 ---
 
@@ -237,13 +242,17 @@ Option B: if you already have LDAP configured and AD group mappings, just login 
 - In the UI: **Admin → LDAP Settings**, then **Admin → AD Group → Role map**
 - Ensure at least one of your AD groups maps to `admin` or `operator`
 
-### 3) Configure SSH credentials (for deployments)
-- In the UI: **Admin → SSH Credentials**
-- Create a **GLOBAL** SSH credential (username + private key PEM)
+### 3) Configure deployment settings
+- In the UI: **Admin → Deployment Executor** — Choose between Ansible (recommended) or SSH Direct
+- In the UI: **Admin → SSH Credentials** — Create a **GLOBAL** SSH credential
+  - **Important**: Use a **sudo-capable account** (not root). Most modern Linux systems disable root SSH login.
+  - The account must have passwordless sudo access to firewall commands (`nft`, `iptables`, `iptables-restore`)
+  - The system automatically uses `sudo` for all privileged operations
 
 ### 4) Add inventory
-- Add hosts (hostname + mgmt IP)
-- Add interfaces per host (name + role such as `data`, `management`, etc.)
+- **Tags & VLANs**: Create tags and VLANs first (Inventory → Tags/VLANs tabs)
+- **Hosts**: Add hosts with hostname, management IP, assign VLAN and tags
+- **Interfaces**: Add interfaces per host (name + role such as `data`, `management`, etc.)
 
 ### 5) Create & approve a policy version
 - Create a **Policy Set**
@@ -251,15 +260,39 @@ Option B: if you already have LDAP configured and AD group mappings, just login 
 - Approver/Admin approves in **Approvals**
 
 ### 6) Deploy
-- Create a Deployment targeting hosts/tags/vlans
-- Start it (creates bundle + runs ansible playbook)
+- Create a Deployment targeting hosts/tags/vlans (policy version must be APPROVED)
+- Start it (creates bundle + runs selected executor: Ansible or SSH Direct)
 - Review results in **Deployments** and logs via execution logs endpoint
 
 ---
 
+## Deployment Executors
+
+Segmentra supports two deployment executors, selectable in Admin settings:
+
+### Ansible (Default, Recommended)
+- Uses Ansible playbook for deployments
+- Better error handling and automatic rollback
+- Parallel execution across hosts
+- Requires Ansible container (`segmentra-ansible-runner`)
+- Uses `become: true` (sudo) for all privileged operations
+
+### SSH Direct
+- Lightweight direct SSH/SCP execution
+- No Ansible dependency
+- Requires `ssh` and `scp` commands on the API host
+- Uses `sudo` prefix for all privileged operations
+- Suitable for simpler environments or when Ansible is not available
+
+Both executors:
+- Support sudo-capable accounts (not root)
+- Create backups before applying rules
+- Attempt rollback on failure
+- Work with nftables and iptables
+
 ## Notes / current v1 limitations
-- UI is intentionally minimal (focused on wiring end-to-end).
 - Canary/progressive orchestration and advanced guardrails are stubbed at the API level (basic deployment flow is implemented).
 - Baseline mgmt SSH CIDR is currently hardcoded (`10.0.0.0/8`) in v1 rendering; this should move to admin config.
+- SSH Direct executor runs sequentially (one host at a time); Ansible runs in parallel.
 
 

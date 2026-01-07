@@ -2,7 +2,8 @@ FROM node:20-bookworm-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends docker.io && rm -rf /var/lib/apt/lists/*
+# Install docker.io for Ansible executor, openssh-client for SSH executor
+RUN apt-get update && apt-get install -y --no-install-recommends docker.io openssh-client && rm -rf /var/lib/apt/lists/*
 
 COPY package.json /app/package.json
 COPY apps /app/apps

@@ -27,6 +27,8 @@ services:
       SEGMENTRA_KEK_B64: ""
       BUNDLES_DIR: /bundles
       ANSIBLE_RUNNER_CONTAINER: segmentra-ansible-runner
+      # Optional: enable bootstrap for first-time setup
+      # SEGMENTRA_BOOTSTRAP_TOKEN: "your-bootstrap-token-here"
     ports:
       - "8080:8080"
     depends_on:
@@ -34,7 +36,8 @@ services:
       - segmentra-ansible-runner
     volumes:
       - segmentra_bundles:/bundles
-      # optional: allow API container to exec into runner
+      # Required for Ansible executor: allows API container to exec into runner
+      # Not needed if using SSH Direct executor only
       - /var/run/docker.sock:/var/run/docker.sock
 
 volumes:
