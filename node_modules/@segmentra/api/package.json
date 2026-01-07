@@ -1,0 +1,32 @@
+{
+  "name": "@segmentra/api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch --enable-source-maps dist/index.js",
+    "build": "npm run build -w @segmentra/shared && npm run build -w @segmentra/compiler && npm run build -w @segmentra/executor && tsc -p tsconfig.json",
+    "lint": "echo \"(lint todo)\""
+  },
+  "dependencies": {
+    "@segmentra/compiler": "file:../../packages/compiler",
+    "@segmentra/executor": "file:../../packages/executor",
+    "@segmentra/shared": "file:../../packages/shared",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "ldapts": "^7.3.3",
+    "pg": "^8.11.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.6",
+    "@types/pg": "^8.11.10",
+    "@types/node": "^20.11.30",
+    "typescript": "^5.4.5"
+  }
+}
+
+

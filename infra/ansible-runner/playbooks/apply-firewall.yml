@@ -1,0 +1,93 @@
+- name: Segmentra apply firewall rules
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: false
+  vars:
+    segmentra_backup_dir: "/var/backups/segmentra"
+    segmentra_bundle_dir: "{{ lookup('env', 'SEGMENTRA_BUNDLE_DIR') | default('/bundles', true) }}"
+    segmentra_policy_file: "{{ segmentra_policy_file | default(lookup('env', 'SEGMENTRA_POLICY_FILE') | default('', true), true) }}"
+
+  tasks:
+    - name: Generate timestamp
+      set_fact:
+        segmentra_ts: "{{ lookup('pipe', 'date +%Y%m%d%H%M%S') }}"
+
+    - name: Ensure backup directory exists
+      become: true
+      file:
+        path: "{{ segmentra_backup_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Detect nftables
+      become: true
+      shell: "command -v nft >/dev/null 2>&1 && echo nft || echo no"
+      register: nft_detect
+      changed_when: false
+
+    - name: Backup nftables config if present
+      when: nft_detect.stdout == 'nft'
+      become: true
+      shell: |
+        if [ -f /etc/nftables.conf ]; then
+          cp /etc/nftables.conf "{{ segmentra_backup_dir }}/nftables.conf.{{ segmentra_ts }}"
+        fi
+        nft list ruleset > "{{ segmentra_backup_dir }}/nft.ruleset.{{ segmentra_ts }}" || true
+      changed_when: true
+
+    - name: Backup iptables rules
+      when: nft_detect.stdout != 'nft'
+      become: true
+      shell: |
+        iptables-save > "{{ segmentra_backup_dir }}/iptables.{{ segmentra_ts }}"
+      changed_when: true
+
+    - name: Fail if policy file not provided
+      fail:
+        msg: "SEGMENTRA_POLICY_FILE is required"
+      when: segmentra_policy_file == ""
+
+    - name: Copy policy file to host
+      become: true
+      copy:
+        src: "{{ segmentra_policy_file }}"
+        dest: "/etc/segmentra.policy"
+        mode: "0600"
+
+    - name: Apply firewall rules with rollback on failure
+      block:
+        - name: Apply nftables ruleset from file
+          when: nft_detect.stdout == 'nft' and segmentra_policy_file.endswith('.nft')
+          become: true
+          shell: "nft -f /etc/segmentra.policy"
+
+        - name: Apply iptables rules from file (restore)
+          when: nft_detect.stdout != 'nft' and segmentra_policy_file.endswith('.iptables')
+          become: true
+          shell: "iptables-restore < /etc/segmentra.policy"
+      rescue:
+        - name: Roll back nftables from last backup
+          when: nft_detect.stdout == 'nft'
+          become: true
+          shell: |
+            latest=$(ls -1 "{{ segmentra_backup_dir }}/nft.ruleset."* 2>/dev/null | tail -n 1)
+            if [ -n "${latest}" ]; then
+              nft -f "${latest}" || true
+            fi
+          changed_when: true
+
+        - name: Roll back iptables from last backup
+          when: nft_detect.stdout != 'nft'
+          become: true
+          shell: |
+            latest=$(ls -1 "{{ segmentra_backup_dir }}/iptables."* 2>/dev/null | tail -n 1)
+            if [ -n "${latest}" ]; then
+              iptables-restore < "${latest}" || true
+            fi
+          changed_when: true
+
+        - name: Fail after rollback
+          fail:
+            msg: "Firewall apply failed; rollback attempted"
+
+

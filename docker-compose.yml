@@ -1,0 +1,44 @@
+services:
+  segmentra-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: segmentra
+      POSTGRES_PASSWORD: segmentra
+      POSTGRES_DB: segmentra
+    ports:
+      - "15432:5432"
+    volumes:
+      - segmentra_pgdata:/var/lib/postgresql/data
+
+  segmentra-ansible-runner:
+    build:
+      context: ./infra/ansible-runner
+    volumes:
+      - segmentra_bundles:/bundles
+    command: ["sleep", "infinity"]
+
+  segmentra-app:
+    build:
+      context: .
+      dockerfile: ./infra/app/Dockerfile
+    environment:
+      DATABASE_URL: postgres://segmentra:segmentra@segmentra-db:5432/segmentra
+      JWT_SECRET: dev-only-change-me
+      SEGMENTRA_KEK_B64: ""
+      BUNDLES_DIR: /bundles
+      ANSIBLE_RUNNER_CONTAINER: segmentra-ansible-runner
+    ports:
+      - "8080:8080"
+    depends_on:
+      - segmentra-db
+      - segmentra-ansible-runner
+    volumes:
+      - segmentra_bundles:/bundles
+      # optional: allow API container to exec into runner
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  segmentra_pgdata:
+  segmentra_bundles:
+
+

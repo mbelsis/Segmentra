@@ -1,0 +1,33 @@
+{
+  "name": "segmentra",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w apps/api",
+    "build": "npm run build -ws",
+    "db:migrate": "npm run migrate:up -w @segmentra/db",
+    "db:seed": "npm run seed -w @segmentra/db",
+    "lint": "npm run lint -ws",
+    "format": "npm run format -ws"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mbelsis/Segmentra.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/mbelsis/Segmentra/issues"
+  },
+  "homepage": "https://github.com/mbelsis/Segmentra#readme"
+}

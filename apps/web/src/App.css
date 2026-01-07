@@ -1,0 +1,56 @@
+#root {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+.appShell {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 16px;
+}
+
+.nav {
+  border: 1px solid #3333;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.nav a {
+  display: block;
+  padding: 6px 8px;
+  border-radius: 6px;
+  text-decoration: none;
+}
+
+.nav a.active {
+  background: #646cff22;
+}
+
+.card {
+  border: 1px solid #3333;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  text-align: left;
+  border-bottom: 1px solid #3333;
+  padding: 6px 8px;
+}
+
+input, select, textarea {
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid #3333;
+}
+
+button {
+  padding: 6px 10px;
+  border-radius: 6px;
+}
