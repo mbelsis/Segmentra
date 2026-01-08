@@ -300,6 +300,167 @@ hostsRouter.post('/bulk/assign-tag', async (req, res) => {
         client.release();
     }
 });
+hostsRouter.post('/bulk/import', async (req, res) => {
+    const body = z.object({
+        csvData: z.string().min(1)
+    }).safeParse(req.body);
+    if (!body.success)
+        return res.status(400).json({ error: 'invalid_body' });
+    // Parse CSV (simple parser - handles quoted fields)
+    function parseCSV(csvText) {
+        const lines = [];
+        const rows = csvText.split(/\r?\n/).filter(line => line.trim());
+        for (const line of rows) {
+            const fields = [];
+            let current = '';
+            let inQuotes = false;
+            for (let i = 0; i < line.length; i++) {
+                const char = line[i];
+                if (char === '"') {
+                    if (inQuotes && line[i + 1] === '"') {
+                        current += '"';
+                        i++;
+                    }
+                    else {
+                        inQuotes = !inQuotes;
+                    }
+                }
+                else if (char === ',' && !inQuotes) {
+                    fields.push(current.trim());
+                    current = '';
+                }
+                else {
+                    current += char;
+                }
+            }
+            fields.push(current.trim());
+            lines.push(fields);
+        }
+        return lines;
+    }
+    const rows = parseCSV(body.data.csvData);
+    if (rows.length < 2) {
+        return res.status(400).json({ error: 'csv_too_short', message: 'CSV must have at least a header row and one data row' });
+    }
+    const header = rows[0].map(h => h.toLowerCase().trim());
+    const dataRows = rows.slice(1);
+    // Expected columns (flexible - can have different names)
+    const hostnameIdx = header.findIndex(h => h.includes('hostname') || h.includes('host'));
+    const ipIdx = header.findIndex(h => h.includes('ip') || h.includes('mgmt') || h.includes('management'));
+    const sshPortIdx = header.findIndex(h => h.includes('ssh') && h.includes('port'));
+    const vlanIdx = header.findIndex(h => h.includes('vlan'));
+    const tagIdx = header.findIndex(h => h.includes('tag'));
+    const backendIdx = header.findIndex(h => h.includes('backend') || h.includes('firewall'));
+    const enabledIdx = header.findIndex(h => h.includes('enabled'));
+    if (hostnameIdx === -1) {
+        return res.status(400).json({ error: 'missing_hostname_column', message: 'CSV must have a hostname column' });
+    }
+    const results = [];
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        // Get all VLANs and tags for lookup
+        const vlanRes = await client.query(`SELECT id, name, vlan_tag FROM vlans`);
+        const tagRes = await client.query(`SELECT id, name FROM tags`);
+        const vlanMap = new Map(); // name -> id
+        const vlanTagMap = new Map(); // tag number -> id
+        for (const v of vlanRes.rows) {
+            vlanMap.set(v.name.toLowerCase(), v.id);
+            vlanTagMap.set(String(v.vlan_tag), v.id);
+        }
+        const tagMap = new Map(); // name -> id
+        for (const t of tagRes.rows) {
+            tagMap.set(t.name.toLowerCase(), t.id);
+        }
+        for (let i = 0; i < dataRows.length; i++) {
+            const row = dataRows[i];
+            const hostname = row[hostnameIdx]?.trim();
+            if (!hostname) {
+                results.push({ hostname: `Row ${i + 2}`, success: false, error: 'Missing hostname' });
+                continue;
+            }
+            try {
+                const mgmtIp = ipIdx >= 0 ? row[ipIdx]?.trim() || null : null;
+                const sshPort = sshPortIdx >= 0 ? (row[sshPortIdx]?.trim() ? parseInt(row[sshPortIdx].trim(), 10) : 22) : 22;
+                if (sshPort < 1 || sshPort > 65535) {
+                    results.push({ hostname, success: false, error: `Invalid SSH port: ${sshPort}` });
+                    continue;
+                }
+                // Resolve VLAN
+                let vlanId = null;
+                if (vlanIdx >= 0 && row[vlanIdx]?.trim()) {
+                    const vlanValue = row[vlanIdx].trim();
+                    vlanId = vlanMap.get(vlanValue.toLowerCase()) || vlanTagMap.get(vlanValue) || null;
+                    if (!vlanId) {
+                        results.push({ hostname, success: false, error: `VLAN not found: ${vlanValue}` });
+                        continue;
+                    }
+                }
+                // Resolve tags
+                const tagIds = [];
+                const missingTags = [];
+                if (tagIdx >= 0 && row[tagIdx]?.trim()) {
+                    const tagValues = row[tagIdx].split(',').map(t => t.trim()).filter(Boolean);
+                    for (const tagValue of tagValues) {
+                        const tagId = tagMap.get(tagValue.toLowerCase());
+                        if (tagId) {
+                            tagIds.push(tagId);
+                        }
+                        else {
+                            missingTags.push(tagValue);
+                        }
+                    }
+                }
+                // Warn about missing tags but don't fail the import
+                if (missingTags.length > 0) {
+                    // Continue with import, but note missing tags in a warning (we'll add this to results if needed)
+                }
+                const firewallBackend = backendIdx >= 0 ? (row[backendIdx]?.trim().toLowerCase() || 'auto') : 'auto';
+                if (!['nftables', 'iptables', 'auto'].includes(firewallBackend)) {
+                    results.push({ hostname, success: false, error: `Invalid firewall backend: ${firewallBackend}` });
+                    continue;
+                }
+                const enabled = enabledIdx >= 0 ? (row[enabledIdx]?.trim().toLowerCase() !== 'false' && row[enabledIdx]?.trim().toLowerCase() !== '0') : true;
+                // Insert host
+                const hostRes = await client.query(`INSERT INTO hosts (hostname, mgmt_ip, ssh_port, firewall_backend, vlan_id, enabled)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (hostname) DO UPDATE SET
+             mgmt_ip = EXCLUDED.mgmt_ip,
+             ssh_port = EXCLUDED.ssh_port,
+             firewall_backend = EXCLUDED.firewall_backend,
+             vlan_id = EXCLUDED.vlan_id,
+             enabled = EXCLUDED.enabled,
+             updated_at = now()
+           RETURNING id`, [hostname, mgmtIp, sshPort, firewallBackend, vlanId, enabled]);
+                const hostId = hostRes.rows[0].id;
+                // Update tags (delete old, add new)
+                await client.query(`DELETE FROM host_tags WHERE host_id=$1`, [hostId]);
+                for (const tagId of tagIds) {
+                    await client.query(`INSERT INTO host_tags (host_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [hostId, tagId]);
+                }
+                results.push({ hostname, success: true });
+            }
+            catch (e) {
+                results.push({ hostname, success: false, error: e.message || String(e) });
+            }
+        }
+        await client.query('COMMIT');
+        res.json({
+            imported: results.filter(r => r.success).length,
+            failed: results.filter(r => !r.success).length,
+            results
+        });
+    }
+    catch (e) {
+        await client.query('ROLLBACK');
+        // eslint-disable-next-line no-console
+        console.error(e);
+        res.status(500).json({ error: 'import_failed' });
+    }
+    finally {
+        client.release();
+    }
+});
 hostsRouter.post('/bulk/set-enabled', async (req, res) => {
     const parsed = bulkOperationSchema.extend({
         enabled: z.boolean()

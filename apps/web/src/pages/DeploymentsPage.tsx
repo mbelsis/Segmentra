@@ -134,12 +134,43 @@ export function DeploymentsPage() {
     const colors: Record<string, string> = {
       QUEUED: '#888',
       RUNNING: '#2196F3',
+      PAUSED: '#FF9800',
       SUCCEEDED: '#4CAF50',
       FAILED: '#F44336',
       PARTIAL: '#FF9800',
       CANCELLED: '#999'
     };
     return <span style={{ color: colors[status] || '#000', fontWeight: 'bold' }}>{status}</span>;
+  }
+
+  async function pauseDeployment(deploymentId: string) {
+    if (!confirm('Pause this deployment? You can resume it later.')) return;
+    try {
+      await api.pauseDeployment(deploymentId);
+      loadData();
+    } catch (e: any) {
+      setError(String(e.message || e));
+    }
+  }
+
+  async function resumeDeployment(deploymentId: string) {
+    if (!confirm('Resume this deployment?')) return;
+    try {
+      await api.resumeDeployment(deploymentId);
+      loadData();
+    } catch (e: any) {
+      setError(String(e.message || e));
+    }
+  }
+
+  async function stopDeployment(deploymentId: string) {
+    if (!confirm('Stop this deployment? This will cancel all pending hosts and cannot be undone.')) return;
+    try {
+      await api.stopDeployment(deploymentId);
+      loadData();
+    } catch (e: any) {
+      setError(String(e.message || e));
+    }
   }
 
   return (
@@ -167,13 +198,82 @@ export function DeploymentsPage() {
                 Use an APPROVED policy version. Get the ID from the Policy Sets page.
               </small>
             </div>
-            <div className="form-group">
-              <label>Deployment Mode *</label>
+            <div className="form-group" style={{ position: 'relative' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                Deployment Mode *
+                <span 
+                  style={{ 
+                    position: 'relative',
+                    cursor: 'help',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    width: '18px',
+                    height: '18px',
+                    borderRadius: '50%',
+                    background: '#646cff',
+                    color: 'white',
+                    fontSize: '12px',
+                    fontWeight: 'bold'
+                  }}
+                  onMouseEnter={(e) => {
+                    const tooltip = document.getElementById('deployment-mode-tooltip');
+                    if (tooltip) {
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      tooltip.style.display = 'block';
+                      tooltip.style.left = `${rect.right + 10}px`;
+                      tooltip.style.top = `${rect.top - 10}px`;
+                    }
+                  }}
+                  onMouseLeave={() => {
+                    const tooltip = document.getElementById('deployment-mode-tooltip');
+                    if (tooltip) tooltip.style.display = 'none';
+                  }}
+                >
+                  ?
+                </span>
+              </label>
               <select value={formMode} onChange={(e) => setFormMode(e.target.value as any)}>
                 <option value="CANARY">Canary (small subset first)</option>
                 <option value="PROGRESSIVE">Progressive (batches)</option>
                 <option value="FULL">Full (all targets)</option>
               </select>
+              <div
+                id="deployment-mode-tooltip"
+                style={{
+                  display: 'none',
+                  position: 'fixed',
+                  background: '#333',
+                  color: 'white',
+                  padding: '12px 16px',
+                  borderRadius: '6px',
+                  fontSize: '0.85em',
+                  maxWidth: '400px',
+                  zIndex: 10000,
+                  boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+                  pointerEvents: 'none',
+                  lineHeight: '1.5'
+                }}
+              >
+                <div style={{ fontWeight: 'bold', marginBottom: '8px', borderBottom: '1px solid #555', paddingBottom: '4px' }}>
+                  Deployment Modes:
+                </div>
+                <div style={{ marginBottom: '8px' }}>
+                  <strong>CANARY:</strong> Deploys to a small subset of hosts first (specified by Canary Size). 
+                  Use this to test the policy on a few hosts before rolling out to all targets. 
+                  Ideal for validating changes before full deployment.
+                </div>
+                <div style={{ marginBottom: '8px' }}>
+                  <strong>PROGRESSIVE:</strong> Deploys in batches (specified by Batch Size). 
+                  Each batch is deployed sequentially, allowing you to monitor progress and stop if issues arise. 
+                  Best for gradual rollouts across large fleets.
+                </div>
+                <div>
+                  <strong>FULL:</strong> Deploys to all target hosts simultaneously. 
+                  Fastest deployment method but provides less control. 
+                  Use when you're confident the policy is safe and tested.
+                </div>
+              </div>
             </div>
             {formMode === 'CANARY' && (
               <div className="form-group">
@@ -309,10 +409,24 @@ export function DeploymentsPage() {
                 <td>{getStatusBadge(d.status)}</td>
                 <td>{new Date(d.created_at).toLocaleString()}</td>
                 <td>
-                  {d.status === 'QUEUED' && (
-                    <button onClick={() => startDeployment(d.id)} className="btn-small btn-primary">Start</button>
-                  )}
-                  <button onClick={() => navigate(`/deployment/${d.id}`)} className="btn-small">View</button>
+                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                    {d.status === 'QUEUED' && (
+                      <button onClick={() => startDeployment(d.id)} className="btn-small btn-primary">Start</button>
+                    )}
+                    {d.status === 'RUNNING' && (
+                      <>
+                        <button onClick={() => pauseDeployment(d.id)} className="btn-small" style={{ background: '#FF9800', color: 'white' }}>Pause</button>
+                        <button onClick={() => stopDeployment(d.id)} className="btn-small" style={{ background: '#F44336', color: 'white' }}>Stop</button>
+                      </>
+                    )}
+                    {d.status === 'PAUSED' && (
+                      <>
+                        <button onClick={() => resumeDeployment(d.id)} className="btn-small btn-primary">Resume</button>
+                        <button onClick={() => stopDeployment(d.id)} className="btn-small" style={{ background: '#F44336', color: 'white' }}>Stop</button>
+                      </>
+                    )}
+                    <button onClick={() => navigate(`/deployment/${d.id}`)} className="btn-small">View</button>
+                  </div>
                 </td>
               </tr>
             ))}

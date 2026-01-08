@@ -35,6 +35,22 @@ app.use('/api/troubleshoot', troubleshootRouter);
 app.listen(env.PORT, () => {
   // eslint-disable-next-line no-console
   console.log(`Segmentra API listening on :${env.PORT}`);
+  
+  // Start periodic timeout check for stale host deployments (every 2 minutes)
+  setInterval(async () => {
+    try {
+      // Import the function dynamically to avoid circular dependencies
+      const { checkAndTimeoutStaleHosts } = await import('./routes/deployments.js');
+      const timeoutCount = await checkAndTimeoutStaleHosts();
+      if (timeoutCount > 0) {
+        // eslint-disable-next-line no-console
+        console.log(`[Timeout Check] Timed out ${timeoutCount} stale host deployment(s)`);
+      }
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[Timeout Check] Error checking stale hosts:', e);
+    }
+  }, 2 * 60 * 1000); // Check every 2 minutes
 });
 
 

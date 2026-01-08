@@ -24,12 +24,12 @@ const ruleSchema = z.object({
     interfaceScopeNames: z.array(z.string()).optional().nullable()
 });
 policyRulesRouter.post('/policy-versions/:versionId/rules', async (req, res) => {
-    // Check if version is editable (only DRAFT status can be edited)
+    // Check if version is editable (DRAFT or REJECTED status can be edited)
     const versionRes = await pool.query(`SELECT status FROM policy_versions WHERE id=$1`, [req.params.versionId]);
     if (!versionRes.rows[0])
         return res.status(404).json({ error: 'version_not_found' });
-    if (versionRes.rows[0].status !== 'DRAFT') {
-        return res.status(400).json({ error: 'version_not_editable', message: 'Only DRAFT versions can be edited' });
+    if (versionRes.rows[0].status !== 'DRAFT' && versionRes.rows[0].status !== 'REJECTED') {
+        return res.status(400).json({ error: 'version_not_editable', message: 'Only DRAFT or REJECTED versions can be edited' });
     }
     const parsed = ruleSchema.safeParse(req.body);
     if (!parsed.success)
@@ -58,14 +58,14 @@ policyRulesRouter.post('/policy-versions/:versionId/rules', async (req, res) => 
     res.status(201).json({ rule: rows[0] });
 });
 policyRulesRouter.put('/policy-rules/:ruleId', async (req, res) => {
-    // Check if version is editable (only DRAFT status can be edited)
+    // Check if version is editable (DRAFT or REJECTED status can be edited)
     const versionRes = await pool.query(`SELECT pv.status FROM policy_versions pv
      JOIN policy_rules pr ON pr.policy_version_id = pv.id
      WHERE pr.id=$1`, [req.params.ruleId]);
     if (!versionRes.rows[0])
         return res.status(404).json({ error: 'rule_not_found' });
-    if (versionRes.rows[0].status !== 'DRAFT') {
-        return res.status(400).json({ error: 'version_not_editable', message: 'Only DRAFT versions can be edited' });
+    if (versionRes.rows[0].status !== 'DRAFT' && versionRes.rows[0].status !== 'REJECTED') {
+        return res.status(400).json({ error: 'version_not_editable', message: 'Only DRAFT or REJECTED versions can be edited' });
     }
     const parsed = ruleSchema.partial().safeParse(req.body);
     if (!parsed.success)
@@ -107,14 +107,14 @@ policyRulesRouter.put('/policy-rules/:ruleId', async (req, res) => {
     res.json({ rule: rows[0] });
 });
 policyRulesRouter.delete('/policy-rules/:ruleId', async (req, res) => {
-    // Check if version is editable (only DRAFT status can be edited)
+    // Check if version is editable (DRAFT or REJECTED status can be edited)
     const versionRes = await pool.query(`SELECT pv.status FROM policy_versions pv
      JOIN policy_rules pr ON pr.policy_version_id = pv.id
      WHERE pr.id=$1`, [req.params.ruleId]);
     if (!versionRes.rows[0])
         return res.status(404).json({ error: 'rule_not_found' });
-    if (versionRes.rows[0].status !== 'DRAFT') {
-        return res.status(400).json({ error: 'version_not_editable', message: 'Only DRAFT versions can be edited' });
+    if (versionRes.rows[0].status !== 'DRAFT' && versionRes.rows[0].status !== 'REJECTED') {
+        return res.status(400).json({ error: 'version_not_editable', message: 'Only DRAFT or REJECTED versions can be edited' });
     }
     const { rowCount } = await pool.query(`DELETE FROM policy_rules WHERE id=$1`, [req.params.ruleId]);
     if (!rowCount)

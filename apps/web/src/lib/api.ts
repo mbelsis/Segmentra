@@ -95,6 +95,10 @@ export const api = {
   deployment: (deploymentId: string) => request<{ deployment: any }>(`/deployments/${deploymentId}`),
   createDeployment: (b: any) => request<{ deployment: any }>('/deployments', { method: 'POST', body: JSON.stringify(b) }),
   startDeployment: (deploymentId: string) => request<any>(`/deployments/${deploymentId}/start`, { method: 'POST' }),
+  pauseDeployment: (deploymentId: string) => request<{ ok: boolean }>(`/deployments/${deploymentId}/pause`, { method: 'POST' }),
+  resumeDeployment: (deploymentId: string) => request<{ ok: boolean }>(`/deployments/${deploymentId}/resume`, { method: 'POST' }),
+  stopDeployment: (deploymentId: string) => request<{ ok: boolean }>(`/deployments/${deploymentId}/stop`, { method: 'POST' }),
+  cancelDeployment: (deploymentId: string) => request<{ ok: boolean }>(`/deployments/${deploymentId}/cancel`, { method: 'POST' }),
   deploymentHosts: (deploymentId: string) => request<{ hosts: any[] }>(`/deployments/${deploymentId}/hosts`),
 
   audit: (params?: { actor?: string; action?: string; entityType?: string; from?: string; to?: string }) => {

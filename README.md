@@ -114,9 +114,14 @@ Base URL: `http://localhost:8080/api`
 - `GET /deployments/:deploymentId/hosts`
 - `GET /deployments/:deploymentId/artifacts`
 - `POST /deployments/:deploymentId/start` — Creates bundle + runs executor (Ansible or SSH Direct, based on admin setting)
-- `POST /deployments/:deploymentId/cancel` (best-effort v1)
+- `POST /deployments/:deploymentId/pause` — Pause a running deployment (marks RUNNING hosts as PAUSED, leaves PENDING hosts for resume)
+- `POST /deployments/:deploymentId/resume` — Resume a paused deployment (marks PAUSED hosts back to RUNNING)
+- `POST /deployments/:deploymentId/stop` — Stop a running or paused deployment (marks all PENDING/RUNNING/PAUSED hosts as SKIPPED)
+- `POST /deployments/:deploymentId/cancel` (best-effort v1, deprecated - use `/stop` instead)
 - `POST /deployments/:deploymentId/retry-failed` (v1 helper)
 - `GET /executions/:executionId/logs`
+
+**Note**: Host deployments automatically timeout after 10 minutes if they remain in `RUNNING` status. Timed-out hosts are marked as `FAILED` with the message "Deployment timeout: Host did not respond within 10 minutes". The timeout check runs automatically every 2 minutes and also when fetching deployments or deployment hosts.
 
 ### Audit
 - `GET /audit?actor=&action=&entityType=&from=&to=` (returns last 500)
