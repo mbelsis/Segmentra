@@ -11,3 +11,4 @@ INSERT INTO system_settings (key, value, description)
 VALUES ('deployment_executor', 'ansible', 'Deployment executor type: ansible or ssh')
 ON CONFLICT (key) DO NOTHING;
 
+

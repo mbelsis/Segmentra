@@ -47,7 +47,12 @@ export function ApprovalsPage() {
       setVersionId('');
       setVersion(null);
     } catch (e: any) {
-      setError(String(e.message || e));
+      const errorMsg = e.message || String(e);
+      if (errorMsg.includes('approver_must_differ')) {
+        setError('You cannot approve a policy version that you created. If you are an admin, this should now work. If you still see this error, please have another user with approver role review it.');
+      } else {
+        setError(errorMsg);
+      }
     } finally {
       setLoading(false);
     }

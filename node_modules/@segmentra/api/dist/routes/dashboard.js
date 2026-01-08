@@ -63,10 +63,10 @@ dashboardRouter.get('/dashboard/stats', async (_req, res) => {
        d.started_at,
        ps.name as policy_set_name,
        pv.version_number,
-       COUNT(DISTINCT dh.id) as total_hosts,
-       COUNT(DISTINCT CASE WHEN dh.status = 'SUCCEEDED' THEN dh.id END) as succeeded_hosts,
-       COUNT(DISTINCT CASE WHEN dh.status = 'FAILED' THEN dh.id END) as failed_hosts,
-       COUNT(DISTINCT CASE WHEN dh.status = 'RUNNING' THEN dh.id END) as running_hosts
+       COUNT(DISTINCT dh.host_id) as total_hosts,
+       COUNT(DISTINCT CASE WHEN dh.status = 'SUCCEEDED' THEN dh.host_id END) as succeeded_hosts,
+       COUNT(DISTINCT CASE WHEN dh.status = 'FAILED' THEN dh.host_id END) as failed_hosts,
+       COUNT(DISTINCT CASE WHEN dh.status = 'RUNNING' THEN dh.host_id END) as running_hosts
      FROM deployments d
      LEFT JOIN policy_versions pv ON d.policy_version_id = pv.id
      LEFT JOIN policy_sets ps ON pv.policy_set_id = ps.id

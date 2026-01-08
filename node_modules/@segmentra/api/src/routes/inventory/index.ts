@@ -13,3 +13,4 @@ inventoryRouter.use('/vlans', vlansRouter);
 inventoryRouter.use('/', interfacesRouter);
 
 
+

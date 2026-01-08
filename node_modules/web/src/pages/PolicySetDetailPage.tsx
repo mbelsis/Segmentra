@@ -71,6 +71,27 @@ export function PolicySetDetailPage() {
     }
   }
 
+  async function submitForApproval(versionId: string) {
+    if (!confirm('Submit this policy version for approval?')) return;
+    try {
+      await api.submitApproval(versionId);
+      loadData();
+    } catch (e: any) {
+      setError(String(e.message || e));
+    }
+  }
+
+  async function cloneVersion(versionId: string) {
+    if (!confirm('Clone this policy version? This will create a new DRAFT version with all the same rules.')) return;
+    try {
+      const v = await api.cloneVersion(versionId);
+      loadData();
+      navigate(`/policy-version/${v.version.id}`);
+    } catch (e: any) {
+      setError(String(e.message || e));
+    }
+  }
+
   if (!policySetId) return <div className="error">Missing policy set ID</div>;
   if (!policySet) return <div>Loading...</div>;
 
@@ -123,49 +144,65 @@ export function PolicySetDetailPage() {
             </tr>
           </thead>
           <tbody>
-            {versions.map((v) => (
-              <tr key={v.id}>
-                <td><strong>v{v.version_number}</strong></td>
-                <td>
-                  <code
-                    onClick={() => {
-                      navigator.clipboard.writeText(v.id);
-                      alert('Version ID copied to clipboard!');
-                    }}
-                    style={{ 
-                      cursor: 'pointer', 
-                      background: '#f0f0f0', 
-                      padding: '4px 8px', 
-                      borderRadius: 4,
-                      fontSize: '0.85em',
-                      userSelect: 'all'
-                    }}
-                    title="Click to copy"
-                  >
-                    {v.id}
-                  </code>
-                </td>
-                <td>{getStatusBadge(v.status)}</td>
-                <td>
-                  <code>{v.interface_scope_type}</code>
-                  {v.interface_scope_roles && v.interface_scope_roles.length > 0 && (
-                    <div style={{ fontSize: '0.85em', color: '#666', marginTop: 4 }}>
-                      Roles: {v.interface_scope_roles.join(', ')}
+            {versions.map((v) => {
+              const isDraft = v.status === 'DRAFT';
+              const isApproved = v.status === 'APPROVED';
+              // Debug: log status to console
+              if (v.status === 'APPROVED' || v.status === 'Approved') {
+                console.log('Found APPROVED version:', v.id, 'status:', v.status);
+              }
+              return (
+                <tr key={v.id}>
+                  <td><strong>v{v.version_number}</strong></td>
+                  <td>
+                    <code
+                      onClick={() => {
+                        navigator.clipboard.writeText(v.id);
+                        alert('Version ID copied to clipboard!');
+                      }}
+                      style={{ 
+                        cursor: 'pointer', 
+                        background: '#f0f0f0', 
+                        padding: '4px 8px', 
+                        borderRadius: 4,
+                        fontSize: '0.85em',
+                        userSelect: 'all'
+                      }}
+                      title="Click to copy"
+                    >
+                      {v.id}
+                    </code>
+                  </td>
+                  <td>{getStatusBadge(v.status)}</td>
+                  <td>
+                    <code>{v.interface_scope_type}</code>
+                    {v.interface_scope_roles && v.interface_scope_roles.length > 0 && (
+                      <div style={{ fontSize: '0.85em', color: '#666', marginTop: 4 }}>
+                        Roles: {v.interface_scope_roles.join(', ')}
+                      </div>
+                    )}
+                    {v.interface_scope_names && v.interface_scope_names.length > 0 && (
+                      <div style={{ fontSize: '0.85em', color: '#666', marginTop: 4 }}>
+                        Names: {v.interface_scope_names.join(', ')}
+                      </div>
+                    )}
+                  </td>
+                  <td>{v.change_summary || '-'}</td>
+                  <td>{new Date(v.created_at).toLocaleString()}</td>
+                  <td>
+                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                      <button onClick={() => navigate(`/policy-version/${v.id}`)} className="btn-small btn-primary">View Rules</button>
+                      {isDraft && (
+                        <button onClick={() => submitForApproval(v.id)} className="btn-small btn-secondary">Submit for Approval</button>
+                      )}
+                      {isApproved && (
+                        <button onClick={() => cloneVersion(v.id)} className="btn-small btn-secondary">Clone</button>
+                      )}
                     </div>
-                  )}
-                  {v.interface_scope_names && v.interface_scope_names.length > 0 && (
-                    <div style={{ fontSize: '0.85em', color: '#666', marginTop: 4 }}>
-                      Names: {v.interface_scope_names.join(', ')}
-                    </div>
-                  )}
-                </td>
-                <td>{v.change_summary || '-'}</td>
-                <td>{new Date(v.created_at).toLocaleString()}</td>
-                <td>
-                  <button onClick={() => navigate(`/policy-version/${v.id}`)} className="btn-small btn-primary">View Rules</button>
-                </td>
-              </tr>
-            ))}
+                  </td>
+                </tr>
+              );
+            })}
             {versions.length === 0 && (
               <tr>
                 <td colSpan={7} className="empty-state">

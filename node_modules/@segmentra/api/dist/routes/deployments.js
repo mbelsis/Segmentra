@@ -23,8 +23,11 @@ const createDeploymentSchema = z.object({
 });
 async function resolveTargets(q) {
     const ids = new Set();
-    if (q.hosts.length)
-        q.hosts.forEach((x) => ids.add(x));
+    // Only include enabled hosts
+    if (q.hosts.length) {
+        const r = await pool.query(`SELECT id FROM hosts WHERE id = ANY($1::uuid[]) AND enabled=true`, [q.hosts]);
+        r.rows.forEach((x) => ids.add(x.id));
+    }
     if (q.tags.length) {
         const r = await pool.query(`SELECT DISTINCT h.id
        FROM hosts h
@@ -108,10 +111,15 @@ async function generateBundle(deploymentId) {
     const dep = depRes.rows[0];
     if (!dep)
         throw new Error('deployment_not_found');
+    // Only process enabled hosts - mark disabled hosts as SKIPPED
+    await pool.query(`UPDATE deployment_hosts 
+     SET status='SKIPPED', finished_at=now(), message='Host is disabled'
+     WHERE deployment_id=$1 
+     AND host_id IN (SELECT id FROM hosts WHERE enabled=false)`, [deploymentId]);
     const hostRows = await pool.query(`SELECT h.id, h.hostname, h.mgmt_ip, h.ssh_port, h.firewall_backend
      FROM deployment_hosts dh
      JOIN hosts h ON h.id = dh.host_id
-     WHERE dh.deployment_id=$1`, [deploymentId]);
+     WHERE dh.deployment_id=$1 AND h.enabled=true`, [deploymentId]);
     const vRes = await pool.query(`SELECT interface_scope_type, interface_scope_roles, interface_scope_names
      FROM policy_versions WHERE id=$1`, [dep.policy_version_id]);
     const v = vRes.rows[0];
@@ -225,10 +233,19 @@ async function generateBundle(deploymentId) {
 }
 deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
     const deploymentId = req.params.deploymentId;
+    // Mark disabled hosts as SKIPPED before starting
+    await pool.query(`UPDATE deployment_hosts 
+     SET status='SKIPPED', finished_at=now(), message='Host is disabled'
+     WHERE deployment_id=$1 
+     AND host_id IN (SELECT id FROM hosts WHERE enabled=false)
+     AND status='PENDING'`, [deploymentId]);
     await pool.query(`UPDATE deployments SET status='RUNNING', started_at=now() WHERE id=$1`, [deploymentId]);
-    await pool.query(`UPDATE deployment_hosts SET status='RUNNING', started_at=now() WHERE deployment_id=$1`, [
-        deploymentId
-    ]);
+    // Only mark enabled hosts as RUNNING
+    await pool.query(`UPDATE deployment_hosts 
+     SET status='RUNNING', started_at=now() 
+     WHERE deployment_id=$1 
+     AND host_id IN (SELECT id FROM hosts WHERE enabled=true)
+     AND status='PENDING'`, [deploymentId]);
     const { bundleDir } = await generateBundle(deploymentId);
     // Get executor setting
     const executorRes = await pool.query(`SELECT value FROM system_settings WHERE key='deployment_executor'`);
@@ -255,11 +272,11 @@ deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
         const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
         const keyPath = path.join(bundleDir, 'ssh_key');
         fs.writeFileSync(keyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
-        // Get hosts and policy files
+        // Get hosts and policy files (only enabled hosts)
         const hostRows = await pool.query(`SELECT h.id, h.hostname, h.mgmt_ip, h.ssh_port, h.firewall_backend
        FROM deployment_hosts dh
        JOIN hosts h ON h.id = dh.host_id
-       WHERE dh.deployment_id=$1`, [deploymentId]);
+       WHERE dh.deployment_id=$1 AND h.enabled=true`, [deploymentId]);
         const sshHosts = [];
         for (const h of hostRows.rows) {
             const backend = h.firewall_backend === 'iptables' ? 'iptables' : 'nftables';
@@ -316,9 +333,10 @@ deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
         await pool.query(`UPDATE execution_runs
        SET exit_code=$2, stdout_path=$3, stderr_path=$4, finished_at=now(), status='DONE'
        WHERE id=$1`, [executionId, exitCode, stdoutPath, stderrPath]);
+        // Only update enabled hosts that were RUNNING (disabled hosts are already SKIPPED)
         await pool.query(`UPDATE deployment_hosts
        SET status=$2, finished_at=now(), message=$3
-       WHERE deployment_id=$1`, [deploymentId, ok ? 'SUCCEEDED' : 'FAILED', ok ? 'ok' : 'ansible_failed']);
+       WHERE deployment_id=$1 AND status='RUNNING'`, [deploymentId, ok ? 'SUCCEEDED' : 'FAILED', ok ? 'ok' : 'ansible_failed']);
     }
     await pool.query(`UPDATE deployments SET status=$2, finished_at=now() WHERE id=$1`, [deploymentId, ok ? 'SUCCEEDED' : 'FAILED']);
     res.json({ ok, exitCode, executionId });

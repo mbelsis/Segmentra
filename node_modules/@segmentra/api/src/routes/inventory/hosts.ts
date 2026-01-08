@@ -15,8 +15,12 @@ hostsRouter.get('/', async (req, res) => {
   const ip = String(req.query.ip ?? '');
   const env = String(req.query.env ?? '');
   const backend = String(req.query.backend ?? '');
+  const enabled = req.query.enabled !== undefined ? req.query.enabled === 'true' || req.query.enabled === '1' : undefined;
+  const page = Math.max(1, parseInt(String(req.query.page ?? '1'), 10));
+  const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? '50'), 10)));
+  const offset = (page - 1) * limit;
 
-  const where: string[] = ['h.enabled = true'];
+  const where: string[] = [];
   const params: any[] = [];
 
   if (hostname) {
@@ -24,8 +28,8 @@ hostsRouter.get('/', async (req, res) => {
     where.push(`h.hostname ILIKE $${params.length}`);
   }
   if (ip) {
-    params.push(ip);
-    where.push(`h.mgmt_ip::text = $${params.length}`);
+    params.push(`%${ip}%`);
+    where.push(`(h.mgmt_ip::text ILIKE $${params.length} OR h.hostname ILIKE $${params.length})`);
   }
   if (env) {
     params.push(env);
@@ -43,18 +47,38 @@ hostsRouter.get('/', async (req, res) => {
     params.push(tag);
     where.push(`t.name = $${params.length}`);
   }
+  if (enabled !== undefined) {
+    params.push(enabled);
+    where.push(`h.enabled = $${params.length}`);
+  }
 
+  const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+
+  // Get total count
+  const countSql = `
+    SELECT COUNT(DISTINCT h.id) as total
+    FROM hosts h
+    LEFT JOIN vlans v ON v.id = h.vlan_id
+    LEFT JOIN host_tags ht ON ht.host_id = h.id
+    LEFT JOIN tags t ON t.id = ht.tag_id
+    ${whereClause}
+  `;
+  const countResult = await pool.query(countSql, params);
+  const total = parseInt(countResult.rows[0].total, 10);
+
+  // Get paginated hosts
   const sql = `
     SELECT DISTINCT h.*, v.vlan_tag, v.name as vlan_name
     FROM hosts h
     LEFT JOIN vlans v ON v.id = h.vlan_id
     LEFT JOIN host_tags ht ON ht.host_id = h.id
     LEFT JOIN tags t ON t.id = ht.tag_id
-    WHERE ${where.join(' AND ')}
+    ${whereClause}
     ORDER BY h.hostname ASC
+    LIMIT $${params.length + 1} OFFSET $${params.length + 2}
   `;
 
-  const { rows } = await pool.query(sql, params);
+  const { rows } = await pool.query(sql, [...params, limit, offset]);
   
   // Group hosts and collect their tags
   const hostMap = new Map();
@@ -85,7 +109,15 @@ hostsRouter.get('/', async (req, res) => {
     }
   }
   
-  res.json({ hosts: Array.from(hostMap.values()) });
+  res.json({ 
+    hosts: Array.from(hostMap.values()),
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit)
+    }
+  });
 });
 
 const createHostSchema = z.object({
@@ -274,11 +306,80 @@ hostsRouter.put('/:id', async (req, res) => {
 });
 
 hostsRouter.delete('/:id', async (req, res) => {
-  const { rowCount } = await pool.query(`UPDATE hosts SET enabled=false, updated_at=now() WHERE id=$1`, [
+  const { rowCount } = await pool.query(`DELETE FROM hosts WHERE id=$1`, [
     req.params.id
   ]);
   if (!rowCount) return res.status(404).json({ error: 'not_found' });
   res.json({ ok: true });
+});
+
+// Bulk operations
+const bulkOperationSchema = z.object({
+  hostIds: z.array(z.string().uuid()).min(1)
+});
+
+hostsRouter.post('/bulk/delete', async (req, res) => {
+  const parsed = bulkOperationSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
+  
+  const { rowCount } = await pool.query(
+    `DELETE FROM hosts WHERE id = ANY($1::uuid[])`,
+    [parsed.data.hostIds]
+  );
+  res.json({ ok: true, deleted: rowCount });
+});
+
+hostsRouter.post('/bulk/assign-vlan', async (req, res) => {
+  const parsed = bulkOperationSchema.extend({
+    vlanId: z.string().uuid().nullable()
+  }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
+  
+  const { rowCount } = await pool.query(
+    `UPDATE hosts SET vlan_id = $1, updated_at = now() WHERE id = ANY($2::uuid[])`,
+    [parsed.data.vlanId, parsed.data.hostIds]
+  );
+  res.json({ ok: true, updated: rowCount });
+});
+
+hostsRouter.post('/bulk/assign-tag', async (req, res) => {
+  const parsed = bulkOperationSchema.extend({
+    tagId: z.string().uuid()
+  }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
+  
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    let added = 0;
+    for (const hostId of parsed.data.hostIds) {
+      const result = await client.query(
+        `INSERT INTO host_tags (host_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [hostId, parsed.data.tagId]
+      );
+      if (result.rowCount) added++;
+    }
+    await client.query('COMMIT');
+    res.json({ ok: true, added });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+});
+
+hostsRouter.post('/bulk/set-enabled', async (req, res) => {
+  const parsed = bulkOperationSchema.extend({
+    enabled: z.boolean()
+  }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
+  
+  const { rowCount } = await pool.query(
+    `UPDATE hosts SET enabled = $1, updated_at = now() WHERE id = ANY($2::uuid[])`,
+    [parsed.data.enabled, parsed.data.hostIds]
+  );
+  res.json({ ok: true, updated: rowCount });
 });
 
 

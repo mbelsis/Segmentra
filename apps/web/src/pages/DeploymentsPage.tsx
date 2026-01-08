@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 
 import { api } from '../lib/api';
 
 export function DeploymentsPage() {
+  const navigate = useNavigate();
   const [deployments, setDeployments] = useState<any[]>([]);
   const [tags, setTags] = useState<any[]>([]);
   const [vlans, setVlans] = useState<any[]>([]);
@@ -310,7 +312,7 @@ export function DeploymentsPage() {
                   {d.status === 'QUEUED' && (
                     <button onClick={() => startDeployment(d.id)} className="btn-small btn-primary">Start</button>
                   )}
-                  <button onClick={() => window.location.href = `/deployment/${d.id}`} className="btn-small">View</button>
+                  <button onClick={() => navigate(`/deployment/${d.id}`)} className="btn-small">View</button>
                 </td>
               </tr>
             ))}

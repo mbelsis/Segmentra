@@ -7,7 +7,10 @@ export function AppShell() {
   return (
     <div className="appShell">
       <nav className="nav">
-        <div style={{ fontWeight: 700, marginBottom: 8 }}>Segmentra</div>
+        <div style={{ marginBottom: 16, textAlign: 'center' }}>
+          <img src="/segmentra.png" alt="Segmentra" style={{ maxWidth: '100%', height: 'auto', marginBottom: 8 }} />
+        </div>
+        <div style={{ fontWeight: 700, marginBottom: 8, textAlign: 'center' }}>Segmentra</div>
         <NavLink to="/" end>
           Dashboard
         </NavLink>
@@ -15,6 +18,7 @@ export function AppShell() {
         <NavLink to="/policies">Policy Sets</NavLink>
         <NavLink to="/approvals">Approvals</NavLink>
         <NavLink to="/deployments">Deployments</NavLink>
+        <NavLink to="/troubleshoot">Troubleshoot</NavLink>
         <NavLink to="/audit">Audit</NavLink>
         <NavLink to="/admin">Admin</NavLink>
         <div style={{ marginTop: 12 }}>
@@ -34,5 +38,6 @@ export function AppShell() {
     </div>
   );
 }
+
 
 

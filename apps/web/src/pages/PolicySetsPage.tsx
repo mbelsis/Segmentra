@@ -11,6 +11,7 @@ export function PolicySetsPage() {
   const [hosts, setHosts] = useState<any[]>([]);
   const [showCreate, setShowCreate] = useState(false);
   const [error, setError] = useState<string>('');
+  const [loading, setLoading] = useState(true);
 
   // Form state
   const [formName, setFormName] = useState('');
@@ -26,18 +27,30 @@ export function PolicySetsPage() {
 
   async function loadData() {
     try {
+      setLoading(true);
+      setError('');
       const [psRes, tagsRes, vlansRes, hostsRes] = await Promise.all([
         api.policySets(),
         api.tags(),
         api.vlans(),
         api.hosts()
       ]);
-      setPolicySets(psRes.policySets);
-      setTags(tagsRes.tags);
-      setVlans(vlansRes.vlans);
-      setHosts(hostsRes.hosts);
+      console.log('Policy sets loaded:', psRes.policySets);
+      setPolicySets(psRes.policySets || []);
+      setTags(tagsRes.tags || []);
+      setVlans(vlansRes.vlans || []);
+      setHosts(hostsRes.hosts || []);
     } catch (e: any) {
-      setError(String(e.message || e));
+      const errorMsg = e.message || String(e);
+      setError(`Failed to load data: ${errorMsg}`);
+      console.error('Error loading policy sets:', e);
+      // Set empty arrays on error to prevent undefined issues
+      setPolicySets([]);
+      setTags([]);
+      setVlans([]);
+      setHosts([]);
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -126,7 +139,11 @@ export function PolicySetsPage() {
 
       {error && <div className="error-banner">{error}</div>}
 
-      {showCreate && (
+      {loading && (
+        <div style={{ padding: 20, textAlign: 'center', color: '#666' }}>Loading policy sets...</div>
+      )}
+
+      {!loading && showCreate && (
         <div className="card">
           <h3>Create Policy Set</h3>
           <div className="form-grid">
@@ -218,7 +235,24 @@ export function PolicySetsPage() {
         </div>
       )}
 
-      <div className="card">
+      {!loading && (
+        <div className="card">
+          <div style={{ 
+          padding: 12, 
+          marginBottom: 16, 
+          background: '#e3f2fd', 
+          borderRadius: 4, 
+          border: '1px solid #90caf9',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8
+        }}>
+          <span style={{ fontSize: '1.2em' }}>💡</span>
+          <div style={{ flex: 1 }}>
+            <strong>Tip:</strong> To add firewall rules, click <strong>"New Version"</strong> on a policy set. 
+            This will create a new policy version where you can add, edit, and manage firewall rules.
+          </div>
+        </div>
         <table className="data-table">
           <thead>
             <tr>
@@ -235,7 +269,13 @@ export function PolicySetsPage() {
                 <td>{ps.description || '-'}</td>
                 <td>{getScopeDisplay(ps)}</td>
                 <td>
-                  <button onClick={() => createVersion(ps.id)} className="btn-small btn-primary">New Version</button>
+                  <button 
+                    onClick={() => createVersion(ps.id)} 
+                    className="btn-small btn-primary"
+                    title="Click to create a new policy version where you can add firewall rules"
+                  >
+                    New Version
+                  </button>
                   <button onClick={() => navigate(`/policy-set/${ps.id}`)} className="btn-small">View</button>
                 </td>
               </tr>
@@ -249,7 +289,8 @@ export function PolicySetsPage() {
             )}
           </tbody>
         </table>
-      </div>
+        </div>
+      )}
     </div>
   );
 }

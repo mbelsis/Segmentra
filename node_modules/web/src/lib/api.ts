@@ -31,10 +31,28 @@ export const api = {
   login: (username: string, password: string) =>
     request<{ token: string }>('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
   me: () => request<{ user: any; roles: string[] }>('/auth/me'),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<{ ok: boolean }>('/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
 
-  hosts: () => request<{ hosts: any[] }>('/hosts'),
+  hosts: (params?: { hostname?: string; ip?: string; tag?: string; vlan?: string; enabled?: boolean; page?: number; limit?: number }) => {
+    const query = new URLSearchParams();
+    if (params?.hostname) query.append('hostname', params.hostname);
+    if (params?.ip) query.append('ip', params.ip);
+    if (params?.tag) query.append('tag', params.tag);
+    if (params?.vlan) query.append('vlan', params.vlan);
+    if (params?.enabled !== undefined) query.append('enabled', String(params.enabled));
+    if (params?.page) query.append('page', String(params.page));
+    if (params?.limit) query.append('limit', String(params.limit));
+    const queryString = query.toString();
+    return request<{ hosts: any[]; pagination: { page: number; limit: number; total: number; totalPages: number } }>(`/hosts${queryString ? `?${queryString}` : ''}`);
+  },
   createHost: (b: any) => request<{ host: any }>('/hosts', { method: 'POST', body: JSON.stringify(b) }),
   updateHost: (id: string, b: any) => request<{ host: any }>(`/hosts/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
+  deleteHost: (id: string) => request<{ ok: boolean }>(`/hosts/${id}`, { method: 'DELETE' }),
+  bulkDeleteHosts: (hostIds: string[]) => request<{ ok: boolean; deleted: number }>('/hosts/bulk/delete', { method: 'POST', body: JSON.stringify({ hostIds }) }),
+  bulkAssignVlan: (hostIds: string[], vlanId: string | null) => request<{ ok: boolean; updated: number }>('/hosts/bulk/assign-vlan', { method: 'POST', body: JSON.stringify({ hostIds, vlanId }) }),
+  bulkAssignTag: (hostIds: string[], tagId: string) => request<{ ok: boolean; added: number }>('/hosts/bulk/assign-tag', { method: 'POST', body: JSON.stringify({ hostIds, tagId }) }),
+  bulkSetEnabled: (hostIds: string[], enabled: boolean) => request<{ ok: boolean; updated: number }>('/hosts/bulk/set-enabled', { method: 'POST', body: JSON.stringify({ hostIds, enabled }) }),
 
   tags: () => request<{ tags: any[] }>('/tags'),
   createTag: (b: any) => request<{ tag: any }>('/tags', { method: 'POST', body: JSON.stringify(b) }),
@@ -66,11 +84,14 @@ export const api = {
   approve: (versionId: string) => request<{ version: any }>(`/policy-versions/${versionId}/approve`, { method: 'POST' }),
   reject: (versionId: string, reason: string) =>
     request<{ version: any }>(`/policy-versions/${versionId}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  cloneVersion: (versionId: string) =>
+    request<{ version: any }>(`/policy-versions/${versionId}/clone`, { method: 'POST' }),
 
   render: (versionId: string, hostId: string) =>
     request<{ backend: string; sha256: string; text: string }>(`/policy-versions/${versionId}/render/host/${hostId}`),
 
   deployments: () => request<{ deployments: any[] }>('/deployments'),
+  deployment: (deploymentId: string) => request<{ deployment: any }>(`/deployments/${deploymentId}`),
   createDeployment: (b: any) => request<{ deployment: any }>('/deployments', { method: 'POST', body: JSON.stringify(b) }),
   startDeployment: (deploymentId: string) => request<any>(`/deployments/${deploymentId}/start`, { method: 'POST' }),
   deploymentHosts: (deploymentId: string) => request<{ hosts: any[] }>(`/deployments/${deploymentId}/hosts`),
@@ -117,7 +138,35 @@ export const api = {
       runningHosts: number;
       progressPercent: number;
     }>;
-  }>('/dashboard/stats')
+  }>('/dashboard/stats'),
+
+  troubleshoot: {
+    policiesByIp: (ip: string) => request<{
+      ip: string;
+      results: Array<{
+        rule: any;
+        policyVersion: any;
+        deployedHosts: any[];
+      }>;
+    }>(`/troubleshoot/policies/by-ip?ip=${encodeURIComponent(ip)}`),
+    hostPolicies: (hostId: string) => request<{
+      host: any;
+      policies: Array<{
+        deployment: any;
+        policyVersion: any;
+        hostDeploymentStatus: string;
+        hostDeploymentMessage: string | null;
+        rules: any[];
+      }>;
+    }>(`/troubleshoot/hosts/${hostId}/policies`),
+    policyVersionHosts: (versionId: string) => request<{
+      policyVersion: any;
+      hosts: Array<{
+        host: any;
+        deployments: any[];
+      }>;
+    }>(`/troubleshoot/policy-versions/${versionId}/hosts`)
+  }
 };
 
 

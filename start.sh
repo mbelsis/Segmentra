@@ -4,88 +4,170 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-MODE="${1:-}"
-echo "[segmentra] Starting dev environment... (mode=${MODE:-normal})"
+MODE="${1:-dev}"
+if [[ "$MODE" != "dev" && "$MODE" != "prod" ]]; then
+  echo "[segmentra] ERROR: Invalid mode. Use: ./start.sh dev  or  ./start.sh prod"
+  exit 1
+fi
 
+echo "[segmentra] ========================================"
+echo "[segmentra] Starting Segmentra in $MODE mode"
+echo "[segmentra] ========================================"
+echo
+
+# Check if Docker is running
+echo "[segmentra] Checking Docker..."
+if ! docker info >/dev/null 2>&1; then
+  echo "[segmentra] ERROR: Docker is not running!"
+  echo "[segmentra] Please start Docker Desktop and try again."
+  exit 1
+fi
+echo "[segmentra] Docker check passed"
+echo
+
+# Install dependencies if needed
 if [[ ! -d node_modules ]]; then
-  echo "[segmentra] Installing dependencies (npm install)..."
+  echo "[segmentra] Installing dependencies..."
   npm install
+  if [[ $? -ne 0 ]]; then
+    echo "[segmentra] ERROR: Failed to install dependencies"
+    exit 1
+  fi
+  echo "[segmentra] Dependencies installed - OK"
+  echo
 fi
 
-echo "[segmentra] Starting Postgres (docker compose)..."
+# Optional: wipe local dev DB volume (DATA LOSS) if SEGMENTRA_RESET_DB=1
 if [[ "${SEGMENTRA_RESET_DB:-0}" == "1" ]]; then
-  echo "[segmentra] SEGMENTRA_RESET_DB=1 -> removing docker volumes (DATA LOSS)..."
+  echo "[segmentra] WARNING: SEGMENTRA_RESET_DB=1 - removing docker volumes (DATA LOSS)..."
   docker compose down -v
+  echo
 fi
+
+# Start PostgreSQL container
+echo "[segmentra] Starting PostgreSQL (docker compose)..."
 docker compose up -d segmentra-db
-
-export DATABASE_URL="${SEGMENTRA_DATABASE_URL:-${DATABASE_URL:-postgres://segmentra:segmentra@127.0.0.1:15432/segmentra}}"
-export JWT_SECRET="${JWT_SECRET:-change-me-to-a-long-random-string}"
-if [[ "$MODE" == "dev" ]]; then
-  export SEGMENTRA_BOOTSTRAP_TOKEN="${SEGMENTRA_BOOTSTRAP_TOKEN:-dev-bootstrap-token}"
+if [[ $? -ne 0 ]]; then
+  echo "[segmentra] ERROR: Failed to start PostgreSQL container"
+  exit 1
 fi
 
-echo "[segmentra] Using DATABASE_URL=$DATABASE_URL"
+# Wait for PostgreSQL to be ready
+echo "[segmentra] Waiting for PostgreSQL to be ready..."
+TRY=0
+while ! docker exec segmentra-segmentra-db-1 pg_isready -U segmentra >/dev/null 2>&1; do
+  TRY=$((TRY + 1))
+  if [[ $TRY -gt 30 ]]; then
+    echo "[segmentra] ERROR: PostgreSQL did not become ready in time"
+    exit 1
+  fi
+  sleep 1
+done
+echo "[segmentra] PostgreSQL is ready - OK"
+echo
 
-echo "[segmentra] Running migrations + seeding roles..."
+# Set up environment variables
+# Use SEGMENTRA_DATABASE_URL if provided, otherwise use the local compose DB.
+if [[ -n "${SEGMENTRA_DATABASE_URL:-}" ]]; then
+  export DATABASE_URL="$SEGMENTRA_DATABASE_URL"
+else
+  export DATABASE_URL="postgres://segmentra:segmentra@127.0.0.1:15432/segmentra"
+fi
+
+export JWT_SECRET="${JWT_SECRET:-change-me-to-a-long-random-string}"
+export PORT="${PORT:-8080}"
+export BUNDLES_DIR="${BUNDLES_DIR:-./data/bundles}"
+export ANSIBLE_RUNNER_CONTAINER="${ANSIBLE_RUNNER_CONTAINER:-segmentra-ansible-runner}"
+
+echo "[segmentra] Configuration:"
+echo "[segmentra]   DATABASE_URL=$DATABASE_URL"
+echo "[segmentra]   PORT=$PORT"
+echo "[segmentra]   MODE=$MODE"
+echo
+
+# Run migrations
+echo "[segmentra] Running database migrations..."
 npm run db:migrate
-npm run db:seed
+if [[ $? -ne 0 ]]; then
+  echo "[segmentra] ERROR: Database migrations failed"
+  exit 1
+fi
+echo "[segmentra] Migrations complete - OK"
+echo
 
+# Seed roles
+echo "[segmentra] Seeding database roles..."
+npm run db:seed
+if [[ $? -ne 0 ]]; then
+  echo "[segmentra] ERROR: Database seeding failed"
+  exit 1
+fi
+echo "[segmentra] Roles seeded - OK"
+echo
+
+# Build workspaces
 echo "[segmentra] Building workspaces..."
 npm run build -ws
+if [[ $? -ne 0 ]]; then
+  echo "[segmentra] ERROR: Build failed"
+  exit 1
+fi
+echo "[segmentra] Build complete - OK"
+echo
 
-echo "[segmentra] Starting API + UI..."
+# Launch API in background with all environment variables
+echo "[segmentra] Launching API..."
+(
+  export DATABASE_URL
+  export JWT_SECRET
+  export PORT
+  export BUNDLES_DIR
+  export ANSIBLE_RUNNER_CONTAINER
+  cd "$ROOT_DIR"
+  echo "[API] Starting on port $PORT..."
+  npm run dev -w apps/api
+) &
+API_PID=$!
+
+# Launch UI in background
+echo "[segmentra] Launching UI..."
+(
+  cd "$ROOT_DIR/apps/web"
+  echo "[UI] Starting Vite dev server..."
+  npm run dev
+) &
+WEB_PID=$!
+
+echo
+echo "[segmentra] ========================================"
+echo "[segmentra] Setup complete!"
+echo "[segmentra] ========================================"
+echo
+echo "[segmentra] Services:"
+echo "[segmentra]   API: http://localhost:$PORT/api/health"
+echo "[segmentra]   UI:  http://localhost:5173"
+echo
+
+echo "[segmentra] ========================================"
+echo "[segmentra] Default Login Credentials"
+echo "[segmentra] ========================================"
+echo "[segmentra] Username: admin"
+echo "[segmentra] Password: admin"
+echo
+echo "[segmentra] IMPORTANT: Change the default password after first login!"
+echo "[segmentra] You can change it in the UI or via API endpoint."
+echo
 
 cleanup() {
   echo
   echo "[segmentra] Stopping dev processes..."
-  jobs -p | xargs -r kill >/dev/null 2>&1 || true
+  kill $API_PID $WEB_PID 2>/dev/null || true
+  wait $API_PID $WEB_PID 2>/dev/null || true
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
-npm run dev -w apps/api &
-API_PID=$!
-
-(cd apps/web && npm run dev) &
-WEB_PID=$!
-
-echo "[segmentra] API PID=$API_PID, WEB PID=$WEB_PID"
-echo "[segmentra] API health: http://localhost:8080/api/health"
-
-if [[ "$MODE" == "dev" ]]; then
-  echo "[segmentra] Dev mode: bootstrapping admin token (no LDAP)..."
-  for i in $(seq 1 60); do
-    if curl -fsS "http://localhost:8080/api/health" >/dev/null 2>&1; then
-      break
-    fi
-    sleep 1
-  done
-
-  set +e
-  BOOTSTRAP_JSON="$(curl -s -X POST "http://localhost:8080/api/admin/bootstrap" \
-    -H "content-type: application/json" \
-    -d "{\"token\":\"$SEGMENTRA_BOOTSTRAP_TOKEN\",\"username\":\"bootstrap_admin\"}")"
-  CURL_EXIT=$?
-  set -e
-
-  if [[ $CURL_EXIT -ne 0 || -z "$BOOTSTRAP_JSON" ]]; then
-    echo "[segmentra] Bootstrap request failed. You can bootstrap manually later."
-  else
-    TOKEN="$(printf '%s' "$BOOTSTRAP_JSON" | node -e "let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>{try{console.log(JSON.parse(s).token||'')}catch{console.log('')}})")"
-    if [[ -n "$TOKEN" ]]; then
-      echo "$TOKEN" > .dev-admin-jwt.txt
-      echo "[segmentra] Wrote JWT to .dev-admin-jwt.txt"
-      echo "[segmentra] In browser DevTools console, run:"
-      echo "  localStorage.setItem('segmentra_token','$(cat .dev-admin-jwt.txt)'); location.reload()"
-    else
-      echo "[segmentra] Bootstrap response did not include a token (maybe already initialized)."
-      echo "[segmentra] Response: $BOOTSTRAP_JSON"
-    fi
-  fi
-else
-  echo "[segmentra] If you want to access the UI without LDAP, run: ./start.sh dev"
-fi
+echo "[segmentra] All services are running."
+echo "[segmentra] Press Ctrl+C to stop all services."
+echo
 
 wait $API_PID $WEB_PID
-
-

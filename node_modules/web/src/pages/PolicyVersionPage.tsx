@@ -81,6 +81,10 @@ export function PolicyVersionPage() {
 
   async function saveRule() {
     if (!versionId) return;
+    if (version?.status !== 'DRAFT') {
+      setError('Only DRAFT versions can be edited');
+      return;
+    }
     if (!formSourceValue.trim()) {
       setError('Source value is required');
       return;
@@ -122,6 +126,10 @@ export function PolicyVersionPage() {
   }
 
   async function deleteRule(ruleId: string) {
+    if (version?.status !== 'DRAFT') {
+      setError('Only DRAFT versions can be edited');
+      return;
+    }
     if (!confirm('Delete this rule?')) return;
     try {
       await api.deleteRule(ruleId);
@@ -151,23 +159,16 @@ export function PolicyVersionPage() {
 
   async function updatePolicyInterfaceScope() {
     if (!versionId) return;
+    if (version?.status !== 'DRAFT') {
+      setError('Only DRAFT versions can be edited');
+      return;
+    }
     try {
       await api.updateVersion(versionId, {
         interfaceScopeType: policyInterfaceScopeType,
         interfaceScopeRoles: policyInterfaceScopeType === 'INTERFACE_ROLE' ? policyInterfaceScopeRoles : undefined,
         interfaceScopeNames: policyInterfaceScopeType === 'INTERFACE_NAME' ? policyInterfaceScopeNames : undefined
       });
-      loadData();
-    } catch (e: any) {
-      setError(String(e.message || e));
-    }
-  }
-
-  async function submitForApproval() {
-    if (!versionId) return;
-    if (!confirm('Submit this policy version for approval?')) return;
-    try {
-      await api.submitApproval(versionId);
       loadData();
     } catch (e: any) {
       setError(String(e.message || e));
@@ -181,10 +182,25 @@ export function PolicyVersionPage() {
     <div className="page">
       <div className="page-header">
         <h2>Policy Version {version.version_number} - {version.status}</h2>
-        {version.status === 'DRAFT' && (
-          <button onClick={submitForApproval} className="btn-primary">Submit for Approval</button>
-        )}
       </div>
+
+      {version.status === 'APPROVED' && (
+        <div style={{ 
+          padding: 12, 
+          marginBottom: 16, 
+          background: '#fff3cd', 
+          borderRadius: 4, 
+          border: '1px solid #ffc107',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8
+        }}>
+          <span style={{ fontSize: '1.2em' }}>🔒</span>
+          <div>
+            <strong>This policy version is approved and cannot be edited.</strong> To make changes, clone this version from the Policy Set page.
+          </div>
+        </div>
+      )}
 
       {error && <div className="error-banner">{error}</div>}
 

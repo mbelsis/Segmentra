@@ -11,9 +11,22 @@ export function InventoryPage() {
   const [hosts, setHosts] = useState<any[]>([]);
   const [hostname, setHostname] = useState('');
   const [mgmtIp, setMgmtIp] = useState('');
+  const [hostSshPort, setHostSshPort] = useState<string>('22');
   const [hostVlanId, setHostVlanId] = useState<string>('');
   const [hostTagIds, setHostTagIds] = useState<string[]>([]);
+  const [hostFirewallBackend, setHostFirewallBackend] = useState<string>('auto');
   const [editingHost, setEditingHost] = useState<string | null>(null);
+  
+  // Host filtering and pagination
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterTag, setFilterTag] = useState<string>('');
+  const [filterVlan, setFilterVlan] = useState<string>('');
+  const [filterEnabled, setFilterEnabled] = useState<string>('all'); // 'all', 'true', 'false'
+  const [selectedHostIds, setSelectedHostIds] = useState<Set<string>>(new Set());
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pagination, setPagination] = useState<{ page: number; limit: number; total: number; totalPages: number } | null>(null);
+  const [bulkVlanId, setBulkVlanId] = useState<string>('');
+  const [bulkTagId, setBulkTagId] = useState<string>('');
   
   // Tags state
   const [tags, setTags] = useState<any[]>([]);
@@ -26,6 +39,7 @@ export function InventoryPage() {
   const [vlanTag, setVlanTag] = useState('');
   const [vlanName, setVlanName] = useState('');
   const [vlanDescription, setVlanDescription] = useState('');
+  const [vlanSubnet, setVlanSubnet] = useState('');
   const [editingVlan, setEditingVlan] = useState<string | null>(null);
   
   const [error, setError] = useState<string | null>(null);
@@ -34,16 +48,46 @@ export function InventoryPage() {
     loadData();
   }, []);
 
+  useEffect(() => {
+    if (activeTab === 'hosts') {
+      loadHosts();
+    }
+  }, [activeTab, currentPage, searchQuery, filterTag, filterVlan, filterEnabled]);
+
   async function loadData() {
     try {
-      const [hostsRes, tagsRes, vlansRes] = await Promise.all([
-        api.hosts().catch(() => ({ hosts: [] })),
+      const [tagsRes, vlansRes] = await Promise.all([
         api.tags().catch(() => ({ tags: [] })),
         api.vlans().catch(() => ({ vlans: [] }))
       ]);
-      setHosts(hostsRes.hosts || []);
       setTags(tagsRes.tags || []);
       setVlans(vlansRes.vlans || []);
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    }
+  }
+
+  async function loadHosts() {
+    try {
+      const params: any = {
+        page: currentPage,
+        limit: 50
+      };
+      if (searchQuery.trim()) {
+        // Try to detect if it's an IP or hostname
+        if (/^\d+\.\d+\.\d+\.\d+/.test(searchQuery.trim())) {
+          params.ip = searchQuery.trim();
+        } else {
+          params.hostname = searchQuery.trim();
+        }
+      }
+      if (filterTag) params.tag = filterTag;
+      if (filterVlan) params.vlan = filterVlan;
+      if (filterEnabled !== 'all') params.enabled = filterEnabled === 'true';
+      
+      const hostsRes = await api.hosts(params);
+      setHosts(hostsRes.hosts || []);
+      setPagination(hostsRes.pagination || null);
     } catch (e: any) {
       setError(String(e?.message ?? e));
     }
@@ -53,8 +97,10 @@ export function InventoryPage() {
   function resetHostForm() {
     setHostname('');
     setMgmtIp('');
+    setHostSshPort('22');
     setHostVlanId('');
     setHostTagIds([]);
+    setHostFirewallBackend('auto');
     setEditingHost(null);
     setError(null);
   }
@@ -66,11 +112,19 @@ export function InventoryPage() {
     }
     setError(null);
     try {
+      const sshPortNum = parseInt(hostSshPort.trim(), 10);
+      if (isNaN(sshPortNum) || sshPortNum < 1 || sshPortNum > 65535) {
+        setError('SSH port must be a number between 1 and 65535');
+        return;
+      }
+
       const payload: any = {
         hostname: hostname.trim(),
         mgmtIp: mgmtIp.trim() || undefined,
+        sshPort: sshPortNum,
         vlanId: hostVlanId || undefined,
-        tagIds: hostTagIds
+        tagIds: hostTagIds,
+        firewallBackend: hostFirewallBackend || 'auto'
       };
       
       if (editingHost) {
@@ -81,7 +135,7 @@ export function InventoryPage() {
         setHosts((prev) => [...prev, r.host]);
       }
       resetHostForm();
-      loadData(); // Reload to get fresh data
+      loadHosts(); // Reload to get fresh data
     } catch (e: any) {
       setError(String(e?.message ?? e));
     }
@@ -90,8 +144,10 @@ export function InventoryPage() {
   function editHost(host: any) {
     setHostname(host.hostname);
     setMgmtIp(host.mgmt_ip || '');
+    setHostSshPort(String(host.ssh_port || 22));
     setHostVlanId(host.vlan_id || '');
     setHostTagIds((host.tags || []).map((t: any) => t.id));
+    setHostFirewallBackend(host.firewall_backend || 'auto');
     setEditingHost(host.id);
   }
 
@@ -101,6 +157,74 @@ export function InventoryPage() {
         ? prev.filter(id => id !== tagId)
         : [...prev, tagId]
     );
+  }
+
+  // Bulk operations
+  function toggleHostSelection(hostId: string) {
+    setSelectedHostIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(hostId)) {
+        next.delete(hostId);
+      } else {
+        next.add(hostId);
+      }
+      return next;
+    });
+  }
+
+  function toggleSelectAll() {
+    if (selectedHostIds.size === hosts.length) {
+      setSelectedHostIds(new Set());
+    } else {
+      setSelectedHostIds(new Set(hosts.map(h => h.id)));
+    }
+  }
+
+  async function handleBulkDelete() {
+    if (selectedHostIds.size === 0) return;
+    if (!confirm(`Are you sure you want to delete ${selectedHostIds.size} host(s)?`)) return;
+    try {
+      await api.bulkDeleteHosts(Array.from(selectedHostIds));
+      setSelectedHostIds(new Set());
+      loadHosts();
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    }
+  }
+
+  async function handleBulkAssignVlan() {
+    if (selectedHostIds.size === 0) return;
+    try {
+      await api.bulkAssignVlan(Array.from(selectedHostIds), bulkVlanId || null);
+      setBulkVlanId('');
+      setSelectedHostIds(new Set());
+      loadHosts();
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    }
+  }
+
+  async function handleBulkAssignTag() {
+    if (selectedHostIds.size === 0 || !bulkTagId) return;
+    try {
+      await api.bulkAssignTag(Array.from(selectedHostIds), bulkTagId);
+      setBulkTagId('');
+      setSelectedHostIds(new Set());
+      loadHosts();
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    }
+  }
+
+  async function handleBulkSetEnabled(enabled: boolean) {
+    if (selectedHostIds.size === 0) return;
+    try {
+      await api.bulkSetEnabled(Array.from(selectedHostIds), enabled);
+      setSelectedHostIds(new Set());
+      loadHosts();
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    }
   }
 
   // Tag functions
@@ -132,6 +256,7 @@ export function InventoryPage() {
         setTags((prev) => [...prev, r.tag]);
       }
       resetTagForm();
+      loadData(); // Reload to get fresh data from database
     } catch (e: any) {
       setError(String(e?.message ?? e));
     }
@@ -143,6 +268,7 @@ export function InventoryPage() {
     try {
       await api.deleteTag(id);
       setTags((prev) => prev.filter(t => t.id !== id));
+      loadData(); // Reload to get fresh data from database
     } catch (e: any) {
       setError(String(e?.message ?? e));
     }
@@ -159,6 +285,7 @@ export function InventoryPage() {
     setVlanTag('');
     setVlanName('');
     setVlanDescription('');
+    setVlanSubnet('');
     setEditingVlan(null);
     setError(null);
   }
@@ -179,18 +306,21 @@ export function InventoryPage() {
         const r = await api.updateVlan(editingVlan, {
           vlanTag: tagNum,
           name: vlanName.trim(),
-          description: vlanDescription.trim() || undefined
+          description: vlanDescription.trim() || undefined,
+          subnet: vlanSubnet.trim() || undefined
         });
         setVlans((prev) => prev.map(v => v.id === editingVlan ? r.vlan : v));
       } else {
         const r = await api.createVlan({
           vlanTag: tagNum,
           name: vlanName.trim(),
-          description: vlanDescription.trim() || undefined
+          description: vlanDescription.trim() || undefined,
+          subnet: vlanSubnet.trim() || undefined
         });
         setVlans((prev) => [...prev, r.vlan]);
       }
       resetVlanForm();
+      loadData(); // Reload to get fresh data from database
     } catch (e: any) {
       setError(String(e?.message ?? e));
     }
@@ -202,6 +332,7 @@ export function InventoryPage() {
     try {
       await api.deleteVlan(id);
       setVlans((prev) => prev.filter(v => v.id !== id));
+      loadData(); // Reload to get fresh data from database
     } catch (e: any) {
       setError(String(e?.message ?? e));
     }
@@ -211,6 +342,7 @@ export function InventoryPage() {
     setVlanTag(String(vlan.vlan_tag));
     setVlanName(vlan.name);
     setVlanDescription(vlan.description || '');
+    setVlanSubnet(vlan.subnet || '');
     setEditingVlan(vlan.id);
   }
 
@@ -272,6 +404,18 @@ export function InventoryPage() {
                 />
               </div>
               <div className="form-group">
+                <label>SSH Port</label>
+                <input
+                  type="number"
+                  value={hostSshPort}
+                  onChange={(e) => setHostSshPort(e.target.value)}
+                  placeholder="22"
+                  min="1"
+                  max="65535"
+                />
+                <small>SSH port for deployments (default: 22)</small>
+              </div>
+              <div className="form-group">
                 <label>VLAN</label>
                 <select
                   value={hostVlanId}
@@ -284,6 +428,18 @@ export function InventoryPage() {
                     </option>
                   ))}
                 </select>
+              </div>
+              <div className="form-group">
+                <label>Firewall Backend</label>
+                <select
+                  value={hostFirewallBackend}
+                  onChange={(e) => setHostFirewallBackend(e.target.value)}
+                >
+                  <option value="auto">Auto (nftables preferred)</option>
+                  <option value="nftables">nftables</option>
+                  <option value="iptables">iptables</option>
+                </select>
+                <small>Firewall backend to use for policy compilation. Auto defaults to nftables.</small>
               </div>
             </div>
             <div className="form-group">
@@ -323,11 +479,119 @@ export function InventoryPage() {
 
           <div className="card">
             <h3>Hosts</h3>
+            
+            {/* Filters */}
+            <div style={{ marginBottom: 16, padding: 16, background: '#f5f5f5', borderRadius: 8 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginBottom: 12 }}>
+                <div>
+                  <label style={{ display: 'block', marginBottom: 4, fontSize: '0.9em', fontWeight: 500 }}>Search</label>
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => { setSearchQuery(e.target.value); setCurrentPage(1); }}
+                    placeholder="Hostname or IP"
+                    style={{ width: '100%', padding: '6px 8px', border: '1px solid #ddd', borderRadius: 4 }}
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', marginBottom: 4, fontSize: '0.9em', fontWeight: 500 }}>Filter by Tag</label>
+                  <select
+                    value={filterTag}
+                    onChange={(e) => { setFilterTag(e.target.value); setCurrentPage(1); }}
+                    style={{ width: '100%', padding: '6px 8px', border: '1px solid #ddd', borderRadius: 4 }}
+                  >
+                    <option value="">All Tags</option>
+                    {tags.map((t) => (
+                      <option key={t.id} value={t.name}>{t.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label style={{ display: 'block', marginBottom: 4, fontSize: '0.9em', fontWeight: 500 }}>Filter by VLAN</label>
+                  <select
+                    value={filterVlan}
+                    onChange={(e) => { setFilterVlan(e.target.value); setCurrentPage(1); }}
+                    style={{ width: '100%', padding: '6px 8px', border: '1px solid #ddd', borderRadius: 4 }}
+                  >
+                    <option value="">All VLANs</option>
+                    {vlans.map((v) => (
+                      <option key={v.id} value={v.vlan_tag}>{v.name} (VLAN {v.vlan_tag})</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label style={{ display: 'block', marginBottom: 4, fontSize: '0.9em', fontWeight: 500 }}>Status</label>
+                  <select
+                    value={filterEnabled}
+                    onChange={(e) => { setFilterEnabled(e.target.value); setCurrentPage(1); }}
+                    style={{ width: '100%', padding: '6px 8px', border: '1px solid #ddd', borderRadius: 4 }}
+                  >
+                    <option value="all">All</option>
+                    <option value="true">Enabled</option>
+                    <option value="false">Disabled</option>
+                  </select>
+                </div>
+              </div>
+              {pagination && (
+                <div style={{ fontSize: '0.9em', color: '#666' }}>
+                  Showing {((currentPage - 1) * (pagination.limit || 50)) + 1} to {Math.min(currentPage * (pagination.limit || 50), pagination.total)} of {pagination.total} hosts
+                </div>
+              )}
+            </div>
+
+            {/* Bulk Actions */}
+            {selectedHostIds.size > 0 && (
+              <div style={{ marginBottom: 16, padding: 12, background: '#e3f2fd', borderRadius: 8, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                <strong>{selectedHostIds.size} host(s) selected</strong>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <button onClick={handleBulkDelete} className="btn-small btn-danger">Delete</button>
+                  <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                    <select
+                      value={bulkVlanId}
+                      onChange={(e) => setBulkVlanId(e.target.value)}
+                      style={{ padding: '4px 8px', border: '1px solid #ddd', borderRadius: 4 }}
+                    >
+                      <option value="">Assign VLAN...</option>
+                      <option value="">None</option>
+                      {vlans.map((v) => (
+                        <option key={v.id} value={v.id}>{v.name} (VLAN {v.vlan_tag})</option>
+                      ))}
+                    </select>
+                    <button onClick={handleBulkAssignVlan} className="btn-small btn-secondary" disabled={!bulkVlanId && bulkVlanId !== ''}>Apply</button>
+                  </div>
+                  <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                    <select
+                      value={bulkTagId}
+                      onChange={(e) => setBulkTagId(e.target.value)}
+                      style={{ padding: '4px 8px', border: '1px solid #ddd', borderRadius: 4 }}
+                    >
+                      <option value="">Assign Tag...</option>
+                      {tags.map((t) => (
+                        <option key={t.id} value={t.id}>{t.name}</option>
+                      ))}
+                    </select>
+                    <button onClick={handleBulkAssignTag} className="btn-small btn-secondary" disabled={!bulkTagId}>Apply</button>
+                  </div>
+                  <button onClick={() => handleBulkSetEnabled(true)} className="btn-small btn-secondary">Enable</button>
+                  <button onClick={() => handleBulkSetEnabled(false)} className="btn-small btn-secondary">Disable</button>
+                  <button onClick={() => setSelectedHostIds(new Set())} className="btn-small">Clear Selection</button>
+                </div>
+              </div>
+            )}
+
             <table className="data-table">
               <thead>
                 <tr>
+                  <th style={{ width: 40 }}>
+                    <input
+                      type="checkbox"
+                      checked={selectedHostIds.size === hosts.length && hosts.length > 0}
+                      onChange={toggleSelectAll}
+                    />
+                  </th>
                   <th>Hostname</th>
                   <th>Mgmt IP</th>
+                  <th>SSH Port</th>
                   <th>VLAN</th>
                   <th>Tags</th>
                   <th>Backend</th>
@@ -338,8 +602,16 @@ export function InventoryPage() {
               <tbody>
                 {hosts.map((h) => (
                   <tr key={h.id}>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={selectedHostIds.has(h.id)}
+                        onChange={() => toggleHostSelection(h.id)}
+                      />
+                    </td>
                     <td><strong>{h.hostname}</strong></td>
                     <td>{h.mgmt_ip || '-'}</td>
+                    <td><code>{h.ssh_port || 22}</code></td>
                     <td>
                       {h.vlan_name ? (
                         <span>{h.vlan_name} <code>({h.vlan_tag})</code></span>
@@ -369,13 +641,36 @@ export function InventoryPage() {
                 ))}
                 {hosts.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="empty-state">
-                      No hosts found. Add a host above.
+                    <td colSpan={9} className="empty-state">
+                      No hosts found. {searchQuery || filterTag || filterVlan || filterEnabled !== 'all' ? 'Try adjusting your filters.' : 'Add a host above.'}
                     </td>
                   </tr>
                 )}
               </tbody>
             </table>
+
+            {/* Pagination */}
+            {pagination && pagination.totalPages > 1 && (
+              <div style={{ marginTop: 16, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8 }}>
+                <button
+                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                  disabled={currentPage === 1}
+                  className="btn-small"
+                >
+                  Previous
+                </button>
+                <span style={{ padding: '0 16px' }}>
+                  Page {pagination.page} of {pagination.totalPages}
+                </span>
+                <button
+                  onClick={() => setCurrentPage(p => Math.min(pagination.totalPages, p + 1))}
+                  disabled={currentPage === pagination.totalPages}
+                  className="btn-small"
+                >
+                  Next
+                </button>
+              </div>
+            )}
           </div>
         </>
       )}
@@ -491,6 +786,16 @@ export function InventoryPage() {
                   placeholder="Optional description"
                 />
               </div>
+              <div className="form-group">
+                <label>Subnet</label>
+                <input
+                  type="text"
+                  value={vlanSubnet}
+                  onChange={(e) => setVlanSubnet(e.target.value)}
+                  placeholder="e.g., 192.168.1.0/24"
+                />
+                <small>VLAN subnet in CIDR notation (e.g., 192.168.1.0/24)</small>
+              </div>
             </div>
             <div className="form-actions">
               <button
@@ -515,6 +820,7 @@ export function InventoryPage() {
                 <tr>
                   <th>VLAN Tag</th>
                   <th>Name</th>
+                  <th>Subnet</th>
                   <th>Description</th>
                   <th>Actions</th>
                 </tr>
@@ -524,6 +830,7 @@ export function InventoryPage() {
                   <tr key={v.id}>
                     <td><code>{v.vlan_tag}</code></td>
                     <td><strong>{v.name}</strong></td>
+                    <td>{v.subnet ? <code>{v.subnet}</code> : '-'}</td>
                     <td>{v.description || '-'}</td>
                     <td>
                       <button onClick={() => editVlan(v)} className="btn-small btn-secondary" style={{ marginRight: 8 }}>Edit</button>
@@ -533,7 +840,7 @@ export function InventoryPage() {
                 ))}
                 {vlans.length === 0 && (
                   <tr>
-                    <td colSpan={4} className="empty-state">
+                    <td colSpan={5} className="empty-state">
                       No VLANs found. Create a VLAN above.
                     </td>
                   </tr>

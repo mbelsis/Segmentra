@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="logo/segmentra.png" alt="Segmentra" style="max-width: 300px; height: auto;" />
+</div>
+
 # Segmentra
 
 Segmentra is an on‑prem, web-based **fleet firewall & microsegmentation management** tool for Linux servers. It lets security/infra teams define **intent-based access policies** (allow/deny) and deploy them safely at scale to **nftables/iptables**, with versioning, approvals, deployment bundles, and an audit trail.
@@ -140,6 +144,8 @@ Migrations live in `packages/db/migrations/`.
 - `tags`: `id`, `name`, `description`
 - `vlans`: `id`, `vlan_tag`, `name`, `description`
 - `hosts`: `id`, `hostname`, `mgmt_ip`, `ssh_port`, `environment`, `os_family`, `firewall_backend`, `vlan_id`, `enabled`, `created_at`, `updated_at`
+  - **SSH Port**: The `ssh_port` field (default: 22) specifies which SSH port to use when connecting to the host for deployments. This allows you to deploy to hosts using non-standard SSH ports (e.g., 2022, 2222). Both Ansible and SSH Direct executors automatically use the configured port for each host.
+  - **Important**: Hosts with `enabled=false` are **automatically skipped** from all policy deployments. Disabled hosts will never receive firewall policies, even if they are included in deployment target queries (tags, VLANs, or direct host selection). They will be marked as `SKIPPED` in deployment status with the message "Host is disabled".
 - `host_tags`: `host_id`, `tag_id` — many-to-many relationship for assigning tags to hosts
 - `host_interfaces`: `host_id`, `name`, `role`, `ip_address`, `cidr`, `vlan_id`, `is_primary`, `enabled`, `created_at`
 
@@ -173,6 +179,42 @@ Migrations live in `packages/db/migrations/`.
 - **Docker Desktop**
 - A reachable **PostgreSQL** (or use the docker compose DB)
 
+### Quick Start (Recommended)
+
+**Windows:**
+```batch
+start.bat dev
+```
+
+**macOS/Linux:**
+```bash
+./start.sh dev
+```
+
+This will automatically:
+- Install dependencies
+- Start PostgreSQL (data persists between runs)
+- Run migrations and seed roles
+- Create default admin user (if it doesn't exist)
+- Start API and UI servers
+
+**Note**: The database persists between runs. To reset the database (deletes all data), set the environment variable:
+```batch
+set SEGMENTRA_RESET_DB=1
+start.bat dev
+```
+
+### Default Login Credentials
+
+After starting the application, use these credentials to login:
+
+- **Username**: `admin`
+- **Password**: `admin`
+
+⚠️ **Important**: Change the default password after first login! You can change it in the UI or via API endpoint `POST /api/auth/change-password`.
+
+### Manual Setup (Alternative)
+
 ### 1) Install deps
 
 ```bash
@@ -195,13 +237,17 @@ npm run db:migrate
 npm run db:seed
 ```
 
+The seed script automatically creates a default admin user:
+- **Username**: `admin`
+- **Password**: `admin`
+
 ### 4) Start the API
 
 Set required env vars (minimum: `DATABASE_URL`, `JWT_SECRET`):
 
 ```bash
 set JWT_SECRET=change-me-to-a-long-random-string
-npm run dev
+npm run dev -w apps/api
 ```
 
 API listens on `http://localhost:8080`.
@@ -230,13 +276,19 @@ The API reads env vars in `apps/api/src/lib/env.ts`:
 
 ## How to use (happy path)
 
-### 1) Bootstrap an admin (first run only)
+### 1) Login with default admin account
 
-Option A: enable bootstrap in env:
-- set `SEGMENTRA_BOOTSTRAP_TOKEN` in the API env
-- call `POST /api/admin/bootstrap` with `{ "token": "...", "username": "bootstrap_admin" }`
+**Default credentials (created automatically on first run):**
+- **Username**: `admin`
+- **Password**: `admin`
 
-Option B: if you already have LDAP configured and AD group mappings, just login via `/api/auth/login`.
+⚠️ **Important**: Change the default password after first login! You can change it in the UI or via API endpoint `POST /api/auth/change-password`.
+
+**Alternative: LDAP Authentication**
+
+If you have LDAP configured and AD group mappings, you can login via `/api/auth/login` with your LDAP credentials. The system will:
+1. First check for local users (with password_hash)
+2. If not found, fall back to LDAP authentication
 
 ### 2) Configure LDAP + role mappings
 - In the UI: **Admin → LDAP Settings**, then **Admin → AD Group → Role map**
@@ -252,6 +304,9 @@ Option B: if you already have LDAP configured and AD group mappings, just login 
 ### 4) Add inventory
 - **Tags & VLANs**: Create tags and VLANs first (Inventory → Tags/VLANs tabs)
 - **Hosts**: Add hosts with hostname, management IP, assign VLAN and tags
+  - **SSH Port**: Configure the SSH port for deployments (default: 22). Use custom ports (e.g., 2022, 2222) for hosts that don't use the standard SSH port. The system automatically uses the configured port for both Ansible and SSH Direct deployments.
+  - **Firewall Backend**: Choose the firewall backend for each host (`auto`, `nftables`, or `iptables`). See [Firewall Backend Configuration](#firewall-backend-configuration) below for details.
+  - **Note**: Disabled hosts (`enabled=false`) are automatically skipped from all policy deployments. They will never receive firewall policies and will be marked as `SKIPPED` in deployment status.
 - **Interfaces**: Add interfaces per host (name + role such as `data`, `management`, etc.)
 
 ### 5) Create & approve a policy version
@@ -266,6 +321,68 @@ Option B: if you already have LDAP configured and AD group mappings, just login 
 
 ---
 
+## Firewall Backend Configuration
+
+Segmentra supports multiple firewall backends to accommodate different Linux distributions and system configurations. Each host can be configured with a specific firewall backend, and the system automatically handles mixed environments during deployments.
+
+### Firewall Backend Options
+
+- **`auto`** (default): Automatically uses `nftables` unless explicitly set to `iptables`. This is the recommended setting for most modern Linux systems.
+- **`nftables`**: Uses nftables (modern Linux firewall, preferred). Used by default on RHEL 8+, Ubuntu 20.04+, and other modern distributions.
+- **`iptables`**: Uses iptables (legacy Linux firewall). Required for older systems that don't support nftables.
+
+### How Mixed Backend Deployments Work
+
+When deploying policies to multiple hosts with different firewall backends (e.g., 200 hosts where 10 use `iptables` and 190 use `nftables`), Segmentra handles this automatically:
+
+1. **Individual Policy Compilation**: Each host's policy is compiled separately based on its configured `firewall_backend` field:
+   - Hosts with `nftables` or `auto` → generates `.nft` files (nftables format)
+   - Hosts with `iptables` → generates `.iptables` files (iptables format)
+
+2. **Separate Policy Files**: Each host receives its own policy file with the appropriate format:
+   - `hostname.nft` for nftables hosts
+   - `hostname.iptables` for iptables hosts
+
+3. **Unified Deployment**: All hosts are included in a single deployment operation:
+   - The Ansible inventory includes all hosts regardless of backend
+   - Each host's inventory entry points to its specific policy file format
+   - The Ansible playbook automatically detects the file extension and applies the correct firewall commands
+
+4. **Independent Status Tracking**: Each host's deployment status is tracked independently, so you can see which hosts succeeded or failed regardless of their firewall backend.
+
+### Example: Mixed Environment Deployment
+
+```
+Deployment: Policy Set "Web Servers" v2
+Target: 200 hosts (mixed backends)
+
+Bundle Contents:
+├── host_rules/
+│   ├── web-01.nft          (nftables host)
+│   ├── web-02.nft          (nftables host)
+│   ├── web-03.iptables     (iptables host)
+│   ├── web-04.nft          (nftables host)
+│   └── ... (197 more files)
+
+Ansible Inventory:
+[all]
+web-01 ansible_host=... segmentra_policy_file=/bundles/xxx/host_rules/web-01.nft
+web-02 ansible_host=... segmentra_policy_file=/bundles/xxx/host_rules/web-02.nft
+web-03 ansible_host=... segmentra_policy_file=/bundles/xxx/host_rules/web-03.iptables
+web-04 ansible_host=... segmentra_policy_file=/bundles/xxx/host_rules/web-04.nft
+...
+```
+
+**Result**: All 200 hosts receive the correct firewall rules for their backend type in a single deployment operation, with no conflicts or manual intervention required.
+
+### Best Practices
+
+- **Use `auto` for most hosts**: Modern Linux systems will automatically use nftables, which is preferred.
+- **Set `iptables` explicitly**: Only when you know a host requires iptables (older systems, compatibility requirements).
+- **Set `nftables` explicitly**: When you want to ensure nftables is used even if the system might support both.
+
+---
+
 ## Deployment Executors
 
 Segmentra supports two deployment executors, selectable in Admin settings:
@@ -276,6 +393,89 @@ Segmentra supports two deployment executors, selectable in Admin settings:
 - Parallel execution across hosts
 - Requires Ansible container (`segmentra-ansible-runner`)
 - Uses `become: true` (sudo) for all privileged operations
+
+#### How Ansible Executor Connects to the Container
+
+**Connection Mechanism: Docker Socket (Not SSH)**
+
+The app connects to the Ansible executor container using **Docker's API**, not SSH.
+
+**How it works:**
+
+1. **Docker Socket Mounting**
+   - The `segmentra-app` container mounts the Docker socket:
+     ```yaml
+     volumes:
+       - /var/run/docker.sock:/var/run/docker.sock
+     ```
+   - This gives the API container access to the Docker daemon on the host.
+
+2. **Docker Exec Command**
+   - When Ansible executor is selected, the code runs:
+     ```bash
+     docker exec segmentra-ansible-runner ansible-playbook -i /bundles/.../inventory.ini /runner/playbooks/apply-firewall.yml
+     ```
+   - This executes `ansible-playbook` inside the `segmentra-ansible-runner` container.
+
+3. **Shared Volume**
+   - Both containers share the `segmentra_bundles` volume:
+     ```yaml
+     volumes:
+       - segmentra_bundles:/bundles
+     ```
+   - The API container writes deployment bundles (inventory, policy files, SSH keys) to `/bundles/<deploymentId>/`
+   - The Ansible runner container reads from the same path.
+
+**Visual Flow:**
+
+```
+┌─────────────────────────────────┐
+│  segmentra-app (API Container)  │
+│                                  │
+│  1. Generates deployment bundle │
+│     → writes to /bundles/...    │
+│                                  │
+│  2. Executes:                    │
+│     docker exec                  │
+│       segmentra-ansible-runner   │
+│       ansible-playbook ...       │
+│                                  │
+│  (via Docker socket)             │
+└──────────┬──────────────────────┘
+           │ Docker Socket
+           │ /var/run/docker.sock
+           ▼
+┌─────────────────────────────────┐
+│  Docker Daemon (Host)            │
+│                                  │
+│  Executes command in container  │
+└──────────┬──────────────────────┘
+           │
+           ▼
+┌─────────────────────────────────┐
+│  segmentra-ansible-runner       │
+│                                  │
+│  - Runs ansible-playbook         │
+│  - Reads from /bundles/...       │
+│  - Connects to target hosts      │
+│    via SSH (using SSH keys)      │
+└─────────────────────────────────┘
+```
+
+**Important Points:**
+
+- **No SSH between containers**: The API container uses Docker exec via the socket.
+- **SSH is used by Ansible**: The Ansible runner connects to target hosts via SSH using the SSH credentials you configure.
+- **Security Note**: Mounting `/var/run/docker.sock` gives the API container full Docker access. Treat it as **high trust**.
+
+**Code Reference:**
+
+The connection happens in `packages/executor/src/run-ansible.ts`:
+```typescript
+const child = spawn('docker', ['exec', params.runnerContainer, 'ansible-playbook', ...]);
+```
+
+This runs the `docker` CLI command from inside the API container, which communicates with the Docker daemon through the mounted socket.
 
 ### SSH Direct
 - Lightweight direct SSH/SCP execution

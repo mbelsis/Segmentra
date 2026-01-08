@@ -29,7 +29,15 @@ const createDeploymentSchema = z.object({
 
 async function resolveTargets(q: { tags: string[]; vlans: string[]; hosts: string[] }) {
   const ids = new Set<string>();
-  if (q.hosts.length) q.hosts.forEach((x) => ids.add(x));
+  
+  // Only include enabled hosts
+  if (q.hosts.length) {
+    const r = await pool.query(
+      `SELECT id FROM hosts WHERE id = ANY($1::uuid[]) AND enabled=true`,
+      [q.hosts]
+    );
+    r.rows.forEach((x) => ids.add(x.id));
+  }
 
   if (q.tags.length) {
     const r = await pool.query(
@@ -140,11 +148,20 @@ async function generateBundle(deploymentId: string) {
   const dep = depRes.rows[0];
   if (!dep) throw new Error('deployment_not_found');
 
+  // Only process enabled hosts - mark disabled hosts as SKIPPED
+  await pool.query(
+    `UPDATE deployment_hosts 
+     SET status='SKIPPED', finished_at=now(), message='Host is disabled'
+     WHERE deployment_id=$1 
+     AND host_id IN (SELECT id FROM hosts WHERE enabled=false)`,
+    [deploymentId]
+  );
+
   const hostRows = await pool.query(
     `SELECT h.id, h.hostname, h.mgmt_ip, h.ssh_port, h.firewall_backend
      FROM deployment_hosts dh
      JOIN hosts h ON h.id = dh.host_id
-     WHERE dh.deployment_id=$1`,
+     WHERE dh.deployment_id=$1 AND h.enabled=true`,
     [deploymentId]
   );
 
@@ -293,10 +310,26 @@ async function generateBundle(deploymentId: string) {
 deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
   const deploymentId = req.params.deploymentId;
 
+  // Mark disabled hosts as SKIPPED before starting
+  await pool.query(
+    `UPDATE deployment_hosts 
+     SET status='SKIPPED', finished_at=now(), message='Host is disabled'
+     WHERE deployment_id=$1 
+     AND host_id IN (SELECT id FROM hosts WHERE enabled=false)
+     AND status='PENDING'`,
+    [deploymentId]
+  );
+
   await pool.query(`UPDATE deployments SET status='RUNNING', started_at=now() WHERE id=$1`, [deploymentId]);
-  await pool.query(`UPDATE deployment_hosts SET status='RUNNING', started_at=now() WHERE deployment_id=$1`, [
-    deploymentId
-  ]);
+  // Only mark enabled hosts as RUNNING
+  await pool.query(
+    `UPDATE deployment_hosts 
+     SET status='RUNNING', started_at=now() 
+     WHERE deployment_id=$1 
+     AND host_id IN (SELECT id FROM hosts WHERE enabled=true)
+     AND status='PENDING'`,
+    [deploymentId]
+  );
 
   const { bundleDir } = await generateBundle(deploymentId);
 
@@ -338,12 +371,12 @@ deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
     const keyPath = path.join(bundleDir, 'ssh_key');
     fs.writeFileSync(keyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
 
-    // Get hosts and policy files
+    // Get hosts and policy files (only enabled hosts)
     const hostRows = await pool.query(
       `SELECT h.id, h.hostname, h.mgmt_ip, h.ssh_port, h.firewall_backend
        FROM deployment_hosts dh
        JOIN hosts h ON h.id = dh.host_id
-       WHERE dh.deployment_id=$1`,
+       WHERE dh.deployment_id=$1 AND h.enabled=true`,
       [deploymentId]
     );
 
@@ -423,10 +456,11 @@ deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
       [executionId, exitCode, stdoutPath, stderrPath]
     );
 
+    // Only update enabled hosts that were RUNNING (disabled hosts are already SKIPPED)
     await pool.query(
       `UPDATE deployment_hosts
        SET status=$2, finished_at=now(), message=$3
-       WHERE deployment_id=$1`,
+       WHERE deployment_id=$1 AND status='RUNNING'`,
       [deploymentId, ok ? 'SUCCEEDED' : 'FAILED', ok ? 'ok' : 'ansible_failed']
     );
   }

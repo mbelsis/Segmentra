@@ -11,6 +11,7 @@ import { deploymentsRouter } from './routes/deployments.js';
 import { sshCredentialsRouter } from './routes/ssh-credentials.js';
 import { auditRouter } from './routes/audit.js';
 import { dashboardRouter } from './routes/dashboard.js';
+import { troubleshootRouter } from './routes/troubleshoot.js';
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
@@ -23,6 +24,7 @@ app.use('/api', deploymentsRouter);
 app.use('/api/ssh-credentials', sshCredentialsRouter);
 app.use('/api', auditRouter);
 app.use('/api', dashboardRouter);
+app.use('/api/troubleshoot', troubleshootRouter);
 // TODO: add inventory/policies/deployments/audit/admin routers
 app.listen(env.PORT, () => {
     // eslint-disable-next-line no-console

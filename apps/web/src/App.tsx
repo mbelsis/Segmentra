@@ -11,8 +11,10 @@ import { PolicySetDetailPage } from './pages/PolicySetDetailPage'
 import { PolicyVersionPage } from './pages/PolicyVersionPage'
 import { ApprovalsPage } from './pages/ApprovalsPage'
 import { DeploymentsPage } from './pages/DeploymentsPage'
+import { DeploymentDetailPage } from './pages/DeploymentDetailPage'
 import { AuditPage } from './pages/AuditPage'
 import { AdminPage } from './pages/AdminPage'
+import { TroubleshootPage } from './pages/TroubleshootPage'
 
 function App() {
   return (
@@ -34,8 +36,10 @@ function App() {
           <Route path="policy-version/:versionId" element={<PolicyVersionPage />} />
           <Route path="approvals" element={<ApprovalsPage />} />
           <Route path="deployments" element={<DeploymentsPage />} />
+          <Route path="deployment/:deploymentId" element={<DeploymentDetailPage />} />
           <Route path="audit" element={<AuditPage />} />
           <Route path="admin" element={<AdminPage />} />
+          <Route path="troubleshoot" element={<TroubleshootPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
