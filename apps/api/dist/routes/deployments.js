@@ -21,6 +21,17 @@ const createDeploymentSchema = z.object({
     canarySize: z.number().int().min(1).optional(),
     batchSize: z.number().int().min(1).optional()
 });
+async function getManagementVlanCidrs() {
+    const mgmtVlanRes = await pool.query(`SELECT value FROM system_settings WHERE key='management_vlan_id'`);
+    const mgmtVlanId = mgmtVlanRes.rows[0]?.value || null;
+    if (mgmtVlanId) {
+        const vlanRes = await pool.query(`SELECT subnet FROM vlans WHERE id=$1`, [mgmtVlanId]);
+        if (vlanRes.rows[0]?.subnet) {
+            return [vlanRes.rows[0].subnet];
+        }
+    }
+    return [];
+}
 async function resolveTargets(q) {
     const ids = new Set();
     // Only include enabled hosts
@@ -216,7 +227,7 @@ async function generateBundle(deploymentId) {
             policyInterfaceScope,
             rules,
             sets,
-            baseline: { mgmtSshCidrs: ['10.0.0.0/8'] }
+            baseline: { mgmtSshCidrs: await getManagementVlanCidrs() }
         });
         const ext = compiled.backend === 'nftables' ? 'nft' : 'iptables';
         const policyFileHostPath = path.join(hostRulesDir, `${h.hostname}.${ext}`);

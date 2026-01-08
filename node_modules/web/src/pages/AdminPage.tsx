@@ -30,16 +30,23 @@ export function AdminPage() {
   // Executor setting
   const [executor, setExecutor] = useState<'ansible' | 'ssh'>('ansible');
 
+  // Management VLAN setting
+  const [managementVlan, setManagementVlan] = useState<any>(null);
+  const [vlans, setVlans] = useState<any[]>([]);
+  const [selectedManagementVlanId, setSelectedManagementVlanId] = useState<string>('');
+
   useEffect(() => {
     loadData();
   }, []);
 
   async function loadData() {
     try {
-      const [ldapRes, sshRes, executorRes] = await Promise.all([
+      const [ldapRes, sshRes, executorRes, mgmtVlanRes, vlansRes] = await Promise.all([
         api.ldapSettings().catch(() => ({ ldapSettings: null })),
         api.sshCredentials().catch(() => ({ sshCredentials: [] })),
-        api.executorSetting().catch(() => ({ executor: 'ansible' }))
+        api.executorSetting().catch(() => ({ executor: 'ansible' })),
+        api.managementVlanSetting().catch(() => ({ managementVlan: null })),
+        api.vlans().catch(() => ({ vlans: [] }))
       ]);
       
       const ldapSettings = ldapRes.ldapSettings;
@@ -55,6 +62,10 @@ export function AdminPage() {
       
       setSshCreds(sshRes.sshCredentials || []);
       setExecutor(executorRes.executor === 'ssh' ? 'ssh' : 'ansible');
+      
+      setManagementVlan(mgmtVlanRes.managementVlan);
+      setVlans(vlansRes.vlans || []);
+      setSelectedManagementVlanId(mgmtVlanRes.managementVlan?.id || '');
     } catch (e: any) {
       setError(String(e?.message ?? e));
     }
@@ -69,6 +80,27 @@ export function AdminPage() {
       const r = await api.putExecutorSetting({ executor });
       setExecutor(r.executor as 'ansible' | 'ssh');
       setSuccess(`Deployment executor set to ${r.executor.toUpperCase()}`);
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function saveManagementVlanSetting() {
+    setLoading(true);
+    setError('');
+    setSuccess('');
+    
+    try {
+      const r = await api.putManagementVlanSetting({ vlanId: selectedManagementVlanId || null });
+      setManagementVlan(r.managementVlan);
+      if (r.managementVlan) {
+        setSuccess(`Management VLAN set to ${r.managementVlan.name} (VLAN ${r.managementVlan.vlan_tag})`);
+      } else {
+        setSuccess('Management VLAN cleared (baseline SSH access disabled)');
+      }
       setTimeout(() => setSuccess(''), 3000);
     } catch (e: any) {
       setError(String(e?.message ?? e));
@@ -235,6 +267,52 @@ export function AdminPage() {
             disabled={loading}
           >
             {loading ? 'Saving...' : 'Save Executor Setting'}
+          </button>
+        </div>
+      </div>
+
+      {/* Management VLAN Setting */}
+      <div className="card">
+        <h3>Management VLAN (Baseline SSH Access)</h3>
+        <p style={{ marginBottom: 20, color: '#666', fontSize: '0.9em' }}>
+          Configure the default VLAN for baseline management SSH access. This allows administrators to SSH into hosts from the management network, regardless of other firewall rules. The VLAN's subnet will be used as the CIDR range for SSH access (port 22).
+        </p>
+        
+        <div className="form-grid">
+          <div className="form-group">
+            <label>Management VLAN</label>
+            <select
+              value={selectedManagementVlanId}
+              onChange={(e) => setSelectedManagementVlanId(e.target.value)}
+              disabled={loading}
+            >
+              <option value="">None (disable baseline SSH access)</option>
+              {vlans.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.name} (VLAN {v.vlan_tag}){v.subnet ? ` - ${v.subnet}` : ''}
+                </option>
+              ))}
+            </select>
+            <small>
+              {selectedManagementVlanId && managementVlan
+                ? `Current: ${managementVlan.name} (VLAN ${managementVlan.vlan_tag})${managementVlan.subnet ? ` - Subnet: ${managementVlan.subnet}` : ' - No subnet configured'}`
+                : 'Select a VLAN to enable baseline SSH access from that VLAN\'s subnet.'}
+            </small>
+            {selectedManagementVlanId && !vlans.find(v => v.id === selectedManagementVlanId)?.subnet && (
+              <div style={{ marginTop: 8, padding: 8, background: '#fff3cd', borderRadius: 4, fontSize: '0.85em' }}>
+                ⚠️ Warning: Selected VLAN does not have a subnet configured. Please configure the subnet in the Inventory → VLANs section.
+              </div>
+            )}
+          </div>
+        </div>
+        
+        <div className="form-actions">
+          <button
+            onClick={saveManagementVlanSetting}
+            className="btn-primary"
+            disabled={loading}
+          >
+            {loading ? 'Saving...' : 'Save Management VLAN Setting'}
           </button>
         </div>
       </div>

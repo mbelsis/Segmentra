@@ -82,7 +82,7 @@ policyVersionsRouter.put('/policy-versions/:versionId', async (req, res) => {
          interface_scope_type = COALESCE($3, interface_scope_type),
          interface_scope_roles = COALESCE($4, interface_scope_roles),
          interface_scope_names = COALESCE($5, interface_scope_names)
-     WHERE id=$1 AND status='DRAFT'
+     WHERE id=$1 AND (status='DRAFT' OR status='REJECTED')
      RETURNING *`,
     [req.params.versionId, b.changeSummary ?? null, b.interfaceScopeType ?? null, b.interfaceScopeRoles ?? null, b.interfaceScopeNames ?? null]
   );
@@ -95,8 +95,8 @@ policyVersionsRouter.post('/policy-versions/:versionId/submit-approval', async (
   const userId = userRes.rows[0]?.id ?? null;
   const { rows } = await pool.query(
     `UPDATE policy_versions
-     SET status='PENDING_APPROVAL', submitted_at=now()
-     WHERE id=$1 AND status='DRAFT'
+     SET status='PENDING_APPROVAL', submitted_at=now(), rejection_reason=NULL
+     WHERE id=$1 AND (status='DRAFT' OR status='REJECTED')
      RETURNING *`,
     [req.params.versionId]
   );
@@ -104,7 +104,7 @@ policyVersionsRouter.post('/policy-versions/:versionId/submit-approval', async (
   await pool.query(
     `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
      VALUES ($1,'POLICY_SUBMIT','policy_version',$2,$3)`,
-    [userId, req.params.versionId, { by: req.auth!.username }]
+    [userId, req.params.versionId, { by: req.auth!.username, resubmitted: rows[0].status === 'REJECTED' }]
   );
   res.json({ version: rows[0] });
 });

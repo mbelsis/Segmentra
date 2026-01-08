@@ -139,6 +139,7 @@ export function PolicySetDetailPage() {
               <th>Status</th>
               <th>Interface Scope</th>
               <th>Change Summary</th>
+              <th>Rejection Reason</th>
               <th>Created</th>
               <th>Actions</th>
             </tr>
@@ -147,10 +148,7 @@ export function PolicySetDetailPage() {
             {versions.map((v) => {
               const isDraft = v.status === 'DRAFT';
               const isApproved = v.status === 'APPROVED';
-              // Debug: log status to console
-              if (v.status === 'APPROVED' || v.status === 'Approved') {
-                console.log('Found APPROVED version:', v.id, 'status:', v.status);
-              }
+              const isRejected = v.status === 'REJECTED';
               return (
                 <tr key={v.id}>
                   <td><strong>v{v.version_number}</strong></td>
@@ -188,12 +186,22 @@ export function PolicySetDetailPage() {
                     )}
                   </td>
                   <td>{v.change_summary || '-'}</td>
+                  <td>
+                    {isRejected && v.rejection_reason ? (
+                      <div style={{ color: '#F44336', fontSize: '0.9em', maxWidth: '300px' }}>
+                        <strong>Rejected:</strong> {v.rejection_reason}
+                      </div>
+                    ) : '-'}
+                  </td>
                   <td>{new Date(v.created_at).toLocaleString()}</td>
                   <td>
                     <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                       <button onClick={() => navigate(`/policy-version/${v.id}`)} className="btn-small btn-primary">View Rules</button>
                       {isDraft && (
                         <button onClick={() => submitForApproval(v.id)} className="btn-small btn-secondary">Submit for Approval</button>
+                      )}
+                      {isRejected && (
+                        <button onClick={() => submitForApproval(v.id)} className="btn-small btn-secondary">Resubmit for Approval</button>
                       )}
                       {isApproved && (
                         <button onClick={() => cloneVersion(v.id)} className="btn-small btn-secondary">Clone</button>
@@ -205,7 +213,7 @@ export function PolicySetDetailPage() {
             })}
             {versions.length === 0 && (
               <tr>
-                <td colSpan={7} className="empty-state">
+                <td colSpan={8} className="empty-state">
                   No versions yet. Click "New Version" to create one.
                 </td>
               </tr>

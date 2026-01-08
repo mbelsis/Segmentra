@@ -105,6 +105,20 @@ policyRenderRouter.get('/policy-versions/:versionId/render/host/:hostId', async 
   })
   );
 
+  // Get management VLAN setting
+  const mgmtVlanRes = await pool.query(
+    `SELECT value FROM system_settings WHERE key='management_vlan_id'`
+  );
+  const mgmtVlanId = mgmtVlanRes.rows[0]?.value || null;
+  
+  let mgmtSshCidrs: string[] = [];
+  if (mgmtVlanId) {
+    const vlanRes = await pool.query(`SELECT subnet FROM vlans WHERE id=$1`, [mgmtVlanId]);
+    if (vlanRes.rows[0]?.subnet) {
+      mgmtSshCidrs = [vlanRes.rows[0].subnet];
+    }
+  }
+
   const compiled = compileHostPolicy({
     host: {
       id: hostRes.rows[0].id,
@@ -116,7 +130,7 @@ policyRenderRouter.get('/policy-versions/:versionId/render/host/:hostId', async 
     policyInterfaceScope,
     rules,
     sets,
-    baseline: { mgmtSshCidrs: ['10.0.0.0/8'] }
+    baseline: { mgmtSshCidrs }
   });
 
   res.json({ backend: compiled.backend, sha256: compiled.sha256, text: compiled.text });

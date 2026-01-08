@@ -172,4 +172,51 @@ adminRouter.put('/executor-setting', requireAuth, requireRole('admin'), async (r
   res.json({ executor: rows[0].value });
 });
 
+adminRouter.get('/management-vlan-setting', requireAuth, requireRole('admin'), async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT value FROM system_settings WHERE key='management_vlan_id'`
+  );
+  const vlanId = rows[0]?.value || null;
+  
+  if (vlanId) {
+    const vlanRes = await pool.query(`SELECT id, vlan_tag, name, subnet FROM vlans WHERE id=$1`, [vlanId]);
+    res.json({ managementVlan: vlanRes.rows[0] || null });
+  } else {
+    res.json({ managementVlan: null });
+  }
+});
+
+const managementVlanSettingSchema = z.object({
+  vlanId: z.string().uuid().nullable()
+});
+
+adminRouter.put('/management-vlan-setting', requireAuth, requireRole('admin'), async (req, res) => {
+  const parsed = managementVlanSettingSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
+
+  // Validate VLAN exists if provided
+  if (parsed.data.vlanId) {
+    const vlanCheck = await pool.query(`SELECT id FROM vlans WHERE id=$1`, [parsed.data.vlanId]);
+    if (!vlanCheck.rows[0]) {
+      return res.status(404).json({ error: 'vlan_not_found' });
+    }
+  }
+
+  const value = parsed.data.vlanId || '';
+  const { rows } = await pool.query(
+    `INSERT INTO system_settings (key, value, updated_at)
+     VALUES ('management_vlan_id', $1, now())
+     ON CONFLICT (key) DO UPDATE SET value=$1, updated_at=now()
+     RETURNING value`,
+    [value]
+  );
+
+  if (rows[0].value) {
+    const vlanRes = await pool.query(`SELECT id, vlan_tag, name, subnet FROM vlans WHERE id=$1`, [rows[0].value]);
+    res.json({ managementVlan: vlanRes.rows[0] || null });
+  } else {
+    res.json({ managementVlan: null });
+  }
+});
+
 

@@ -31,6 +31,16 @@ export function AppShell() {
             Logout
           </button>
         </div>
+        <div style={{ 
+          marginTop: 'auto', 
+          paddingTop: 16, 
+          textAlign: 'center', 
+          fontSize: '0.75em', 
+          color: '#666',
+          borderTop: '1px solid #e0e0e0'
+        }}>
+          © Belsis Meletis
+        </div>
       </nav>
       <main className="card">
         <Outlet />

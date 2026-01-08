@@ -10,6 +10,7 @@ export function PolicyVersionPage() {
   const [hosts, setHosts] = useState<any[]>([]);
   const [tags, setTags] = useState<any[]>([]);
   const [vlans, setVlans] = useState<any[]>([]);
+  const [managementVlan, setManagementVlan] = useState<any>(null);
   const [showAddRule, setShowAddRule] = useState(false);
   const [editingRule, setEditingRule] = useState<string | null>(null);
   const [error, setError] = useState<string>('');
@@ -40,6 +41,7 @@ export function PolicyVersionPage() {
     api.hosts().then((r) => setHosts(r.hosts)).catch(() => undefined);
     api.tags().then((r) => setTags(r.tags)).catch(() => undefined);
     api.vlans().then((r) => setVlans(r.vlans)).catch(() => undefined);
+    api.managementVlanSetting().then((r) => setManagementVlan(r.managementVlan)).catch(() => undefined);
   }, [versionId]);
 
   async function loadData() {
@@ -81,8 +83,8 @@ export function PolicyVersionPage() {
 
   async function saveRule() {
     if (!versionId) return;
-    if (version?.status !== 'DRAFT') {
-      setError('Only DRAFT versions can be edited');
+    if (version?.status !== 'DRAFT' && version?.status !== 'REJECTED') {
+      setError('Only DRAFT or REJECTED versions can be edited');
       return;
     }
     if (!formSourceValue.trim()) {
@@ -126,8 +128,8 @@ export function PolicyVersionPage() {
   }
 
   async function deleteRule(ruleId: string) {
-    if (version?.status !== 'DRAFT') {
-      setError('Only DRAFT versions can be edited');
+    if (version?.status !== 'DRAFT' && version?.status !== 'REJECTED') {
+      setError('Only DRAFT or REJECTED versions can be edited');
       return;
     }
     if (!confirm('Delete this rule?')) return;
@@ -159,8 +161,8 @@ export function PolicyVersionPage() {
 
   async function updatePolicyInterfaceScope() {
     if (!versionId) return;
-    if (version?.status !== 'DRAFT') {
-      setError('Only DRAFT versions can be edited');
+    if (version?.status !== 'DRAFT' && version?.status !== 'REJECTED') {
+      setError('Only DRAFT or REJECTED versions can be edited');
       return;
     }
     try {
@@ -213,7 +215,7 @@ export function PolicyVersionPage() {
             <select
               value={policyInterfaceScopeType}
               onChange={(e) => setPolicyInterfaceScopeType(e.target.value as any)}
-              disabled={version.status !== 'DRAFT'}
+              disabled={version.status !== 'DRAFT' && version.status !== 'REJECTED'}
             >
               <option value="ALL_INTERFACES">All Interfaces</option>
               <option value="INTERFACE_ROLE">Interface Role</option>
@@ -229,7 +231,7 @@ export function PolicyVersionPage() {
               value={policyInterfaceScopeRoles.join(', ')}
               onChange={(e) => setPolicyInterfaceScopeRoles(e.target.value.split(',').map(s => s.trim()).filter(Boolean))}
               placeholder="data, backup"
-              disabled={version.status !== 'DRAFT'}
+              disabled={version.status !== 'DRAFT' && version.status !== 'REJECTED'}
             />
           </div>
         )}
@@ -241,11 +243,11 @@ export function PolicyVersionPage() {
               value={policyInterfaceScopeNames.join(', ')}
               onChange={(e) => setPolicyInterfaceScopeNames(e.target.value.split(',').map(s => s.trim()).filter(Boolean))}
               placeholder="eth0, eth1"
-              disabled={version.status !== 'DRAFT'}
+              disabled={version.status !== 'DRAFT' && version.status !== 'REJECTED'}
             />
           </div>
         )}
-        {version.status === 'DRAFT' && (
+        {(version.status === 'DRAFT' || version.status === 'REJECTED') && (
           <button onClick={updatePolicyInterfaceScope} className="btn-secondary">Update Interface Scope</button>
         )}
       </div>
@@ -254,12 +256,15 @@ export function PolicyVersionPage() {
       <div className="card">
         <div className="card-header">
           <h3>Firewall Rules</h3>
-          {version.status === 'DRAFT' && (
+          {(version.status === 'DRAFT' || version.status === 'REJECTED') && (
             <button onClick={() => { resetForm(); setShowAddRule(true); }} className="btn-primary">+ Add Rule</button>
+          )}
+          {version.status !== 'DRAFT' && version.status !== 'REJECTED' && (
+            <span style={{ color: '#666', fontStyle: 'italic' }}>Rules cannot be edited for {version.status} versions</span>
           )}
         </div>
 
-        {showAddRule && version.status === 'DRAFT' && (
+        {showAddRule && (version.status === 'DRAFT' || version.status === 'REJECTED') && (
           <div className="rule-form">
             <h4>{editingRule ? 'Edit Rule' : 'Add Rule'}</h4>
             <div className="form-grid">
@@ -434,6 +439,62 @@ export function PolicyVersionPage() {
             </tr>
           </thead>
           <tbody>
+            {/* Baseline Rules - Always shown first */}
+            <tr style={{ background: '#f5f5f5', fontWeight: 'bold' }}>
+              <td colSpan={(version.status === 'DRAFT' || version.status === 'REJECTED') ? 9 : 8} style={{ padding: 12, borderBottom: '2px solid #ddd' }}>
+                Baseline Rules (System-Generated)
+              </td>
+            </tr>
+            <tr style={{ background: '#fafafa' }}>
+              <td>0</td>
+              <td><code>IN</code></td>
+              <td><strong className="allow">ALLOW</strong></td>
+              <td><code>any</code></td>
+              <td>-</td>
+              <td><code>CIDR</code>: <code>lo</code> (loopback)</td>
+              <td>NONE</td>
+              <td>Loopback interface</td>
+              {(version.status === 'DRAFT' || version.status === 'REJECTED') && <td></td>}
+            </tr>
+            <tr style={{ background: '#fafafa' }}>
+              <td>1</td>
+              <td><code>IN</code></td>
+              <td><strong className="allow">ALLOW</strong></td>
+              <td><code>any</code></td>
+              <td>-</td>
+              <td><code>CIDR</code>: Established/Related connections</td>
+              <td>NONE</td>
+              <td>Connection tracking</td>
+              {(version.status === 'DRAFT' || version.status === 'REJECTED') && <td></td>}
+            </tr>
+            {managementVlan?.subnet && (
+              <tr style={{ background: '#fafafa' }}>
+                <td>2</td>
+                <td><code>IN</code></td>
+                <td><strong className="allow">ALLOW</strong></td>
+                <td><code>tcp</code></td>
+                <td>22</td>
+                <td><code>CIDR</code>: {managementVlan.subnet} (Management VLAN: {managementVlan.name})</td>
+                <td>NONE</td>
+                <td>Baseline SSH access from management network</td>
+                {(version.status === 'DRAFT' || version.status === 'REJECTED') && <td></td>}
+              </tr>
+            )}
+            {!managementVlan && (
+              <tr style={{ background: '#fff3cd' }}>
+                <td colSpan={(version.status === 'DRAFT' || version.status === 'REJECTED') ? 9 : 8} style={{ padding: 8, fontSize: '0.9em', color: '#856404' }}>
+                  ⚠️ No management VLAN configured. Configure it in Admin → Management VLAN to enable baseline SSH access.
+                </td>
+              </tr>
+            )}
+            {/* Policy Rules */}
+            {rules.length > 0 && (
+              <tr style={{ background: '#f5f5f5', fontWeight: 'bold' }}>
+                <td colSpan={(version.status === 'DRAFT' || version.status === 'REJECTED') ? 9 : 8} style={{ padding: 12, borderTop: '2px solid #ddd', borderBottom: '2px solid #ddd' }}>
+                  Policy Rules
+                </td>
+              </tr>
+            )}
             {rules.map((r) => (
               <tr key={r.id}>
                 <td>{r.order_index}</td>
@@ -450,7 +511,7 @@ export function PolicyVersionPage() {
                 </td>
                 <td>{r.log_mode}</td>
                 <td>{r.comment || '-'}</td>
-                {version.status === 'DRAFT' && (
+                {(version.status === 'DRAFT' || version.status === 'REJECTED') && (
                   <td>
                     <button onClick={() => editRule(r)} className="btn-small">Edit</button>
                     <button onClick={() => deleteRule(r.id)} className="btn-small btn-danger">Delete</button>
@@ -460,8 +521,8 @@ export function PolicyVersionPage() {
             ))}
             {rules.length === 0 && (
               <tr>
-                <td colSpan={version.status === 'DRAFT' ? 9 : 8} className="empty-state">
-                  No rules yet. {version.status === 'DRAFT' && 'Click "Add Rule" to create one.'}
+                <td colSpan={(version.status === 'DRAFT' || version.status === 'REJECTED') ? 9 : 8} className="empty-state">
+                  No rules yet. {(version.status === 'DRAFT' || version.status === 'REJECTED') && 'Click "Add Rule" to create one.'}
                 </td>
               </tr>
             )}

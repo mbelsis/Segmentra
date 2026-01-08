@@ -53,6 +53,7 @@ export const api = {
   bulkAssignVlan: (hostIds: string[], vlanId: string | null) => request<{ ok: boolean; updated: number }>('/hosts/bulk/assign-vlan', { method: 'POST', body: JSON.stringify({ hostIds, vlanId }) }),
   bulkAssignTag: (hostIds: string[], tagId: string) => request<{ ok: boolean; added: number }>('/hosts/bulk/assign-tag', { method: 'POST', body: JSON.stringify({ hostIds, tagId }) }),
   bulkSetEnabled: (hostIds: string[], enabled: boolean) => request<{ ok: boolean; updated: number }>('/hosts/bulk/set-enabled', { method: 'POST', body: JSON.stringify({ hostIds, enabled }) }),
+  bulkImportHosts: (csvData: string) => request<{ imported: number; failed: number; results: Array<{ hostname: string; success: boolean; error?: string }> }>('/hosts/bulk/import', { method: 'POST', body: JSON.stringify({ csvData }) }),
 
   tags: () => request<{ tags: any[] }>('/tags'),
   createTag: (b: any) => request<{ tag: any }>('/tags', { method: 'POST', body: JSON.stringify(b) }),
@@ -112,6 +113,8 @@ export const api = {
   addGroupMap: (b: any) => request<{ map: any }>('/admin/ad-group-role-map', { method: 'POST', body: JSON.stringify(b) }),
   executorSetting: () => request<{ executor: string }>('/admin/executor-setting'),
   putExecutorSetting: (b: any) => request<{ executor: string }>('/admin/executor-setting', { method: 'PUT', body: JSON.stringify(b) }),
+  managementVlanSetting: () => request<{ managementVlan: any }>('/admin/management-vlan-setting'),
+  putManagementVlanSetting: (b: any) => request<{ managementVlan: any }>('/admin/management-vlan-setting', { method: 'PUT', body: JSON.stringify(b) }),
 
   sshCredentials: () => request<{ sshCredentials: any[] }>('/ssh-credentials'),
   createSshCredential: (b: any) => request<{ sshCredential: any }>('/ssh-credentials', { method: 'POST', body: JSON.stringify(b) }),

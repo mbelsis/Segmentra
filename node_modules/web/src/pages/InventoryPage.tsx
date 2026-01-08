@@ -27,6 +27,10 @@ export function InventoryPage() {
   const [pagination, setPagination] = useState<{ page: number; limit: number; total: number; totalPages: number } | null>(null);
   const [bulkVlanId, setBulkVlanId] = useState<string>('');
   const [bulkTagId, setBulkTagId] = useState<string>('');
+  const [showImport, setShowImport] = useState(false);
+  const [csvFile, setCsvFile] = useState<File | null>(null);
+  const [importResults, setImportResults] = useState<any>(null);
+  const [importing, setImporting] = useState(false);
   
   // Tags state
   const [tags, setTags] = useState<any[]>([]);
@@ -64,6 +68,31 @@ export function InventoryPage() {
       setVlans(vlansRes.vlans || []);
     } catch (e: any) {
       setError(String(e?.message ?? e));
+    }
+  }
+
+  async function handleBulkImport() {
+    if (!csvFile) {
+      setError('Please select a CSV file');
+      return;
+    }
+
+    setImporting(true);
+    setError(null);
+    setImportResults(null);
+
+    try {
+      const text = await csvFile.text();
+      const result = await api.bulkImportHosts(text);
+      setImportResults(result);
+      if (result.imported > 0) {
+        // Reload hosts to show imported ones
+        loadHosts();
+      }
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    } finally {
+      setImporting(false);
     }
   }
 
@@ -382,6 +411,88 @@ export function InventoryPage() {
       {/* Hosts Tab */}
       {activeTab === 'hosts' && (
         <>
+          {/* Bulk Import Section */}
+          <div className="card">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <h3>Bulk Import Hosts (CSV)</h3>
+              <button onClick={() => { setShowImport(!showImport); setImportResults(null); }} className="btn-secondary">
+                {showImport ? 'Hide Import' : 'Show Import'}
+              </button>
+            </div>
+            {showImport && (
+              <div>
+                <div style={{ marginBottom: 16, padding: 12, background: '#f5f5f5', borderRadius: 4, fontSize: '0.9em' }}>
+                  <strong>CSV Format:</strong>
+                  <pre style={{ marginTop: 8, fontSize: '0.85em', overflow: 'auto' }}>
+{`hostname,mgmt_ip,ssh_port,vlan,tags,firewall_backend,enabled
+server1,10.0.0.1,22,Management,web-server,nftables,true
+server2,10.0.0.2,2222,Production,db-server,auto,true`}
+                  </pre>
+                  <div style={{ marginTop: 8 }}>
+                    <strong>Columns:</strong>
+                    <ul style={{ marginTop: 4, paddingLeft: 20 }}>
+                      <li><strong>hostname</strong> (required) - Host hostname</li>
+                      <li><strong>mgmt_ip</strong> (optional) - Management IP address</li>
+                      <li><strong>ssh_port</strong> (optional) - SSH port (default: 22)</li>
+                      <li><strong>vlan</strong> (optional) - VLAN name or tag number</li>
+                      <li><strong>tags</strong> (optional) - Comma-separated tag names</li>
+                      <li><strong>firewall_backend</strong> (optional) - auto, nftables, or iptables (default: auto)</li>
+                      <li><strong>enabled</strong> (optional) - true/false (default: true)</li>
+                    </ul>
+                  </div>
+                </div>
+                <div className="form-group">
+                  <label>CSV File</label>
+                  <input
+                    type="file"
+                    accept=".csv,text/csv"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      setCsvFile(file || null);
+                      setImportResults(null);
+                    }}
+                    disabled={importing}
+                  />
+                </div>
+                {csvFile && (
+                  <div className="form-actions">
+                    <button
+                      onClick={handleBulkImport}
+                      className="btn-primary"
+                      disabled={importing}
+                    >
+                      {importing ? 'Importing...' : 'Import Hosts'}
+                    </button>
+                    <button
+                      onClick={() => { setCsvFile(null); setImportResults(null); }}
+                      className="btn-secondary"
+                      disabled={importing}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                )}
+                {importResults && (
+                  <div style={{ marginTop: 16, padding: 12, borderRadius: 4, background: importResults.failed === 0 ? '#e8f5e9' : '#fff3cd', border: `1px solid ${importResults.failed === 0 ? '#4CAF50' : '#ffc107'}` }}>
+                    <div style={{ fontWeight: 'bold', marginBottom: 8 }}>
+                      Import Complete: {importResults.imported} imported, {importResults.failed} failed
+                    </div>
+                    {importResults.failed > 0 && (
+                      <div style={{ marginTop: 8 }}>
+                        <strong>Failed imports:</strong>
+                        <ul style={{ marginTop: 4, paddingLeft: 20 }}>
+                          {importResults.results.filter((r: any) => !r.success).map((r: any, idx: number) => (
+                            <li key={idx}>{r.hostname}: {r.error}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
           <div className="card">
             <h3>{editingHost ? 'Edit Host' : 'Add Host'}</h3>
             <div className="form-grid">
