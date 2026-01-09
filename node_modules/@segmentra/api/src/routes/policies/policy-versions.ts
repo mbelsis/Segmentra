@@ -5,7 +5,6 @@ import { pool } from '../../db/pool.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 import { comparePolicyVersions } from '../../services/policy-diff.js';
 import { isPolicyVersionHighRisk } from '../../services/high-risk.js';
-import { isPolicyVersionHighRisk } from '../../services/high-risk.js';
 
 export const policyVersionsRouter = Router();
 policyVersionsRouter.use(requireAuth);
@@ -77,7 +76,7 @@ policyVersionsRouter.get('/policy-versions/:versionId', requireRole('viewer', 'o
   res.json({ version: rows[0] });
 });
 
-policyVersionsRouter.put('/policy-versions/:versionId', async (req, res) => {
+policyVersionsRouter.put('/policy-versions/:versionId', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = createVersionSchema.partial().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
   const b = parsed.data;
@@ -95,7 +94,7 @@ policyVersionsRouter.put('/policy-versions/:versionId', async (req, res) => {
   res.json({ version: rows[0] });
 });
 
-policyVersionsRouter.post('/policy-versions/:versionId/submit-approval', async (req, res) => {
+policyVersionsRouter.post('/policy-versions/:versionId/submit-approval', requireRole('operator', 'admin'), async (req, res) => {
   const userRes = await pool.query(`SELECT id FROM users WHERE username=$1 LIMIT 1`, [req.auth!.username]);
   const userId = userRes.rows[0]?.id ?? null;
   
@@ -197,7 +196,7 @@ policyVersionsRouter.post(
   }
 );
 
-policyVersionsRouter.post('/policy-versions/:versionId/clone', async (req, res) => {
+policyVersionsRouter.post('/policy-versions/:versionId/clone', requireRole('operator', 'admin'), async (req, res) => {
   const userRes = await pool.query(`SELECT id FROM users WHERE username=$1 LIMIT 1`, [req.auth!.username]);
   const userId = userRes.rows[0]?.id ?? null;
 
@@ -326,7 +325,7 @@ policyVersionsRouter.get('/policy-versions/:versionId/diff', async (req, res) =>
  * POST /policy-versions/:candidateVersionId/impact-diff
  * Body: { currentVersionId: string, hostIds: string[] }
  */
-policyVersionsRouter.post('/policy-versions/:candidateVersionId/impact-diff', async (req, res) => {
+policyVersionsRouter.post('/policy-versions/:candidateVersionId/impact-diff', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const { currentVersionId, hostIds } = req.body;
   const candidateVersionId = req.params.candidateVersionId;
 

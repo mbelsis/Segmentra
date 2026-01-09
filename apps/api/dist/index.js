@@ -29,6 +29,26 @@ app.use('/api', dashboardRouter);
 app.use('/api/troubleshoot', troubleshootRouter);
 app.use('/api/compliance', complianceRouter);
 app.use('/api/host-readiness', hostReadinessRouter);
+// Global error handler middleware (must be last)
+app.use((err, req, res, next) => {
+    // eslint-disable-next-line no-console
+    console.error('[Unhandled Error]', err);
+    res.status(500).json({
+        error: 'internal_server_error',
+        message: err.message || 'An unexpected error occurred'
+    });
+});
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+    // eslint-disable-next-line no-console
+    console.error('[Unhandled Promise Rejection]', reason);
+});
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+    // eslint-disable-next-line no-console
+    console.error('[Uncaught Exception]', error);
+    // Don't exit immediately - let the error handler middleware catch it
+});
 // TODO: add inventory/policies/deployments/audit/admin routers
 app.listen(env.PORT, () => {
     // eslint-disable-next-line no-console

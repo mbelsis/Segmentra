@@ -3,8 +3,9 @@ import { z } from 'zod';
 import { pool } from '../../db/pool.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 export const policySetsRouter = Router();
-policySetsRouter.use(requireAuth, requireRole('operator', 'admin'));
-policySetsRouter.get('/', async (_req, res) => {
+policySetsRouter.use(requireAuth);
+// GET endpoints are read-only and accessible to viewers
+policySetsRouter.get('/', requireRole('viewer', 'operator', 'admin'), async (_req, res) => {
     const { rows } = await pool.query(`SELECT * FROM policy_sets ORDER BY created_at DESC`);
     res.json({ policySets: rows });
 });
@@ -16,7 +17,8 @@ const createPolicySetSchema = z.object({
     scopeVlanId: z.string().uuid().optional().nullable(),
     hostIds: z.array(z.string().uuid()).optional()
 });
-policySetsRouter.post('/', async (req, res) => {
+// Write operations require operator/admin
+policySetsRouter.post('/', requireRole('operator', 'admin'), async (req, res) => {
     const parsed = createPolicySetSchema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: 'invalid_body' });
@@ -53,7 +55,7 @@ policySetsRouter.post('/', async (req, res) => {
         client.release();
     }
 });
-policySetsRouter.get('/:id', async (req, res) => {
+policySetsRouter.get('/:id', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
     const { rows } = await pool.query(`SELECT * FROM policy_sets WHERE id=$1`, [req.params.id]);
     if (!rows[0])
         return res.status(404).json({ error: 'not_found' });

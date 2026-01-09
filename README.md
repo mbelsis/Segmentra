@@ -19,6 +19,10 @@ Segmentra is an on‑prem, web-based **fleet firewall & microsegmentation manage
 - **Policy Sets**: Organize firewall policies by scope (Tags, VLANs, or Host Lists)
 - **Version Control**: Track all policy changes with versioning and change summaries
 - **Approval Workflow**: Multi-stage approval process with separation of duties
+- **High-Risk Detection**: Automatic detection of potentially dangerous policy changes
+  - Identifies wide-open rules, broad source ranges, and risky configurations
+  - Requires different approver for high-risk policies (no self-approval, even for admins)
+  - Evaluates risk based on interface scope, target count, source ranges, and sensitive ports
 - **Policy Impact Analysis**: Compare policy versions before approval to see what will change
   - View semantic diff: new allows, removed allows, new denies, removed denies
   - Per-host impact analysis for sample hosts
@@ -373,6 +377,19 @@ Segmentra now includes several advanced features for production-ready firewall m
 - **Simple Scheduling**: "Tonight at 02:00" style datetime scheduling
 - **Automatic Processing**: Background job automatically starts scheduled deployments
 - **No Complex Logic**: Simple and reliable deferred execution
+
+### ✅ High-Risk Policy Detection
+- **Automatic Risk Assessment**: System automatically evaluates policy versions for high-risk patterns
+- **Comprehensive Heuristics**: Detects dangerous configurations including:
+  - Wide interface scope with many targets (ALL_INTERFACES + 20+ hosts)
+  - Very broad source ranges (0.0.0.0/0, /0-/8) allowing sensitive ports (SSH, databases, RDP)
+  - Management access opened beyond management VLAN
+  - "Any/any" style rules with wide port ranges
+- **Enhanced Approval Requirements**: High-risk policies require a different approver
+  - No self-approval allowed, even for admins
+  - Ensures critical changes receive proper review
+- **Risk Evaluation**: Re-evaluates risk during deployment creation based on actual target count
+- **Audit Trail**: High-risk status is logged in audit events for compliance
 
 ---
 

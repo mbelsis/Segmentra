@@ -14,6 +14,7 @@ import { requireAuth, requireRole } from '../middleware/auth.js';
 import { createAuditEvent } from '../services/audit.js';
 import { readSecretPlaintext } from '../services/secrets.js';
 import { checkDeploymentSafety } from '../services/safety-check.js';
+import { isPolicyVersionHighRisk } from '../services/high-risk.js';
 
 export const deploymentsRouter = Router();
 deploymentsRouter.use(requireAuth, requireRole('operator', 'admin'));
@@ -564,17 +565,17 @@ async function generateBundle(deploymentId: string) {
       }
 
       const rules = (rRes.rows as any[]).map((r) => {
-      const ruleScope =
-        r.interface_scope_type === 'ALL_INTERFACES'
-          ? { type: 'ALL_INTERFACES' as const }
-          : r.interface_scope_type === 'INTERFACE_NAME'
-            ? { type: 'INTERFACE_NAME' as const, names: (r.interface_scope_names ?? []) as string[] }
-            : r.interface_scope_type === 'INTERFACE_ROLE'
-              ? { type: 'INTERFACE_ROLE' as const, roles: (r.interface_scope_roles ?? []) as string[] }
-              : undefined;
-      const remote = r.source_type === 'CIDR'
-        ? ({ kind: 'CIDR' as const })
-        : ({ kind: 'SET' as const, setName: `src_${r.source_type.toLowerCase()}_${String(r.source_value).replace(/-/g, '')}` });
+        const ruleScope =
+          r.interface_scope_type === 'ALL_INTERFACES'
+            ? { type: 'ALL_INTERFACES' as const }
+            : r.interface_scope_type === 'INTERFACE_NAME'
+              ? { type: 'INTERFACE_NAME' as const, names: (r.interface_scope_names ?? []) as string[] }
+              : r.interface_scope_type === 'INTERFACE_ROLE'
+                ? { type: 'INTERFACE_ROLE' as const, roles: (r.interface_scope_roles ?? []) as string[] }
+                : undefined;
+        const remote = r.source_type === 'CIDR'
+          ? ({ kind: 'CIDR' as const })
+          : ({ kind: 'SET' as const, setName: `src_${r.source_type.toLowerCase()}_${String(r.source_value).replace(/-/g, '')}` });
         return {
           orderIndex: Number(r.order_index),
           direction: (r.direction ?? 'IN') as 'IN' | 'OUT' | 'BOTH',
@@ -591,6 +592,7 @@ async function generateBundle(deploymentId: string) {
         };
       });
 
+      const compiled = compileHostPolicy({
         host: {
           id: h.id,
           hostname: h.hostname,
@@ -619,16 +621,6 @@ async function generateBundle(deploymentId: string) {
         `${h.hostname} ansible_host=${String(h.mgmt_ip)} ansible_port=${h.ssh_port} ansible_user=${cred.username} ansible_ssh_private_key_file=/bundles/${deploymentId}/ssh_key ansible_become=yes ansible_become_method=sudo segmentra_policy_file=${policyFileRunnerPath}`
       );
     }
-  } finally {
-    // Clean up temp key file used for auto-detection
-    if (fs.existsSync(tempKeyPath)) {
-      try {
-        fs.unlinkSync(tempKeyPath);
-      } catch (e) {
-        // Ignore cleanup errors
-      }
-    }
-  }
   } finally {
     // Clean up temp key file used for auto-detection
     if (fs.existsSync(tempKeyPath)) {
@@ -782,7 +774,7 @@ deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
        WHERE id=$1`,
       [executionId, exitCode, stdoutPath, stderrPath]
     );
-  } else {
+    } else {
     // Ansible executor (default)
     const executionIdRes = await pool.query(
       `INSERT INTO execution_runs (deployment_id, executor_type, command)
@@ -935,6 +927,7 @@ deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
         }
       }
     });
+    }
 
     res.json({ ok, exitCode, executionId });
   } catch (error: any) {

@@ -5,13 +5,17 @@ function interpolate(template, vars) {
     return template.replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] ?? '');
 }
 export async function ldapLogin(params) {
-    const settingsRes = await pool.query(`SELECT enabled, url, bind_dn, bind_password_secret_id, base_dn, user_filter, group_filter
+    const settingsRes = await pool.query(`SELECT enabled, url, use_ldaps, bind_dn, bind_password_secret_id, base_dn, user_filter, group_filter
      FROM ldap_settings
      ORDER BY created_at DESC
      LIMIT 1`);
     const s = settingsRes.rows[0];
     if (!s?.enabled || !s.url || !s.base_dn) {
         throw new Error('ldap_not_configured');
+    }
+    // Enforce LDAPS-only if use_ldaps is set
+    if (s.use_ldaps && !s.url.toLowerCase().startsWith('ldaps://')) {
+        throw new Error('ldaps_required');
     }
     const client = new Client({ url: s.url });
     try {

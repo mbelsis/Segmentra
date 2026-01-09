@@ -14,6 +14,7 @@ This document provides detailed technical information about Segmentra's architec
 6. [Advanced Features](#advanced-features)
    - [Drift Detection & Configuration Compliance](#drift-detection--configuration-compliance)
    - [Safety Guardrails](#safety-guardrails)
+   - [High-Risk Policy Detection](#high-risk-policy-detection)
    - [Policy Impact Analysis](#policy-impact-analysis)
    - [Host Readiness Verification](#host-readiness-verification)
    - [Scheduled Deployments](#scheduled-deployments)
@@ -47,6 +48,7 @@ apps/
       services/                # LDAP, secrets crypto, JWT, audit, ...
         policy-diff.ts         # Policy version comparison
         safety-check.ts        # Pre-deployment safety validation
+        high-risk.ts           # High-risk policy detection
       lib/                     # Environment config
       index.ts                 # Express app entry point
   web/                         # React UI (Vite)
@@ -154,8 +156,8 @@ Base URL: `http://localhost:8080/api`
 - `POST /policy-sets/:id/versions` — Creates `DRAFT` version. Body: `{ changeSummary?, interfaceScopeType?, interfaceScopeRoles?, interfaceScopeNames? }`
 - `GET /policy-versions/:versionId`
 - `PUT /policy-versions/:versionId` — Only while `DRAFT`. Body: `{ changeSummary?, interfaceScopeType?, interfaceScopeRoles?, interfaceScopeNames? }`
-- `POST /policy-versions/:versionId/submit-approval` — Changes status to `PENDING_APPROVAL`
-- `POST /policy-versions/:versionId/approve` — Approver/Admin role required; approver must differ from maker. Body: `{ changeSummary? }`
+- `POST /policy-versions/:versionId/submit-approval` — Changes status to `PENDING_APPROVAL`. Automatically evaluates and sets `is_high_risk` flag based on policy heuristics.
+- `POST /policy-versions/:versionId/approve` — Approver/Admin role required; approver must differ from maker. High-risk policies cannot be self-approved (even by admins). Body: `{ changeSummary? }`
 - `POST /policy-versions/:versionId/reject` — Approver/Admin role required. Body: `{ reason }`
 - `POST /policy-versions/:versionId/clone` — Clone version as new DRAFT
 
@@ -694,6 +696,91 @@ Before allowing a deployment, the system:
   blockingRules: Array<{ ruleIndex, action, source, protocol, ports?, comment? }>;
 }
 ```
+
+### High-Risk Policy Detection
+
+Segmentra automatically detects potentially dangerous policy changes and enforces enhanced approval requirements to prevent accidental security breaches.
+
+#### How It Works
+
+When a policy version is submitted for approval, the system automatically evaluates it against a set of heuristics to determine if it represents a high-risk change. The evaluation considers:
+
+1. **Wide Interface Scope + Many Targets**:
+   - Policy with `interface_scope_type = 'ALL_INTERFACES'` targeting 20+ hosts
+   - Indicates a change that affects all network interfaces across many systems
+
+2. **Very Broad Source Ranges to Sensitive Ports**:
+   - Rules with `sourceType = 'CIDR'` and very broad CIDRs (0.0.0.0/0, /0-/8) that ALLOW access to sensitive ports:
+     - SSH (22)
+     - PostgreSQL (5432)
+     - MySQL (3306)
+     - SQL Server (1433)
+     - RDP (3389)
+   - Or wide port ranges (1-65535) combined with broad sources
+
+3. **Management Access Beyond Management VLAN**:
+   - ALLOW rules for TCP ports 22, 5432, 3306, 1433, 3389 from sources that are NOT the configured management VLAN CIDR
+   - Prevents accidental opening of administrative access to untrusted networks
+
+4. **"Any/Any" Style Rules**:
+   - Rules with `protocol = 'any'` and wide port ranges (or no ports) combined with very broad CIDR sources
+   - Represents extremely permissive firewall rules
+
+#### Risk Evaluation Process
+
+1. **On Submission**: When `POST /policy-versions/:id/submit-approval` is called, the system:
+   - Loads the policy version and all its rules
+   - Evaluates each heuristic against the policy
+   - Sets `policy_versions.is_high_risk = true` if any heuristic triggers
+   - Includes `isHighRisk` flag in audit metadata
+
+2. **On Approval**: When `POST /policy-versions/:id/approve` is called, the system:
+   - Checks the `is_high_risk` flag
+   - If high-risk and approver is the creator, blocks approval (even for admins)
+   - Requires a different approver to review high-risk policies
+   - Logs high-risk status in audit events
+
+3. **On Deployment Creation**: When `POST /deployments` is called, the system:
+   - Re-evaluates risk status with actual target count
+   - Updates `is_high_risk` flag if risk level changes based on deployment scope
+   - Allows deployment to proceed (flag is informational, not blocking)
+
+#### Implementation
+
+- **Service**: `apps/api/src/services/high-risk.ts`
+- **Function**: `isPolicyVersionHighRisk(params: { policyVersionId: string, targetCount?: number }): Promise<boolean>`
+- **Integration Points**:
+  - Policy version submission (`POST /policy-versions/:id/submit-approval`)
+  - Policy version approval (`POST /policy-versions/:id/approve`)
+  - Deployment creation (`POST /deployments`)
+
+#### High-Risk Heuristics Details
+
+```typescript
+// Example heuristics (simplified)
+- ALL_INTERFACES + targetCount >= 20 → high-risk
+- CIDR source like 0.0.0.0/0 or /0-/8 + sensitive ports (22, 5432, etc.) → high-risk
+- TCP port 22/5432/3306/1433/3389 + source NOT management VLAN → high-risk
+- protocol='any' + wide ports + very broad CIDR → high-risk
+```
+
+#### Benefits
+
+- **Prevents Accidents**: Catches dangerous configurations before deployment
+- **Enforces Review**: Ensures high-risk changes receive proper scrutiny
+- **Audit Compliance**: High-risk status is logged for compliance tracking
+- **Configurable Thresholds**: Heuristic thresholds can be tuned (currently 20 hosts for wide scope)
+
+#### Database Schema
+
+The `policy_versions` table includes:
+- `is_high_risk` (boolean, default false) — Set automatically during submission
+
+#### API Behavior
+
+- **Submission**: Automatically sets `is_high_risk` flag
+- **Approval**: Blocks self-approval for high-risk policies
+- **Deployment**: Re-evaluates and updates flag based on actual deployment scope
 
 ### Policy Impact Analysis
 
@@ -1334,7 +1421,7 @@ The `docker-compose.yml` file defines:
 - Firewall backend `auto` setting is now auto-detected before compilation via SSH. If auto-detection fails, it defaults to `nftables`. The detected backend is stored in the host record for future deployments. Executors validate that the compiled policy format matches the detected backend at runtime.
 - Drift detection requires SSH access and passwordless sudo. Hosts without SSH credentials configured cannot be checked for compliance.
 - Scheduled deployments use simple datetime comparison. No support for recurring schedules, timezone handling, or complex scheduling rules.
-- **High-risk policy logic is not yet implemented**: The database has `policy_versions.is_high_risk` field, but there is currently no code that sets this flag, enforces extra approvals for high-risk changes, or restricts deployment modes based on target counts. The only approval constraint currently implemented is "maker ≠ checker" (with admin self-override).
+- **High-risk policy detection**: The system automatically evaluates policy versions for high-risk patterns and sets the `is_high_risk` flag. High-risk policies require a different approver (no self-approval, even for admins). Risk evaluation considers interface scope, target count, source ranges, and sensitive ports. See [High-Risk Policy Detection](#high-risk-policy-detection) for details.
 
 ---
 
