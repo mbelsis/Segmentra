@@ -207,6 +207,12 @@ If you have LDAP configured and AD group mappings, you can login via `/api/auth/
   - **Note**: Disabled hosts (`enabled=false`) are automatically skipped from all policy deployments
 - **Interfaces**: Add interfaces per host (name + role such as `data`, `management`, etc.)
 
+<div align="center">
+  <img src="docs/images/inventory.png" alt="Inventory Management" style="max-width: 100%; height: auto;" />
+</div
+
+inventory.png
+
 ### 4) Create & approve a policy version
 
 - Create a **Policy Set** (e.g., "DMZ Servers")
