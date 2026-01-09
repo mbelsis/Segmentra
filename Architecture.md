@@ -12,6 +12,12 @@ This document provides detailed technical information about Segmentra's architec
 4. [Deployment Executors](#deployment-executors)
 5. [Firewall Backend Configuration](#firewall-backend-configuration)
 6. [Advanced Features](#advanced-features)
+   - [Drift Detection & Configuration Compliance](#drift-detection--configuration-compliance)
+   - [Safety Guardrails](#safety-guardrails)
+   - [Policy Impact Analysis](#policy-impact-analysis)
+   - [Host Readiness Verification](#host-readiness-verification)
+   - [Scheduled Deployments](#scheduled-deployments)
+   - [Host Policy Visualization](#host-policy-visualization)
 7. [Troubleshooting](#troubleshooting)
 8. [Configuration Details](#configuration-details)
 
@@ -45,7 +51,8 @@ apps/
       index.ts                 # Express app entry point
   web/                         # React UI (Vite)
     src/
-      components/              # App shell, auth gate
+      components/              # App shell, auth gate, visualization
+        HostPolicyVisualization.tsx  # Policy visualization diagram
       pages/                   # Dashboard/Inventory/Policies/...
       lib/                     # API client, auth helpers
 infra/
@@ -796,6 +803,69 @@ Deployments can be scheduled for future execution, useful for maintenance window
   "scheduledAt": "2026-01-10T02:00:00Z"
 }
 ```
+
+### Host Policy Visualization
+
+Segmentra provides a visual diagram showing all firewall policies applied to a specific host, making it easy to understand network connectivity at a glance.
+
+#### Features
+
+- **Interactive SVG Diagram**: Host displayed in center with sources arranged in a circle
+- **Color-Coded Connections**: 
+  - Green arrows for ALLOW connections
+  - Red arrows for DENY connections (when enabled)
+- **Connection Details**: 
+  - Port numbers displayed on arrows
+  - Protocol badges (T=TCP, U=UDP, I=ICMP)
+  - Source type icons (🌐 CIDR, 🏷️ TAG, 🔌 VLAN, 🖥️ HOST)
+- **Direction Filtering**: Toggle between IN, OUT, or BOTH directions
+- **Denied Connections Toggle**: Show or hide denied connections
+- **Source Resolution**: Automatically resolves TAG/VLAN/HOST sources to display names
+
+#### Usage
+
+- **Access**: Click "View Visualization" button in Inventory → Hosts table
+- **Modal Dialog**: Opens full-screen modal with interactive diagram
+- **Controls**: 
+  - Direction dropdown: Filter by IN/OUT/BOTH
+  - Checkbox: Show/hide denied connections
+  - Close button: Return to inventory
+
+#### Visual Layout
+
+The diagram uses a circular layout algorithm:
+- Host icon (🖥️) positioned at center
+- Sources arranged in a circle around the host
+- Radius automatically adjusts based on number of sources
+- Arrows connect sources to host, showing connection direction
+- Port numbers and protocol badges displayed along arrows
+
+#### Implementation
+
+- **Component**: `apps/web/src/components/HostPolicyVisualization.tsx`
+- **Data Source**: Uses existing `GET /api/troubleshoot/hosts/:hostId/policies` endpoint
+- **Source Resolution**: Fetches tags, VLANs, and hosts for name resolution
+- **Rendering**: Pure SVG using React SVG elements (no external dependencies)
+- **Layout Algorithm**: Trigonometric calculations for circular positioning
+
+#### Example Visual Structure
+
+```
+        [🌐 Network Icon]
+        "192.168.1.0/24"
+            ↓ (green, port 22)
+    [🖥️ Host Name] ← (red, port 80) [🏷️ Tag Icon "web-servers"]
+            ↑ (green, port 443)
+        [🔌 VLAN Icon]
+        "VLAN-10"
+```
+
+#### Benefits
+
+- **Quick Understanding**: See all connections to/from a host at a glance
+- **Visual Debugging**: Identify connectivity issues visually
+- **Policy Review**: Understand what policies are actually applied
+- **Documentation**: Visual representation of network security posture
 
 ---
 

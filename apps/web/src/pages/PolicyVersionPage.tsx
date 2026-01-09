@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 
 import { api } from '../lib/api';
 
 export function PolicyVersionPage() {
   const { versionId } = useParams();
+  const navigate = useNavigate();
   const [version, setVersion] = useState<any>(null);
   const [rules, setRules] = useState<any[]>([]);
   const [hosts, setHosts] = useState<any[]>([]);
@@ -183,7 +184,16 @@ export function PolicyVersionPage() {
   return (
     <div className="page">
       <div className="page-header">
-        <h2>Policy Version {version.version_number} - {version.status}</h2>
+        <div>
+          <button 
+            onClick={() => navigate(`/policy-set/${version.policy_set_id}`)} 
+            className="btn-secondary" 
+            style={{ marginBottom: 8 }}
+          >
+            ← Back to Policy Set
+          </button>
+          <h2>Policy Version {version.version_number} - {version.status}</h2>
+        </div>
       </div>
 
       {version.status === 'APPROVED' && (

@@ -73,6 +73,13 @@ Segmentra is an on‑prem, web-based **fleet firewall & microsegmentation manage
   - Compare current firewall rules on hosts vs. last deployed policy
   - Identify hosts with manual changes or failed deployments
   - Bulk compliance checking for multiple hosts
+- **Policy Visualization**: Visual diagram of applied firewall policies
+  - Interactive SVG diagram showing host in center with connected sources
+  - Color-coded arrows: green for allowed connections, red for denied connections
+  - Shows port numbers, protocols, and source types (CIDR, Tags, VLANs, Hosts)
+  - Toggle between IN/OUT/BOTH directions
+  - Option to show/hide denied connections
+  - Accessible from Inventory page for each host
 
 ### 🔍 Audit & Compliance
 - **Comprehensive Audit Trail**: Track all actions with timestamps and user attribution
@@ -107,6 +114,13 @@ Additional troubleshooting capabilities include:
   - Identify new allows, removed allows, new denies, and removed denies
   - Per-host impact analysis for sample hosts
   - Available in the Approvals screen for policy reviewers
+- **Policy Visualization**: Visual diagram of firewall policies per host
+  - Interactive network diagram showing host in center with all connected sources
+  - Color-coded connection arrows (green=allowed, red=denied)
+  - Displays port numbers, protocols, and source information
+  - Filter by connection direction (IN/OUT/BOTH)
+  - Toggle visibility of denied connections
+  - Accessible via "View Visualization" button in Inventory → Hosts
 
 <div align="center">
   <img src="docs/images/troubleshooting.png" alt="Troubleshooting" style="max-width: 100%; height: auto;" />

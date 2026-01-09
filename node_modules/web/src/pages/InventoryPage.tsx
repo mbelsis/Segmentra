@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { api } from '../lib/api';
+import { HostPolicyVisualization } from '../components/HostPolicyVisualization';
 
 type Tab = 'hosts' | 'tags' | 'vlans';
 
@@ -37,6 +38,9 @@ export function InventoryPage() {
   const [checkingCompliance, setCheckingCompliance] = useState<Set<string>>(new Set());
   const [readinessResults, setReadinessResults] = useState<Map<string, any>>(new Map());
   const [checkingReadiness, setCheckingReadiness] = useState<Set<string>>(new Set());
+  
+  // Visualization modal state
+  const [visualizationHost, setVisualizationHost] = useState<{ id: string; hostname: string } | null>(null);
   
   // Tags state
   const [tags, setTags] = useState<any[]>([]);
@@ -852,6 +856,14 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                             Verify this host is ready for deployments. Checks for firewall tools (nft/iptables), passwordless sudo access, kernel support, and auto-detects firewall backend.
                           </div>
                         </div>
+                        <button 
+                          onClick={() => setVisualizationHost({ id: h.id, hostname: h.hostname })} 
+                          className="btn-small"
+                          disabled={!h.enabled}
+                          title="View visual diagram of firewall policies"
+                        >
+                          View Visualization
+                        </button>
                       </div>
                       {readinessResults.has(h.id) && (
                         <div style={{ marginTop: 4, fontSize: '0.85em' }}>
@@ -1100,6 +1112,14 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
             </table>
           </div>
         </>
+      )}
+      
+      {visualizationHost && (
+        <HostPolicyVisualization
+          hostId={visualizationHost.id}
+          hostname={visualizationHost.hostname}
+          onClose={() => setVisualizationHost(null)}
+        />
       )}
     </div>
   );
