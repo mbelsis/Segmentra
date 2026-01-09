@@ -21,6 +21,8 @@ export function DeploymentsPage() {
   const [formHostIds, setFormHostIds] = useState<string[]>([]);
   const [formCanarySize, setFormCanarySize] = useState(1);
   const [formBatchSize, setFormBatchSize] = useState(5);
+  const [formScheduledAt, setFormScheduledAt] = useState('');
+  const [safetyCheck, setSafetyCheck] = useState<any>(null);
 
   useEffect(() => {
     loadData();
@@ -55,6 +57,8 @@ export function DeploymentsPage() {
     setFormHostIds([]);
     setFormCanarySize(1);
     setFormBatchSize(5);
+    setFormScheduledAt('');
+    setSafetyCheck(null);
     setShowCreate(false);
     setError('');
   }
@@ -102,6 +106,10 @@ export function DeploymentsPage() {
         payload.canarySize = formCanarySize;
       } else if (formMode === 'PROGRESSIVE') {
         payload.batchSize = formBatchSize;
+      }
+
+      if (formScheduledAt) {
+        payload.scheduledAt = formScheduledAt;
       }
 
       await api.createDeployment(payload);
@@ -379,8 +387,83 @@ export function DeploymentsPage() {
             )}
           </div>
 
+            {/* Scheduled Deployment */}
+            <div className="form-group">
+              <label>Schedule Deployment (Optional)</label>
+              <input
+                type="datetime-local"
+                value={formScheduledAt}
+                onChange={(e) => setFormScheduledAt(e.target.value)}
+              />
+              <small style={{ color: '#666', fontSize: '0.85em' }}>
+                Leave empty to deploy immediately. Scheduled deployments will start automatically at the specified time.
+              </small>
+            </div>
+
+            {/* Safety Check Warnings */}
+            {safetyCheck && (
+              <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                {!safetyCheck.sshAccessPreserved && safetyCheck.errors.length > 0 && (
+                  <div style={{ 
+                    padding: 12, 
+                    background: formMode === 'FULL' ? '#ffebee' : '#fff3e0', 
+                    border: `1px solid ${formMode === 'FULL' ? '#f44336' : '#ff9800'}`,
+                    borderRadius: 4,
+                    marginBottom: 8
+                  }}>
+                    <strong style={{ color: formMode === 'FULL' ? '#d32f2f' : '#f57c00' }}>
+                      {formMode === 'FULL' ? '⚠️ BLOCKED: ' : '⚠️ WARNING: '}
+                    </strong>
+                    Deployment would block SSH access from management VLAN
+                    <ul style={{ marginTop: 8, marginBottom: 0, paddingLeft: 20 }}>
+                      {safetyCheck.errors.map((err: string, i: number) => (
+                        <li key={i}>{err}</li>
+                      ))}
+                    </ul>
+                    {formMode === 'FULL' && (
+                      <div style={{ marginTop: 8, fontWeight: 500 }}>
+                        FULL mode deployments require SSH access to be preserved. Please review your policy rules.
+                      </div>
+                    )}
+                  </div>
+                )}
+                {safetyCheck.warnings.length > 0 && (
+                  <div style={{ 
+                    padding: 12, 
+                    background: '#fff9c4', 
+                    border: '1px solid #fbc02d',
+                    borderRadius: 4
+                  }}>
+                    <strong style={{ color: '#f57c00' }}>⚠️ Warnings:</strong>
+                    <ul style={{ marginTop: 8, marginBottom: 0, paddingLeft: 20 }}>
+                      {safetyCheck.warnings.map((warn: string, i: number) => (
+                        <li key={i}>{warn}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {safetyCheck.sshAccessPreserved && safetyCheck.errors.length === 0 && safetyCheck.warnings.length === 0 && (
+                  <div style={{ 
+                    padding: 12, 
+                    background: '#e8f5e9', 
+                    border: '1px solid #4caf50',
+                    borderRadius: 4
+                  }}>
+                    <strong style={{ color: '#2e7d32' }}>✓ Safety Check Passed</strong>
+                    <div style={{ marginTop: 4 }}>SSH access from management VLAN will be preserved.</div>
+                  </div>
+                )}
+              </div>
+            )}
+
           <div className="form-actions">
-            <button onClick={createDeployment} className="btn-primary">Create Deployment</button>
+            <button 
+              onClick={createDeployment} 
+              className="btn-primary"
+              disabled={formMode === 'FULL' && safetyCheck && !safetyCheck.sshAccessPreserved && safetyCheck.errors.length > 0}
+            >
+              Create Deployment
+            </button>
             <button onClick={resetForm} className="btn-secondary">Cancel</button>
           </div>
         </div>

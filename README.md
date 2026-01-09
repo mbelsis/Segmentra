@@ -19,6 +19,10 @@ Segmentra is an on‑prem, web-based **fleet firewall & microsegmentation manage
 - **Policy Sets**: Organize firewall policies by scope (Tags, VLANs, or Host Lists)
 - **Version Control**: Track all policy changes with versioning and change summaries
 - **Approval Workflow**: Multi-stage approval process with separation of duties
+- **Policy Impact Analysis**: Compare policy versions before approval to see what will change
+  - View semantic diff: new allows, removed allows, new denies, removed denies
+  - Per-host impact analysis for sample hosts
+  - Available in the Approvals screen for confident decision-making
 - **Rule Management**: Define firewall rules with support for:
   - Multiple protocols (TCP, UDP, ICMP, any)
   - Port ranges and specific ports
@@ -28,16 +32,20 @@ Segmentra is an on‑prem, web-based **fleet firewall & microsegmentation manage
   - Directional rules (IN, OUT, BOTH)
 
 ### 🚀 Deployment Management
-- **Multiple Deployment Modes**:
+- **Multiple Deployment Modes** (v1: modes are accepted and stored, but all selected hosts are processed immediately):
   - **Canary**: Deploy to a small subset first
   - **Progressive**: Deploy in batches
   - **Full**: Deploy to all targets at once
+- **Scheduled Deployments**: Schedule deployments for future execution (e.g., maintenance windows)
 - **Deployment Executors**:
   - **Ansible** (Recommended): Better error handling, automatic rollback, parallel execution
   - **SSH Direct**: Lightweight, no Ansible dependency
 - **Real-time Progress Tracking**: Monitor deployment status per host
 - **Automatic Rollback**: Failed deployments automatically rollback to previous state
 - **Deployment Timeout**: Hosts timeout after 10 minutes if unresponsive
+- **Safety Guardrails**: Pre-deployment checks ensure SSH access from management VLAN is preserved
+  - **FULL mode**: Blocks deployments that would lock out administrators
+  - **CANARY/PROGRESSIVE**: Warns about potential lockouts but allows deployment
 
 ### 📊 Dashboard & Monitoring
 - **Real-time Dashboard**: Visual overview of deployment status and metrics
@@ -56,6 +64,15 @@ Segmentra is an on‑prem, web-based **fleet firewall & microsegmentation manage
 - **Interface Configuration**: Define network interfaces with roles (data, management, etc.)
 - **Firewall Backend Selection**: Choose nftables or iptables per host
 - **Bulk Operations**: Import hosts via CSV, bulk assign tags/VLANs
+- **Host Readiness Check**: Verify host capabilities before deployment
+  - Checks for nftables/iptables availability and versions
+  - Verifies passwordless sudo access for firewall commands
+  - Confirms kernel/module support for nftables
+  - Auto-detects and updates firewall backend if set to "auto"
+- **Compliance Monitoring**: Track configuration drift detection
+  - Compare current firewall rules on hosts vs. last deployed policy
+  - Identify hosts with manual changes or failed deployments
+  - Bulk compliance checking for multiple hosts
 
 ### 🔍 Audit & Compliance
 - **Comprehensive Audit Trail**: Track all actions with timestamps and user attribution
@@ -66,6 +83,12 @@ Segmentra is an on‑prem, web-based **fleet firewall & microsegmentation manage
   - Deployment mode and targets
   - Results (success, failed, partial success)
   - Host-level outcomes
+- **Drift Detection** (No Agent Required): 
+  - Automatically detect configuration drift by comparing current firewall rules to last deployed policy hash
+  - SSH-based rule reading (`nft list ruleset` / `iptables-save`)
+  - Status indicators: Compliant, Drifted, Unknown, or Error
+  - Per-host and bulk compliance checking
+  - Visual compliance status in inventory view
 
 <div align="center">
   <img src="docs/images/audit-log.png" alt="Audit Log" style="max-width: 100%; height: auto;" />
@@ -79,10 +102,15 @@ Additional troubleshooting capabilities include:
 - **Host Policy View**: See all policies deployed to a specific host
 - **Policy Version Hosts**: View which hosts have a specific policy version deployed
 - **Execution Logs**: Access stdout/stderr from deployment executions
+- **Policy Impact Analysis**: Compare policy versions before deployment
+  - See semantic diff between current and candidate policy versions
+  - Identify new allows, removed allows, new denies, and removed denies
+  - Per-host impact analysis for sample hosts
+  - Available in the Approvals screen for policy reviewers
 
 <div align="center">
   <img src="docs/images/troubleshooting.png" alt="Troubleshooting" style="max-width: 100%; height: auto;" />
-</div
+</div>
 
 
 
@@ -150,8 +178,23 @@ docker compose up -d segmentra-db
 
 Set `DATABASE_URL` (example for the compose DB):
 
-```bash
+**Windows (cmd.exe):**
+```batch
 set DATABASE_URL=postgres://segmentra:segmentra@127.0.0.1:15432/segmentra
+npm run db:migrate
+npm run db:seed
+```
+
+**Windows (PowerShell):**
+```powershell
+$env:DATABASE_URL="postgres://segmentra:segmentra@127.0.0.1:15432/segmentra"
+npm run db:migrate
+npm run db:seed
+```
+
+**macOS/Linux:**
+```bash
+export DATABASE_URL=postgres://segmentra:segmentra@127.0.0.1:15432/segmentra
 npm run db:migrate
 npm run db:seed
 ```
@@ -164,8 +207,21 @@ The seed script automatically creates a default admin user:
 
 Set required env vars (minimum: `DATABASE_URL`, `JWT_SECRET`):
 
-```bash
+**Windows (cmd.exe):**
+```batch
 set JWT_SECRET=change-me-to-a-long-random-string
+npm run dev -w apps/api
+```
+
+**Windows (PowerShell):**
+```powershell
+$env:JWT_SECRET="change-me-to-a-long-random-string"
+npm run dev -w apps/api
+```
+
+**macOS/Linux:**
+```bash
+export JWT_SECRET=change-me-to-a-long-random-string
 npm run dev -w apps/api
 ```
 
@@ -221,9 +277,7 @@ If you have LDAP configured and AD group mappings, you can login via `/api/auth/
 
 <div align="center">
   <img src="docs/images/inventory.png" alt="Inventory Management" style="max-width: 100%; height: auto;" />
-</div
-
-inventory.png
+</div>
 
 ### 4) Create & approve a policy version
 
@@ -240,7 +294,7 @@ inventory.png
   <img src="docs/images/policy-version.png" alt="Policy Version" style="max-width: 100%; height: auto;" />
 </div>
 
--Add Rues to **Policy Version**
+- Add Rules to **Policy Version**
 
 <div align="center">
   <img src="docs/images/policy-rules.png" alt="Policy Version" style="max-width: 100%; height: auto;" />
@@ -259,6 +313,42 @@ inventory.png
 <div align="center">
   <img src="docs/images/deployment-details.png" alt="Deployment Details" style="max-width: 100%; height: auto;" />
 </div>
+
+---
+
+## Recent Enhancements
+
+Segmentra now includes several advanced features for production-ready firewall management:
+
+### ✅ Drift Detection & Compliance (No Agent Required)
+- **Agentless Compliance Checking**: SSH-based drift detection compares current firewall rules to last deployed policy
+- **Visual Status Indicators**: See compliance status (Compliant/Drifted/Unknown) directly in the inventory
+- **Bulk Operations**: Check compliance for multiple hosts simultaneously
+- **Automatic Detection**: Identifies manual changes, failed deployments, or configuration drift
+
+### ✅ Safety Guardrails
+- **Pre-Deployment Validation**: Automatically checks that SSH access from management VLAN is preserved
+- **Mode-Specific Protection**: FULL mode blocks dangerous deployments; CANARY/PROGRESSIVE modes warn
+- **Visual Feedback**: Clear warnings and errors in the deployment creation UI
+- **Prevents Lockouts**: Ensures administrators can always access hosts via SSH
+
+### ✅ Policy Impact Analysis
+- **Semantic Diff**: Compare policy versions to see exactly what will change
+- **Rule Categorization**: Identify new allows, removed allows, new denies, and removed denies
+- **Per-Host Analysis**: Understand impact for specific hosts before deployment
+- **Approval Confidence**: Make informed decisions when approving policy versions
+
+### ✅ Host Readiness Verification
+- **Pre-Flight Checks**: Verify hosts are ready before deployment
+- **Capability Detection**: Checks for nftables/iptables, sudo access, kernel support
+- **Auto-Configuration**: Automatically updates firewall backend if set to "auto"
+- **Detailed Results**: See exactly what's missing or misconfigured
+
+### ✅ Scheduled Deployments
+- **Future Execution**: Schedule deployments for maintenance windows
+- **Simple Scheduling**: "Tonight at 02:00" style datetime scheduling
+- **Automatic Processing**: Background job automatically starts scheduled deployments
+- **No Complex Logic**: Simple and reliable deferred execution
 
 ---
 

@@ -10,7 +10,6 @@ export function AppShell() {
         <div style={{ marginBottom: 16, textAlign: 'center' }}>
           <img src="/segmentra.png" alt="Segmentra" style={{ maxWidth: '100%', height: 'auto', marginBottom: 8 }} />
         </div>
-        <div style={{ fontWeight: 700, marginBottom: 8, textAlign: 'center' }}>Segmentra</div>
         <NavLink to="/" end>
           Dashboard
         </NavLink>

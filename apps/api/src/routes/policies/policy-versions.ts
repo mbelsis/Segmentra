@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import { pool } from '../../db/pool.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
+import { comparePolicyVersions } from '../../services/policy-diff.js';
 
 export const policyVersionsRouter = Router();
 policyVersionsRouter.use(requireAuth, requireRole('operator', 'approver', 'admin'));
@@ -301,6 +302,32 @@ policyVersionsRouter.get('/policy-versions/:versionId/diff', async (req, res) =>
     rulesFrom: aRules.rows,
     rulesTo: bRules.rows
   });
+});
+
+/**
+ * Get semantic diff between two policy versions for sample hosts
+ * POST /policy-versions/:candidateVersionId/impact-diff
+ * Body: { currentVersionId: string, hostIds: string[] }
+ */
+policyVersionsRouter.post('/policy-versions/:candidateVersionId/impact-diff', async (req, res) => {
+  const { currentVersionId, hostIds } = req.body;
+  const candidateVersionId = req.params.candidateVersionId;
+
+  if (!currentVersionId || !Array.isArray(hostIds) || hostIds.length === 0) {
+    return res.status(400).json({ error: 'invalid_body' });
+  }
+
+  try {
+    const diffResults = await comparePolicyVersions({
+      currentVersionId,
+      candidateVersionId,
+      hostIds
+    });
+
+    res.json({ diff: diffResults });
+  } catch (error: any) {
+    res.status(500).json({ error: 'diff_failed', message: error.message });
+  }
 });
 
 

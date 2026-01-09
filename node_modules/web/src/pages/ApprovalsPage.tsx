@@ -9,6 +9,11 @@ export function ApprovalsPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>('');
   const [success, setSuccess] = useState<string>('');
+  const [currentVersionId, setCurrentVersionId] = useState('');
+  const [impactDiff, setImpactDiff] = useState<any>(null);
+  const [loadingDiff, setLoadingDiff] = useState(false);
+  const [sampleHostIds, setSampleHostIds] = useState<string[]>([]);
+  const [hosts, setHosts] = useState<any[]>([]);
 
   async function loadVersion() {
     if (!versionId.trim()) {
@@ -35,6 +40,35 @@ export function ApprovalsPage() {
     }, 500);
     return () => clearTimeout(timer);
   }, [versionId]);
+
+  useEffect(() => {
+    async function loadHosts() {
+      try {
+        const res = await api.hosts();
+        setHosts(res.hosts || []);
+      } catch (e) {
+        // Ignore errors
+      }
+    }
+    loadHosts();
+  }, []);
+
+  async function loadImpactDiff() {
+    if (!versionId || !currentVersionId || sampleHostIds.length === 0) {
+      setImpactDiff(null);
+      return;
+    }
+    setLoadingDiff(true);
+    try {
+      const result = await api.policyImpactDiff(versionId, currentVersionId, sampleHostIds);
+      setImpactDiff(result.diff);
+    } catch (e: any) {
+      setError(`Failed to load impact diff: ${e.message}`);
+      setImpactDiff(null);
+    } finally {
+      setLoadingDiff(false);
+    }
+  }
 
   async function handleApprove() {
     if (!versionId.trim()) return;
@@ -166,6 +200,97 @@ export function ApprovalsPage() {
                 </div>
               )}
             </div>
+
+            {/* Policy Impact Diff */}
+            {version && version.status === 'PENDING_APPROVAL' && (
+              <div style={{ marginTop: 24, paddingTop: 20, borderTop: '2px solid #e0e0e0' }}>
+                <h4>Policy Impact Analysis</h4>
+                <p style={{ color: '#666', fontSize: '0.9em', marginBottom: 16 }}>
+                  Compare this candidate version against the current deployed version to see what changes.
+                </p>
+                <div className="form-group">
+                  <label><strong>Current Version ID</strong> (to compare against)</label>
+                  <input
+                    type="text"
+                    value={currentVersionId}
+                    onChange={(e) => setCurrentVersionId(e.target.value)}
+                    placeholder="Enter current deployed version UUID..."
+                    style={{ fontFamily: 'monospace', fontSize: '13px' }}
+                  />
+                </div>
+                <div className="form-group">
+                  <label><strong>Sample Hosts</strong> (select 1-3 hosts to analyze)</label>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 8, maxHeight: '150px', overflowY: 'auto', border: '1px solid #ddd', padding: 8, borderRadius: 4 }}>
+                    {hosts.slice(0, 20).map((h) => (
+                      <label key={h.id} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <input
+                          type="checkbox"
+                          checked={sampleHostIds.includes(h.id)}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setSampleHostIds([...sampleHostIds, h.id].slice(0, 3));
+                            } else {
+                              setSampleHostIds(sampleHostIds.filter(id => id !== h.id));
+                            }
+                          }}
+                        />
+                        <span>{h.hostname}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <button 
+                  onClick={loadImpactDiff} 
+                  className="btn-secondary"
+                  disabled={!currentVersionId || sampleHostIds.length === 0 || loadingDiff}
+                  style={{ marginBottom: 16 }}
+                >
+                  {loadingDiff ? 'Loading...' : 'Analyze Impact'}
+                </button>
+
+                {impactDiff && impactDiff.length > 0 && (
+                  <div style={{ marginTop: 16 }}>
+                    {impactDiff.map((diff: any) => (
+                      <div key={diff.hostId} style={{ marginBottom: 16, padding: 12, background: '#f8f9fa', borderRadius: 8 }}>
+                        <strong>{diff.hostname}</strong>
+                        <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12 }}>
+                          <div>
+                            <strong style={{ color: '#4caf50' }}>New Allows: {diff.summary.totalNewAllows}</strong>
+                            {diff.changes.newAllows.length > 0 && (
+                              <ul style={{ fontSize: '0.85em', marginTop: 4 }}>
+                                {diff.changes.newAllows.slice(0, 5).map((r: any, i: number) => (
+                                  <li key={i}>
+                                    {r.protocol} {r.ports || '*'}: {r.sourceType} {r.sourceValue}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                          <div>
+                            <strong style={{ color: '#f44336' }}>New Denies: {diff.summary.totalNewDenies}</strong>
+                            {diff.changes.newDenies.length > 0 && (
+                              <ul style={{ fontSize: '0.85em', marginTop: 4 }}>
+                                {diff.changes.newDenies.slice(0, 5).map((r: any, i: number) => (
+                                  <li key={i}>
+                                    {r.protocol} {r.ports || '*'}: {r.sourceType} {r.sourceValue}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                          <div>
+                            <strong style={{ color: '#ff9800' }}>Removed Allows: {diff.summary.totalRemovedAllows}</strong>
+                          </div>
+                          <div>
+                            <strong style={{ color: '#ff9800' }}>Removed Denies: {diff.summary.totalRemovedDenies}</strong>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             {version.status === 'PENDING_APPROVAL' && (
               <div style={{ marginTop: 24, paddingTop: 20, borderTop: '2px solid #e0e0e0' }}>

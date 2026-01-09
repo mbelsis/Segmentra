@@ -32,6 +32,12 @@ export function InventoryPage() {
   const [importResults, setImportResults] = useState<any>(null);
   const [importing, setImporting] = useState(false);
   
+  // Compliance and readiness state
+  const [complianceStatuses, setComplianceStatuses] = useState<Map<string, any>>(new Map());
+  const [checkingCompliance, setCheckingCompliance] = useState<Set<string>>(new Set());
+  const [readinessResults, setReadinessResults] = useState<Map<string, any>>(new Map());
+  const [checkingReadiness, setCheckingReadiness] = useState<Set<string>>(new Set());
+  
   // Tags state
   const [tags, setTags] = useState<any[]>([]);
   const [tagName, setTagName] = useState('');
@@ -253,6 +259,58 @@ export function InventoryPage() {
       loadHosts();
     } catch (e: any) {
       setError(String(e?.message ?? e));
+    }
+  }
+
+  async function checkHostCompliance(hostId: string) {
+    setCheckingCompliance(prev => new Set(prev).add(hostId));
+    try {
+      const result = await api.checkHostCompliance(hostId);
+      setComplianceStatuses(prev => new Map(prev).set(hostId, result));
+    } catch (e: any) {
+      setError(`Compliance check failed: ${e.message}`);
+    } finally {
+      setCheckingCompliance(prev => {
+        const next = new Set(prev);
+        next.delete(hostId);
+        return next;
+      });
+    }
+  }
+
+  async function checkHostReadiness(hostId: string) {
+    setCheckingReadiness(prev => new Set(prev).add(hostId));
+    try {
+      const result = await api.checkHostReadiness(hostId);
+      setReadinessResults(prev => new Map(prev).set(hostId, result));
+      // Reload hosts to get updated firewall_backend if it was auto-detected
+      loadHosts();
+    } catch (e: any) {
+      setError(`Readiness check failed: ${e.message}`);
+    } finally {
+      setCheckingReadiness(prev => {
+        const next = new Set(prev);
+        next.delete(hostId);
+        return next;
+      });
+    }
+  }
+
+  async function handleBulkComplianceCheck() {
+    if (selectedHostIds.size === 0) return;
+    const hostIds = Array.from(selectedHostIds);
+    setCheckingCompliance(new Set(hostIds));
+    try {
+      const result = await api.bulkCheckCompliance(hostIds);
+      const newStatuses = new Map(complianceStatuses);
+      for (const r of result.results) {
+        newStatuses.set(r.hostId, r);
+      }
+      setComplianceStatuses(newStatuses);
+    } catch (e: any) {
+      setError(`Bulk compliance check failed: ${e.message}`);
+    } finally {
+      setCheckingCompliance(new Set());
     }
   }
 
@@ -656,6 +714,9 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                 <strong>{selectedHostIds.size} host(s) selected</strong>
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                   <button onClick={handleBulkDelete} className="btn-small btn-danger">Delete</button>
+                  <button onClick={handleBulkComplianceCheck} className="btn-small" disabled={checkingCompliance.size > 0}>
+                    Check Compliance ({selectedHostIds.size})
+                  </button>
                   <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
                     <select
                       value={bulkVlanId}
@@ -744,15 +805,94 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                       )}
                     </td>
                     <td><code>{h.firewall_backend || 'auto'}</code></td>
+                    <td>
+                      {complianceStatuses.has(h.id) ? (
+                        (() => {
+                          const status = complianceStatuses.get(h.id);
+                          const color = status.status === 'compliant' ? '#4caf50' : status.status === 'drifted' ? '#ff9800' : status.status === 'unknown' ? '#9e9e9e' : '#f44336';
+                          const label = status.status === 'compliant' ? 'Compliant' : status.status === 'drifted' ? 'Drifted' : status.status === 'unknown' ? 'Unknown' : 'Error';
+                          return (
+                            <span style={{ color, fontWeight: 500, fontSize: '0.9em' }}>
+                              {label}
+                            </span>
+                          );
+                        })()
+                      ) : (
+                        <span style={{ color: '#999', fontSize: '0.85em' }}>-</span>
+                      )}
+                      {checkingCompliance.has(h.id) && (
+                        <span style={{ marginLeft: 8, fontSize: '0.8em', color: '#666' }}>Checking...</span>
+                      )}
+                    </td>
                     <td>{h.enabled ? '✓' : '✗'}</td>
                     <td>
-                      <button onClick={() => editHost(h)} className="btn-small btn-secondary">Edit</button>
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        <button onClick={() => editHost(h)} className="btn-small btn-secondary">Edit</button>
+                        <div className="tooltip-wrapper">
+                          <button 
+                            onClick={() => checkHostCompliance(h.id)} 
+                            className="btn-small"
+                            disabled={checkingCompliance.has(h.id) || !h.enabled}
+                          >
+                            Check Compliance
+                          </button>
+                          <div className="tooltip">
+                            Compare current firewall rules on this host to the last successfully deployed policy. Detects configuration drift, manual changes, or failed deployments.
+                          </div>
+                        </div>
+                        <div className="tooltip-wrapper">
+                          <button 
+                            onClick={() => checkHostReadiness(h.id)} 
+                            className="btn-small"
+                            disabled={checkingReadiness.has(h.id) || !h.enabled}
+                          >
+                            Check Readiness
+                          </button>
+                          <div className="tooltip">
+                            Verify this host is ready for deployments. Checks for firewall tools (nft/iptables), passwordless sudo access, kernel support, and auto-detects firewall backend.
+                          </div>
+                        </div>
+                      </div>
+                      {readinessResults.has(h.id) && (
+                        <div style={{ marginTop: 4, fontSize: '0.85em' }}>
+                          {(() => {
+                            const result = readinessResults.get(h.id);
+                            return (
+                              <div style={{ 
+                                padding: 8, 
+                                background: result.ready ? '#e8f5e9' : '#ffebee', 
+                                borderRadius: 4,
+                                marginTop: 4
+                              }}>
+                                <strong>{result.ready ? '✓ Ready' : '✗ Not Ready'}</strong>
+                                {result.backend !== 'unknown' && (
+                                  <div>Backend: {result.backend}</div>
+                                )}
+                                {result.errors.length > 0 && (
+                                  <div style={{ color: '#d32f2f', marginTop: 4 }}>
+                                    {result.errors.map((e: string, i: number) => (
+                                      <div key={i}>• {e}</div>
+                                    ))}
+                                  </div>
+                                )}
+                                {result.warnings.length > 0 && (
+                                  <div style={{ color: '#f57c00', marginTop: 4 }}>
+                                    {result.warnings.map((w: string, i: number) => (
+                                      <div key={i}>⚠ {w}</div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      )}
                     </td>
                   </tr>
                 ))}
                 {hosts.length === 0 && (
                   <tr>
-                    <td colSpan={9} className="empty-state">
+                    <td colSpan={10} className="empty-state">
                       No hosts found. {searchQuery || filterTag || filterVlan || filterEnabled !== 'all' ? 'Try adjusting your filters.' : 'Add a host above.'}
                     </td>
                   </tr>

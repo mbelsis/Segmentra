@@ -12,6 +12,8 @@ import { sshCredentialsRouter } from './routes/ssh-credentials.js';
 import { auditRouter } from './routes/audit.js';
 import { dashboardRouter } from './routes/dashboard.js';
 import { troubleshootRouter } from './routes/troubleshoot.js';
+import complianceRouter from './routes/compliance.js';
+import hostReadinessRouter from './routes/host-readiness.js';
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
@@ -25,6 +27,8 @@ app.use('/api/ssh-credentials', sshCredentialsRouter);
 app.use('/api', auditRouter);
 app.use('/api', dashboardRouter);
 app.use('/api/troubleshoot', troubleshootRouter);
+app.use('/api/compliance', complianceRouter);
+app.use('/api/host-readiness', hostReadinessRouter);
 // TODO: add inventory/policies/deployments/audit/admin routers
 app.listen(env.PORT, () => {
     // eslint-disable-next-line no-console
@@ -45,4 +49,19 @@ app.listen(env.PORT, () => {
             console.error('[Timeout Check] Error checking stale hosts:', e);
         }
     }, 2 * 60 * 1000); // Check every 2 minutes
+    // Start periodic scheduled deployment processor (every 1 minute)
+    setInterval(async () => {
+        try {
+            const { processScheduledDeployments } = await import('./routes/deployments.js');
+            const processedCount = await processScheduledDeployments();
+            if (processedCount > 0) {
+                // eslint-disable-next-line no-console
+                console.log(`[Scheduled Deployments] Processed ${processedCount} scheduled deployment(s)`);
+            }
+        }
+        catch (e) {
+            // eslint-disable-next-line no-console
+            console.error('[Scheduled Deployments] Error processing scheduled deployments:', e);
+        }
+    }, 60 * 1000); // Check every 1 minute
 });

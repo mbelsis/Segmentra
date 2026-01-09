@@ -32,7 +32,7 @@ echo [segmentra] Docker check passed
 echo.
 
 REM Install dependencies if needed
-if not exist node_modules goto skip_npm_install
+if exist node_modules goto skip_npm_install
 echo [segmentra] Installing dependencies...
 call npm install
 if errorlevel 1 (

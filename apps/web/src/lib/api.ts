@@ -203,7 +203,114 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(params)
     })
-  }
+  },
+
+  // Compliance/Drift Detection
+  checkHostCompliance: (hostId: string) => request<{
+    hostId: string;
+    hostname: string;
+    status: 'compliant' | 'drifted' | 'unknown' | 'error';
+    currentHash: string | null;
+    expectedHash: string | null;
+    backend: 'nftables' | 'iptables';
+    lastDeployment: {
+      hash: string;
+      createdAt: string;
+      policyVersion: number;
+      policySetName: string;
+    } | null;
+    error?: string;
+  }>(`/compliance/hosts/${hostId}`),
+  bulkCheckCompliance: (hostIds: string[]) => request<{
+    results: Array<{
+      hostId: string;
+      hostname: string;
+      status: 'compliant' | 'drifted' | 'unknown' | 'error';
+      currentHash: string | null;
+      expectedHash: string | null;
+      error?: string;
+    }>;
+  }>('/compliance/hosts/bulk', {
+    method: 'POST',
+    body: JSON.stringify({ hostIds })
+  }),
+
+  // Host Readiness
+  checkHostReadiness: (hostId: string) => request<{
+    hostname: string;
+    ready: boolean;
+    backend: 'nftables' | 'iptables' | 'unknown';
+    nftVersion?: string;
+    iptablesVersion?: string;
+    sudoAccess: boolean;
+    kernelSupport: boolean;
+    errors: string[];
+    warnings: string[];
+  }>(`/host-readiness/hosts/${hostId}/check`, { method: 'POST' }),
+
+  // Policy Diff
+  policyImpactDiff: (candidateVersionId: string, currentVersionId: string, hostIds: string[]) =>
+    request<{
+      diff: Array<{
+        hostId: string;
+        hostname: string;
+        changes: {
+          newAllows: Array<{
+            type: 'added';
+            orderIndex: number;
+            direction: string;
+            action: string;
+            protocol: string;
+            ports?: string;
+            sourceType: string;
+            sourceValue: string;
+            comment?: string;
+          }>;
+          removedAllows: Array<{
+            type: 'removed';
+            orderIndex: number;
+            direction: string;
+            action: string;
+            protocol: string;
+            ports?: string;
+            sourceType: string;
+            sourceValue: string;
+            comment?: string;
+          }>;
+          newDenies: Array<{
+            type: 'added';
+            orderIndex: number;
+            direction: string;
+            action: string;
+            protocol: string;
+            ports?: string;
+            sourceType: string;
+            sourceValue: string;
+            comment?: string;
+          }>;
+          removedDenies: Array<{
+            type: 'removed';
+            orderIndex: number;
+            direction: string;
+            action: string;
+            protocol: string;
+            ports?: string;
+            sourceType: string;
+            sourceValue: string;
+            comment?: string;
+          }>;
+        };
+        summary: {
+          totalNewAllows: number;
+          totalRemovedAllows: number;
+          totalNewDenies: number;
+          totalRemovedDenies: number;
+        };
+      }>;
+    }>(`/policy-versions/${candidateVersionId}/impact-diff`, {
+      method: 'POST',
+      body: JSON.stringify({ currentVersionId, hostIds })
+    })
 };
 
 

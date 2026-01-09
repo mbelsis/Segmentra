@@ -4,7 +4,6 @@
   any_errors_fatal: false
   vars:
     segmentra_backup_dir: "/var/backups/segmentra"
-    segmentra_bundle_dir: "{{ lookup('env', 'SEGMENTRA_BUNDLE_DIR') | default('/bundles', true) }}"
     segmentra_policy_file: "{{ segmentra_policy_file | default(lookup('env', 'SEGMENTRA_POLICY_FILE') | default('', true), true) }}"
 
   tasks:
@@ -65,6 +64,13 @@
           when: nft_detect.stdout != 'nft' and segmentra_policy_file.endswith('.iptables')
           become: true
           shell: "iptables-restore < /etc/segmentra.policy"
+
+        - name: Fail if backend mismatch detected
+          fail:
+            msg: "Backend mismatch: Detected {{ nft_detect.stdout }}, but policy file is {{ segmentra_policy_file }}. Expected .nft for nftables or .iptables for iptables. Please check host firewall_backend setting."
+          when: >
+            (nft_detect.stdout == 'nft' and not segmentra_policy_file.endswith('.nft')) or
+            (nft_detect.stdout != 'nft' and not segmentra_policy_file.endswith('.iptables'))
       rescue:
         - name: Roll back nftables from last backup
           when: nft_detect.stdout == 'nft'

@@ -71,7 +71,6 @@ async function deployToHost(host: SshHost): Promise<SshExecutionResult> {
     `${host.username}@${host.ip}`
   ];
 
-  const commands: string[] = [];
   let stdout = '';
   let stderr = '';
   let exitCode = 0;

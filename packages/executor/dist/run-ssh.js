@@ -40,7 +40,6 @@ async function deployToHost(host) {
         '-p', String(host.port),
         `${host.username}@${host.ip}`
     ];
-    const commands = [];
     let stdout = '';
     let stderr = '';
     let exitCode = 0;

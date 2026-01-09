@@ -11,8 +11,9 @@ This document provides detailed technical information about Segmentra's architec
 3. [Database Schema](#database-schema)
 4. [Deployment Executors](#deployment-executors)
 5. [Firewall Backend Configuration](#firewall-backend-configuration)
-6. [Troubleshooting](#troubleshooting)
-7. [Configuration Details](#configuration-details)
+6. [Advanced Features](#advanced-features)
+7. [Troubleshooting](#troubleshooting)
+8. [Configuration Details](#configuration-details)
 
 ---
 
@@ -28,14 +29,18 @@ apps/
         admin.ts
         audit.ts
         auth.ts
+        compliance.ts          # Drift detection & compliance checking
         dashboard.ts
         deployments.ts
         health.ts
+        host-readiness.ts      # Host capability verification
         inventory/             # Hosts, tags, VLANs, interfaces
         policies/              # Policy sets, versions, rules
         ssh-credentials.ts
         troubleshoot.ts
       services/                # LDAP, secrets crypto, JWT, audit, ...
+        policy-diff.ts         # Policy version comparison
+        safety-check.ts        # Pre-deployment safety validation
       lib/                     # Environment config
       index.ts                 # Express app entry point
   web/                         # React UI (Vite)
@@ -53,6 +58,7 @@ packages/
   db/                          # node-pg-migrate migrations + seed scripts
     migrations/
       001_init.sql
+      007_add_scheduled_deployments.sql
     scripts/
       seed-roles.js
   shared/                      # shared TS types
@@ -63,6 +69,9 @@ packages/
     src/
       run-ansible.ts
       run-ssh.ts
+      read-rules.ts            # SSH-based firewall rule reading
+      check-host-readiness.ts  # Host capability verification
+      types.ts                 # Shared executor types
 docker-compose.yml             # Postgres + app + ansible-runner
 ```
 
@@ -150,13 +159,21 @@ Base URL: `http://localhost:8080/api`
 - `DELETE /policy-rules/:ruleId`
 
 #### Policy Utilities
-- `GET /policy-versions/:versionId/diff?fromVersionId=...` — Compare two policy versions
+- `GET /policy-versions/:versionId/diff?fromVersionId=...` — Compare two policy versions (basic rule list diff)
 - `GET /policy-versions/:versionId/render/host/:hostId` — Per-host nft/iptables preview. Returns: `{ backend, sha256, text }`
+- `POST /policy-versions/:candidateVersionId/impact-diff` — Semantic policy impact analysis
+  - Body: `{ currentVersionId: string, hostIds: string[] }`
+  - Returns: `{ diff: Array<{ hostId, hostname, changes: { newAllows, removedAllows, newDenies, removedDenies }, summary }> }`
+  - Shows what rules were added/removed/modified between versions
 
 ### Deployments
 
-- `POST /deployments` — Body: `{ policyVersionId, mode, targetQuery, canarySize?, batchSize? }` (policy version must be APPROVED)
+- `POST /deployments` — Body: `{ policyVersionId, mode, targetQuery, canarySize?, batchSize?, scheduledAt? }` (policy version must be APPROVED)
   - `targetQuery`: `{ tags?: uuid[], vlans?: uuid[], hosts?: uuid[] }`
+  - `scheduledAt`: Optional ISO 8601 datetime string for deferred execution
+  - **Safety Check**: Automatically validates SSH access preservation before deployment
+    - FULL mode: Blocks deployment if SSH access would be blocked
+    - CANARY/PROGRESSIVE: Warns but allows deployment
 - `GET /deployments` — Returns all deployments
 - `GET /deployments/:deploymentId` — Returns deployment details
 - `GET /deployments/:deploymentId/hosts` — Returns host-level deployment status
@@ -191,6 +208,22 @@ Base URL: `http://localhost:8080/api`
   - `entityType`: Filter by entity type (e.g., `DEPLOYMENT`, `POLICY_VERSION`)
   - `from`: Start timestamp (ISO format)
   - `to`: End timestamp (ISO format)
+
+### Compliance & Drift Detection (Operator/Admin role required)
+
+- `GET /compliance/hosts/:hostId` — Check compliance status for a specific host
+  - Returns: `{ hostId, hostname, status: 'compliant'|'drifted'|'unknown'|'error', currentHash, expectedHash, backend, lastDeployment, error? }`
+  - Reads current firewall rules via SSH and compares hash to `deployment_hosts.applied_hash`
+- `POST /compliance/hosts/bulk` — Bulk compliance check for multiple hosts
+  - Body: `{ hostIds: string[] }`
+  - Returns: `{ results: Array<{ hostId, hostname, status, currentHash, expectedHash, error? }> }`
+
+### Host Readiness (Operator/Admin role required)
+
+- `POST /host-readiness/hosts/:hostId/check` — Check if a host is ready for deployments
+  - Returns: `{ hostname, ready: boolean, backend: 'nftables'|'iptables'|'unknown', nftVersion?, iptablesVersion?, sudoAccess: boolean, kernelSupport: boolean, errors: string[], warnings: string[] }`
+  - Verifies: nft/iptables availability, passwordless sudo access, kernel module support
+  - Auto-updates `firewall_backend` if set to "auto"
 
 ### Troubleshoot
 
@@ -382,6 +415,7 @@ Migrations live in `packages/db/migrations/`.
 - `approved_at` (timestamptz, nullable)
 - `canary_size` (int, nullable)
 - `batch_size` (int, nullable)
+- `scheduled_at` (timestamptz, nullable) — For deferred/scheduled deployments
 
 #### `deployment_hosts`
 - `deployment_id` (uuid, FK → deployments.id)
@@ -390,7 +424,7 @@ Migrations live in `packages/db/migrations/`.
 - `started_at` (timestamptz, nullable)
 - `finished_at` (timestamptz, nullable)
 - `message` (text, nullable)
-- `applied_hash` (text, nullable)
+- `applied_hash` (text, nullable) — SHA-256 hash of compiled policy text (for drift detection)
 - `rollback_performed` (boolean, default false)
 - Primary key: `(deployment_id, host_id)`
 
@@ -583,6 +617,188 @@ This runs the `docker` CLI command from inside the API container, which communic
 
 ---
 
+## Advanced Features
+
+### Drift Detection & Configuration Compliance
+
+Segmentra provides **agentless drift detection** by comparing current firewall rules on hosts against the last successfully deployed policy hash.
+
+#### How It Works
+
+1. **Policy Hash Storage**: When a deployment succeeds, the SHA-256 hash of the compiled policy text is stored in `deployment_hosts.applied_hash`.
+
+2. **Rule Reading**: The compliance check uses SSH to read current firewall rules:
+   - For nftables: `sudo -n nft list ruleset`
+   - For iptables: `sudo -n iptables-save`
+
+3. **Normalization & Hashing**: Rules are normalized (removing timestamps, comments) and hashed using SHA-256.
+
+4. **Comparison**: The current hash is compared to `applied_hash`:
+   - **Compliant**: Hashes match — host matches last deployed policy
+   - **Drifted**: Hashes differ — manual changes or failed apply detected
+   - **Unknown**: No successful deployment found (never deployed or hash missing)
+   - **Error**: Unable to read rules (SSH failure, permissions, etc.)
+
+#### Usage
+
+- **Per-Host Check**: Use the "Check Compliance" button in Inventory → Hosts
+- **Bulk Check**: Select multiple hosts and use bulk compliance check
+- **Status Display**: Compliance status is shown in the inventory table
+- **API Access**: `GET /api/compliance/hosts/:hostId` or `POST /api/compliance/hosts/bulk`
+
+#### Benefits
+
+- **No Agent Required**: Uses existing SSH credentials
+- **Real-time Detection**: Check compliance on-demand
+- **Bulk Operations**: Check hundreds of hosts at once
+- **Visual Indicators**: Color-coded status in UI
+
+### Safety Guardrails
+
+Segmentra includes pre-deployment safety checks to prevent administrators from locking themselves out.
+
+#### Safety Check Process
+
+Before allowing a deployment, the system:
+
+1. **Compiles Policy**: Generates firewall ruleset for each target host
+2. **Verifies SSH Access**: Checks that the compiled ruleset preserves SSH access from the management VLAN
+3. **Validates Management CIDR**: Uses the configured management VLAN's subnet (from `system_settings.management_vlan_id`)
+4. **Applies Mode-Specific Rules**:
+   - **FULL mode**: **Blocks** deployment if SSH access would be blocked
+   - **CANARY/PROGRESSIVE**: **Warns** but allows deployment (assumes canary/batch testing)
+
+#### Implementation
+
+- **Service**: `apps/api/src/services/safety-check.ts`
+- **Integration**: Automatic check in `POST /deployments` endpoint
+- **UI Feedback**: Visual warnings/errors in deployment creation form
+- **Error Response**: Returns detailed safety check results with warnings/errors
+
+#### Safety Check Result
+
+```typescript
+{
+  safe: boolean;
+  warnings: string[];
+  errors: string[];
+  sshAccessPreserved: boolean;
+  blockingRules: Array<{ ruleIndex, action, source, protocol, ports?, comment? }>;
+}
+```
+
+### Policy Impact Analysis
+
+Before approving a policy version, reviewers can analyze the impact of changes.
+
+#### Features
+
+- **Semantic Diff**: Compares current deployed version vs. candidate version
+- **Rule Categorization**: Identifies:
+  - New allows (rules being added that allow traffic)
+  - Removed allows (rules being removed that previously allowed traffic)
+  - New denies (rules being added that block traffic)
+  - Removed denies (rules being removed that previously blocked traffic)
+- **Per-Host Analysis**: Shows impact for sample hosts (1-3 hosts)
+- **Summary Counts**: Quick overview of total changes
+
+#### Usage
+
+- **In Approvals Screen**: When reviewing a policy version, select:
+  1. Current deployed version ID
+  2. Sample hosts to analyze
+  3. Click "Analyze Impact"
+- **API**: `POST /api/policy-versions/:candidateVersionId/impact-diff`
+
+#### Benefits
+
+- **Confidence**: Understand changes before deployment
+- **Risk Assessment**: Identify potential connectivity issues
+- **Documentation**: See exactly what will change
+
+### Host Readiness Verification
+
+Before deploying, verify that hosts are ready to receive firewall policies.
+
+#### Checks Performed
+
+1. **Firewall Backend Detection**:
+   - Checks for `nft` command availability
+   - Checks for `iptables` command availability
+   - Determines preferred backend (nftables preferred)
+
+2. **Version Detection**:
+   - Reads `nft --version` if available
+   - Reads `iptables --version` if available
+
+3. **Sudo Access Verification**:
+   - Tests passwordless sudo for `nft list ruleset`
+   - Tests passwordless sudo for `iptables-save`
+   - Verifies `iptables-restore` availability if needed
+
+4. **Kernel Support**:
+   - Checks for `nf_tables` kernel module (for nftables)
+
+5. **Auto-Detection**:
+   - If host `firewall_backend` is set to "auto", updates it based on detection
+
+#### Usage
+
+- **Per-Host**: Click "Check Readiness" button in Inventory → Hosts
+- **API**: `POST /api/host-readiness/hosts/:hostId/check`
+
+#### Result Format
+
+```typescript
+{
+  hostname: string;
+  ready: boolean;
+  backend: 'nftables' | 'iptables' | 'unknown';
+  nftVersion?: string;
+  iptablesVersion?: string;
+  sudoAccess: boolean;
+  kernelSupport: boolean;
+  errors: string[];      // Critical issues preventing deployment
+  warnings: string[];   // Non-critical issues (may still work)
+}
+```
+
+### Scheduled Deployments
+
+Deployments can be scheduled for future execution, useful for maintenance windows.
+
+#### Features
+
+- **Simple Scheduling**: Specify `scheduledAt` datetime when creating deployment
+- **Background Processing**: Background job checks every minute for ready deployments
+- **Automatic Start**: Scheduled deployments automatically start when `scheduled_at <= now()`
+- **No Calendar Logic**: Simple "tonight at 02:00" style scheduling
+
+#### Usage
+
+- **UI**: Use datetime picker in deployment creation form
+- **API**: Include `scheduledAt: "2026-01-10T02:00:00Z"` in deployment creation payload
+- **Format**: ISO 8601 datetime string
+
+#### Implementation
+
+- **Database**: `deployments.scheduled_at` field (added in migration 007)
+- **Background Job**: Runs every minute in `apps/api/src/index.ts`
+- **Processing**: `processScheduledDeployments()` function clears `scheduled_at` when ready
+
+#### Example
+
+```json
+{
+  "policyVersionId": "...",
+  "mode": "FULL",
+  "targetQuery": { "hosts": ["..."] },
+  "scheduledAt": "2026-01-10T02:00:00Z"
+}
+```
+
+---
+
 ## Firewall Backend Configuration
 
 Segmentra supports multiple firewall backends to accommodate different Linux distributions and system configurations. Each host can be configured with a specific firewall backend, and the system automatically handles mixed environments during deployments.
@@ -712,6 +928,142 @@ The simulation uses the same rule matching logic as the policy compiler, ensurin
 - **Connectivity Troubleshooting**: Determine why two hosts cannot communicate
 - **Policy Audit**: Verify that deployed policies match intended security posture
 - **Change Impact Analysis**: Understand the effect of policy changes on existing communication patterns
+
+### Compliance & Drift Detection Issues
+
+#### Compliance Check Fails with SSH Error
+**Symptom**: Compliance check returns "error" status with SSH connection failure
+
+**Causes**:
+- SSH credentials not configured (no GLOBAL SSH credential)
+- Host is unreachable or SSH port incorrect
+- SSH key authentication failure
+- Host firewall blocking SSH access
+
+**Solutions**:
+1. Verify SSH credentials exist: `GET /api/ssh-credentials`
+2. Test SSH manually: `ssh -i <key> user@host`
+3. Check host `ssh_port` configuration matches actual port
+4. Verify host is reachable: `ping <host_ip>`
+5. Check host firewall isn't blocking SSH from Segmentra server
+
+#### Compliance Shows "Unknown" Status
+**Symptom**: Host shows "Unknown" compliance status
+
+**Causes**:
+- Host has never had a successful deployment
+- Last deployment failed (no `applied_hash` stored)
+- Deployment was created but never started
+
+**Solutions**:
+1. Deploy a policy to the host successfully
+2. Check deployment history for the host
+3. Verify previous deployments completed with SUCCEEDED status
+
+#### Compliance Shows "Drifted" Status
+**Symptom**: Host shows "Drifted" status (hash mismatch)
+
+**Causes**:
+- Manual firewall rule changes on the host
+- Failed deployment that partially applied
+- Policy was rolled back manually
+- Another tool modified firewall rules
+
+**Solutions**:
+1. Review current rules on host: `ssh host "sudo nft list ruleset"` or `ssh host "sudo iptables-save"`
+2. Compare to expected policy: Use policy render endpoint
+3. Redeploy the policy to restore compliance
+4. Investigate what caused the drift (manual changes, other tools, etc.)
+
+### Host Readiness Issues
+
+#### Readiness Check Fails: "Passwordless sudo access required"
+**Symptom**: Readiness check shows `sudoAccess: false` with error about passwordless sudo
+
+**Causes**:
+- SSH user doesn't have sudo access
+- Sudo requires password (not passwordless)
+- Sudoers configuration doesn't allow nft/iptables commands
+
+**Solutions**:
+1. Verify sudo access: `ssh user@host "sudo -n nft list ruleset"`
+2. Configure passwordless sudo for firewall commands:
+   ```bash
+   # On the host, add to /etc/sudoers.d/segmentra:
+   segmentra_user ALL=(ALL) NOPASSWD: /usr/sbin/nft, /usr/sbin/iptables, /usr/sbin/iptables-save, /usr/sbin/iptables-restore
+   ```
+3. Test: `sudo -n nft list ruleset` should work without password
+
+#### Readiness Check Shows "nf_tables kernel module not loaded"
+**Symptom**: Warning about kernel module (but may still work)
+
+**Causes**:
+- Kernel module not loaded (but may load on demand)
+- Older kernel without nftables support
+
+**Solutions**:
+1. Check if module loads automatically: `modprobe nf_tables`
+2. If nftables works, this is just a warning (can be ignored)
+3. If nftables doesn't work, use iptables backend instead
+
+### Safety Check Issues
+
+#### Deployment Blocked: "SSH access would be blocked"
+**Symptom**: FULL mode deployment fails with safety check error
+
+**Causes**:
+- Policy rules don't include SSH allow rule from management VLAN
+- Management VLAN not configured
+- Policy has DENY rules that block management CIDR before ALLOW rules
+
+**Solutions**:
+1. Verify management VLAN is configured: `GET /api/admin/management-vlan-setting`
+2. Review policy rules - ensure SSH allow rule exists for management CIDR
+3. Check rule ordering - DENY rules before ALLOW rules will block
+4. Use CANARY or PROGRESSIVE mode if you need to test (warns but allows)
+5. Review compiled policy: `GET /api/policy-versions/:id/render/host/:hostId`
+
+#### Safety Check Warning: "Your IP may be blocked"
+**Symptom**: Warning that current user's IP would be blocked
+
+**Causes**:
+- Policy has DENY rules matching user's source IP
+- User is deploying from outside management VLAN
+
+**Solutions**:
+1. Verify you're deploying from management network
+2. Review DENY rules in the policy
+3. Consider using CANARY mode to test safely
+4. Ensure management VLAN CIDR includes your IP
+
+### Scheduled Deployment Issues
+
+#### Scheduled Deployment Not Starting
+**Symptom**: Deployment with `scheduled_at` never starts
+
+**Causes**:
+- Background job not running
+- `scheduled_at` is in the future
+- API server was restarted and background job didn't restart
+- Timezone mismatch
+
+**Solutions**:
+1. Check API logs for scheduled deployment processing
+2. Verify `scheduled_at` timestamp is in the past
+3. Use UTC timezone for `scheduled_at` to avoid timezone issues
+4. Manually start deployment if needed: `POST /api/deployments/:id/start`
+
+#### Scheduled Deployment Starts Immediately
+**Symptom**: Deployment starts even though `scheduled_at` is in the future
+
+**Causes**:
+- Background job processes immediately (bug)
+- `scheduled_at` parsing error
+
+**Solutions**:
+1. Verify `scheduled_at` format is correct ISO 8601
+2. Check that deployment status is QUEUED (not RUNNING)
+3. Review background job implementation
 
 ### Deployment Issues
 
@@ -892,11 +1244,14 @@ The `docker-compose.yml` file defines:
 
 ### Current v1 Limitations
 
-- Canary/progressive orchestration and advanced guardrails are stubbed at the API level (basic deployment flow is implemented).
-- Baseline mgmt SSH CIDR is currently hardcoded (`10.0.0.0/8`) in v1 rendering; this should move to admin config.
+- Canary/progressive orchestration and advanced guardrails are stubbed at the API level (basic deployment flow is implemented). The deployment modes (`CANARY`, `PROGRESSIVE`, `FULL`) are accepted and stored, but all selected hosts are processed immediately without host-by-host orchestration.
+- Baseline mgmt SSH CIDR is configured via the management VLAN setting (`/admin/management-vlan-setting`). The system uses the `subnet` field from the VLAN referenced by `system_settings.management_vlan_id` to determine which CIDR ranges should have baseline SSH access. This is configurable per environment.
 - SSH Direct executor runs sequentially (one host at a time); Ansible runs in parallel.
 - Deployment timeout is fixed at 10 minutes per host.
 - No built-in rollback UI (rollback happens automatically on failure).
+- Firewall backend `auto` setting defaults to `nftables` at compile time. Executors will detect the actual backend at runtime and validate that it matches the compiled policy format. If there's a mismatch, the deployment will fail with a clear error message.
+- Drift detection requires SSH access and passwordless sudo. Hosts without SSH credentials configured cannot be checked for compliance.
+- Scheduled deployments use simple datetime comparison. No support for recurring schedules, timezone handling, or complex scheduling rules.
 
 ---
 

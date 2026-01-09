@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -12,6 +13,7 @@ import { env } from '../lib/env.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { createAuditEvent } from '../services/audit.js';
 import { readSecretPlaintext } from '../services/secrets.js';
+import { checkDeploymentSafety } from '../services/safety-check.js';
 
 export const deploymentsRouter = Router();
 deploymentsRouter.use(requireAuth, requireRole('operator', 'admin'));
@@ -175,7 +177,8 @@ const createDeploymentSchema = z.object({
     hosts: z.array(z.string().uuid()).optional().default([])
   }),
   canarySize: z.number().int().min(1).optional(),
-  batchSize: z.number().int().min(1).optional()
+  batchSize: z.number().int().min(1).optional(),
+  scheduledAt: z.string().datetime().optional() // ISO 8601 datetime string
 });
 
 async function getManagementVlanCidrs(): Promise<string[]> {
@@ -243,6 +246,33 @@ deploymentsRouter.post('/deployments', async (req, res) => {
 
   const targetIds = await resolveTargets(b.targetQuery);
   
+  if (targetIds.length === 0) {
+    return res.status(400).json({ error: 'no_targets', message: 'No enabled hosts match the target query' });
+  }
+
+  // Safety check: verify SSH access will be preserved
+  const safetyCheck = await checkDeploymentSafety({
+    policyVersionId: b.policyVersionId,
+    hostIds: targetIds,
+    userIp: req.ip
+  });
+
+  // For FULL mode deployments, require SSH access to be preserved
+  if (b.mode === 'FULL' && !safetyCheck.sshAccessPreserved && safetyCheck.errors.length > 0) {
+    return res.status(400).json({
+      error: 'safety_check_failed',
+      message: 'Deployment would block SSH access from management VLAN',
+      safetyCheck
+    });
+  }
+
+  // For other modes, warn but allow (user can proceed with caution)
+  if (!safetyCheck.sshAccessPreserved && safetyCheck.errors.length > 0) {
+    // Log warning but don't block
+    // eslint-disable-next-line no-console
+    console.warn(`[Safety Check] Deployment ${b.policyVersionId} may block SSH access:`, safetyCheck.errors);
+  }
+  
   // Get user ID
   const userRes = await pool.query(`SELECT id FROM users WHERE username=$1 LIMIT 1`, [req.auth!.username]);
   const userId = userRes.rows[0]?.id || null;
@@ -282,11 +312,14 @@ deploymentsRouter.post('/deployments', async (req, res) => {
   if (targetNames.hosts.length > 0) targetTypes.push('Hosts');
   const targetType = targetTypes.join(', ') || 'Unknown';
 
+  const scheduledAt = b.scheduledAt ? new Date(b.scheduledAt) : null;
+  const status = scheduledAt && scheduledAt > new Date() ? 'QUEUED' : 'QUEUED';
+
   const { rows } = await pool.query(
-    `INSERT INTO deployments (policy_version_id, mode, target_query, target_count, created_by, canary_size, batch_size)
-     VALUES ($1,$2,$3,$4,(SELECT id FROM users WHERE username=$5 LIMIT 1),$6,$7)
+    `INSERT INTO deployments (policy_version_id, mode, target_query, target_count, created_by, canary_size, batch_size, scheduled_at, status)
+     VALUES ($1,$2,$3,$4,(SELECT id FROM users WHERE username=$5 LIMIT 1),$6,$7,$8,$9)
      RETURNING *`,
-    [b.policyVersionId, b.mode, b.targetQuery, targetIds.length, req.auth!.username, b.canarySize ?? null, b.batchSize ?? null]
+    [b.policyVersionId, b.mode, b.targetQuery, targetIds.length, req.auth!.username, b.canarySize ?? null, b.batchSize ?? null, scheduledAt, status]
   );
   const deployment = rows[0];
 
@@ -470,9 +503,12 @@ async function generateBundle(deploymentId: string) {
   fs.writeFileSync(keyPath, keyPem, { encoding: 'utf8' });
 
   const inventoryLines: string[] = ['[all]'];
+  const hostPolicyHashes: Map<string, string> = new Map(); // host_id -> policy hash
 
   for (const h of hostRows.rows as any[]) {
     const ifsRes = await pool.query(`SELECT name, role, enabled FROM host_interfaces WHERE host_id=$1`, [h.id]);
+    // Backend selection: 'iptables' explicitly uses iptables, everything else (including 'auto' and null) defaults to nftables
+    // Note: 'auto' defaults to nftables at compile time. Executors will detect and validate at runtime.
     const backend = h.firewall_backend === 'iptables' ? 'iptables' : 'nftables';
 
     const rules = (rRes.rows as any[]).map((r) => {
@@ -520,6 +556,10 @@ async function generateBundle(deploymentId: string) {
     const ext = compiled.backend === 'nftables' ? 'nft' : 'iptables';
     const policyFileHostPath = path.join(hostRulesDir, `${h.hostname}.${ext}`);
     fs.writeFileSync(policyFileHostPath, compiled.text, 'utf8');
+    
+    // Store hash of compiled policy for this host (for drift detection)
+    const policyHash = crypto.createHash('sha256').update(compiled.text, 'utf8').digest('hex');
+    hostPolicyHashes.set(h.id, policyHash);
 
     // Ansible runner sees bundle at /bundles/<deploymentId>/...
     const policyFileRunnerPath = `/bundles/${deploymentId}/host_rules/${h.hostname}.${ext}`;
@@ -531,14 +571,18 @@ async function generateBundle(deploymentId: string) {
 
   fs.writeFileSync(path.join(bundleDir, 'inventory.ini'), inventoryLines.join('\n') + '\n', 'utf8');
 
-  // artifacts row (bundle hash omitted v1)
+  // Calculate bundle hash from manifest JSON (SHA-256)
+  const manifestJson = JSON.stringify(manifest);
+  const bundleHash = crypto.createHash('sha256').update(manifestJson, 'utf8').digest('hex');
+
+  // artifacts row
   await pool.query(
     `INSERT INTO deployment_artifacts (deployment_id, bundle_path, bundle_hash, manifest)
      VALUES ($1,$2,$3,$4)`,
-    [deploymentId, bundleDir, 'todo', manifest]
+    [deploymentId, bundleDir, bundleHash, manifest]
   );
 
-  return { bundleDir };
+  return { bundleDir, hostPolicyHashes };
 }
 
 deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
@@ -568,7 +612,7 @@ deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
     [deploymentId]
   );
 
-  const { bundleDir } = await generateBundle(deploymentId);
+  const { bundleDir, hostPolicyHashes } = await generateBundle(deploymentId);
 
   // Get executor setting
   const executorRes = await pool.query(
@@ -650,11 +694,12 @@ deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
     for (const result of results) {
       const host = hostRows.rows.find((h: any) => h.hostname === result.hostname);
       if (host) {
+        const policyHash = result.success ? hostPolicyHashes.get(host.id) || null : null;
         await pool.query(
           `UPDATE deployment_hosts
-           SET status=$2, finished_at=now(), message=$3
+           SET status=$2, finished_at=now(), message=$3, applied_hash=$5
            WHERE deployment_id=$1 AND host_id=$4`,
-          [deploymentId, result.success ? 'SUCCEEDED' : 'FAILED', result.success ? 'ok' : 'ssh_failed', host.id]
+          [deploymentId, result.success ? 'SUCCEEDED' : 'FAILED', result.success ? 'ok' : 'ssh_failed', host.id, policyHash]
         );
       }
     }
@@ -694,12 +739,31 @@ deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
     );
 
     // Only update enabled hosts that were RUNNING (disabled hosts are already SKIPPED)
-    await pool.query(
-      `UPDATE deployment_hosts
-       SET status=$2, finished_at=now(), message=$3
-       WHERE deployment_id=$1 AND status='RUNNING'`,
-      [deploymentId, ok ? 'SUCCEEDED' : 'FAILED', ok ? 'ok' : 'ansible_failed']
-    );
+    // For Ansible, we need to update each host individually to set applied_hash
+    if (ok) {
+      const hostRows = await pool.query(
+        `SELECT h.id FROM deployment_hosts dh
+         JOIN hosts h ON h.id = dh.host_id
+         WHERE dh.deployment_id=$1 AND dh.status='RUNNING' AND h.enabled=true`,
+        [deploymentId]
+      );
+      for (const hostRow of hostRows.rows) {
+        const policyHash = hostPolicyHashes.get(hostRow.id) || null;
+        await pool.query(
+          `UPDATE deployment_hosts
+           SET status='SUCCEEDED', finished_at=now(), message='ok', applied_hash=$3
+           WHERE deployment_id=$1 AND host_id=$2`,
+          [deploymentId, hostRow.id, policyHash]
+        );
+      }
+    } else {
+      await pool.query(
+        `UPDATE deployment_hosts
+         SET status='FAILED', finished_at=now(), message='ansible_failed'
+         WHERE deployment_id=$1 AND status='RUNNING'`,
+        [deploymentId]
+      );
+    }
   }
 
   // Get final host status counts to determine deployment status
@@ -894,5 +958,37 @@ deploymentsRouter.post('/deployments/:deploymentId/retry-failed', async (req, re
   ]);
   res.json({ ok: true });
 });
+
+/**
+ * Process scheduled deployments that are ready to start.
+ * Called periodically by background job.
+ * Returns count of deployments processed.
+ */
+export async function processScheduledDeployments(): Promise<number> {
+  const now = new Date();
+  
+  // Find deployments that are QUEUED and scheduled_at <= now
+  const scheduledRes = await pool.query(
+    `SELECT id FROM deployments
+     WHERE status='QUEUED' AND scheduled_at IS NOT NULL AND scheduled_at <= $1
+     ORDER BY scheduled_at ASC
+     LIMIT 10`,
+    [now]
+  );
+
+  let processedCount = 0;
+  for (const row of scheduledRes.rows) {
+    // Update status to mark as ready (scheduled_at cleared)
+    // The actual deployment will be started by calling the /start endpoint
+    // For now, we just mark them as ready to start
+    await pool.query(
+      `UPDATE deployments SET scheduled_at=NULL WHERE id=$1`,
+      [row.id]
+    );
+    processedCount++;
+  }
+
+  return processedCount;
+}
 
 
