@@ -20,6 +20,10 @@ export function PolicySetsPage() {
   const [formScopeTagId, setFormScopeTagId] = useState('');
   const [formScopeVlanId, setFormScopeVlanId] = useState('');
   const [formHostIds, setFormHostIds] = useState<string[]>([]);
+  
+  // Host selection filtering state
+  const [hostSearchQuery, setHostSearchQuery] = useState('');
+  const [hostFilterVlan, setHostFilterVlan] = useState<string>('');
 
   useEffect(() => {
     loadData();
@@ -201,29 +205,169 @@ export function PolicySetsPage() {
             {formScopeType === 'HOST_LIST' && (
               <div className="form-group" style={{ gridColumn: '1 / -1' }}>
                 <label>Hosts * (select multiple)</label>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 8, maxHeight: '200px', overflowY: 'auto', border: '1px solid #ddd', padding: 8, borderRadius: 4 }}>
-                  {hosts.map((h) => (
-                    <label key={h.id} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                
+                {/* Host Selection Filters */}
+                <div style={{ marginBottom: 12, padding: 12, background: '#f5f5f5', borderRadius: 8 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginBottom: 8 }}>
+                    <div>
+                      <label style={{ display: 'block', marginBottom: 4, fontSize: '0.9em', fontWeight: 500 }}>Search Hostname</label>
                       <input
-                        type="checkbox"
-                        checked={formHostIds.includes(h.id)}
-                        onChange={(e) => {
-                          if (e.target.checked) {
-                            setFormHostIds([...formHostIds, h.id]);
-                          } else {
-                            setFormHostIds(formHostIds.filter(id => id !== h.id));
-                          }
-                        }}
+                        type="text"
+                        value={hostSearchQuery}
+                        onChange={(e) => setHostSearchQuery(e.target.value)}
+                        placeholder="e.g., *.nginx.domain.com or web-*"
+                        style={{ width: '100%', padding: '6px 8px', border: '1px solid #ddd', borderRadius: 4 }}
                       />
-                      <span>{h.hostname} {h.mgmt_ip && `(${h.mgmt_ip})`}</span>
-                    </label>
-                  ))}
-                </div>
-                {formHostIds.length > 0 && (
-                  <div style={{ marginTop: 8, fontSize: '0.9em', color: '#666' }}>
-                    Selected: {formHostIds.length} host(s)
+                      <small style={{ display: 'block', marginTop: 4, fontSize: '0.8em', color: '#666' }}>
+                        Supports wildcards: * matches any characters
+                      </small>
+                    </div>
+                    <div>
+                      <label style={{ display: 'block', marginBottom: 4, fontSize: '0.9em', fontWeight: 500 }}>Filter by VLAN</label>
+                      <select
+                        value={hostFilterVlan}
+                        onChange={(e) => setHostFilterVlan(e.target.value)}
+                        style={{ width: '100%', padding: '6px 8px', border: '1px solid #ddd', borderRadius: 4 }}
+                      >
+                        <option value="">All VLANs</option>
+                        {vlans.map((v) => (
+                          <option key={v.id} value={v.id}>{v.name} (VLAN {v.vlan_tag})</option>
+                        ))}
+                      </select>
+                    </div>
                   </div>
-                )}
+                  {(hostSearchQuery || hostFilterVlan) && (
+                    <button
+                      onClick={() => {
+                        setHostSearchQuery('');
+                        setHostFilterVlan('');
+                      }}
+                      className="btn-small btn-secondary"
+                    >
+                      Clear Filters
+                    </button>
+                  )}
+                </div>
+
+                {/* Filtered Hosts Table */}
+                {(() => {
+                  // Filter hosts based on search and VLAN
+                  let filteredHosts = hosts;
+                  
+                  // Filter by VLAN
+                  if (hostFilterVlan) {
+                    filteredHosts = filteredHosts.filter((h) => h.vlan_id === hostFilterVlan);
+                  }
+                  
+                  // Filter by search query (supports wildcards)
+                  if (hostSearchQuery.trim()) {
+                    const searchPattern = hostSearchQuery.trim().toLowerCase();
+                    // Convert wildcard pattern to regex
+                    const regexPattern = searchPattern
+                      .replace(/[.*+?^${}()|[\]\\]/g, '\\$&') // Escape special regex chars
+                      .replace(/\\\*/g, '.*') // Convert \* to .*
+                      .replace(/\\\?/g, '.'); // Convert \? to . (optional, for future)
+                    const regex = new RegExp(`^${regexPattern}$`, 'i');
+                    
+                    filteredHosts = filteredHosts.filter((h) => {
+                      const hostname = (h.hostname || '').toLowerCase();
+                      const mgmtIp = (h.mgmt_ip || '').toLowerCase();
+                      return regex.test(hostname) || regex.test(mgmtIp);
+                    });
+                  }
+                  
+                  return (
+                    <div style={{ border: '1px solid #ddd', borderRadius: 4, overflow: 'hidden' }}>
+                      <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
+                        <table className="data-table" style={{ margin: 0 }}>
+                          <thead style={{ position: 'sticky', top: 0, background: '#f5f5f5', zIndex: 10 }}>
+                            <tr>
+                              <th style={{ width: 40 }}>
+                                <input
+                                  type="checkbox"
+                                  checked={filteredHosts.length > 0 && filteredHosts.every(h => formHostIds.includes(h.id))}
+                                  onChange={(e) => {
+                                    if (e.target.checked) {
+                                      // Add all filtered hosts
+                                      const newIds = [...new Set([...formHostIds, ...filteredHosts.map(h => h.id)])];
+                                      setFormHostIds(newIds);
+                                    } else {
+                                      // Remove all filtered hosts
+                                      const filteredIds = new Set(filteredHosts.map(h => h.id));
+                                      setFormHostIds(formHostIds.filter(id => !filteredIds.has(id)));
+                                    }
+                                  }}
+                                />
+                              </th>
+                              <th>Hostname</th>
+                              <th>Mgmt IP</th>
+                              <th>VLAN</th>
+                              <th>Tags</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {filteredHosts.map((h) => (
+                              <tr key={h.id}>
+                                <td>
+                                  <input
+                                    type="checkbox"
+                                    checked={formHostIds.includes(h.id)}
+                                    onChange={(e) => {
+                                      if (e.target.checked) {
+                                        setFormHostIds([...formHostIds, h.id]);
+                                      } else {
+                                        setFormHostIds(formHostIds.filter(id => id !== h.id));
+                                      }
+                                    }}
+                                  />
+                                </td>
+                                <td><strong>{h.hostname}</strong></td>
+                                <td>{h.mgmt_ip || '-'}</td>
+                                <td>
+                                  {h.vlan_name ? (
+                                    <span>{h.vlan_name} <code>({h.vlan_tag})</code></span>
+                                  ) : (
+                                    '-'
+                                  )}
+                                </td>
+                                <td>
+                                  {h.tags && h.tags.length > 0 ? (
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                                      {h.tags.map((tag: any) => (
+                                        <span key={tag.id} style={{ background: '#e3f2fd', padding: '2px 8px', borderRadius: 4, fontSize: '0.85em' }}>
+                                          {tag.name}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    '-'
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                            {filteredHosts.length === 0 && (
+                              <tr>
+                                <td colSpan={5} className="empty-state" style={{ textAlign: 'center', padding: '24px' }}>
+                                  {hostSearchQuery || hostFilterVlan
+                                    ? 'No hosts match your filters. Try adjusting your search criteria.'
+                                    : 'No hosts available.'}
+                                </td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div style={{ padding: 8, background: '#f5f5f5', borderTop: '1px solid #ddd', fontSize: '0.9em', color: '#666' }}>
+                        Showing {filteredHosts.length} of {hosts.length} hosts
+                        {formHostIds.length > 0 && (
+                          <span style={{ marginLeft: 16, fontWeight: 500 }}>
+                            • {formHostIds.length} selected
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             )}
           </div>

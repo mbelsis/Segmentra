@@ -91,7 +91,34 @@ export const api = {
   render: (versionId: string, hostId: string) =>
     request<{ backend: string; sha256: string; text: string }>(`/policy-versions/${versionId}/render/host/${hostId}`),
 
-  deployments: () => request<{ deployments: any[] }>('/deployments'),
+  deployments: (params?: {
+    search?: string;
+    mode?: string;
+    status?: string;
+    tag?: string;
+    vlan?: string;
+    fromDate?: string;
+    toDate?: string;
+    sortBy?: string;
+    sortOrder?: 'ASC' | 'DESC';
+    page?: number;
+    limit?: number;
+  }) => {
+    const query = new URLSearchParams();
+    if (params?.search) query.append('search', params.search);
+    if (params?.mode) query.append('mode', params.mode);
+    if (params?.status) query.append('status', params.status);
+    if (params?.tag) query.append('tag', params.tag);
+    if (params?.vlan) query.append('vlan', params.vlan);
+    if (params?.fromDate) query.append('fromDate', params.fromDate);
+    if (params?.toDate) query.append('toDate', params.toDate);
+    if (params?.sortBy) query.append('sortBy', params.sortBy);
+    if (params?.sortOrder) query.append('sortOrder', params.sortOrder);
+    if (params?.page) query.append('page', String(params.page));
+    if (params?.limit) query.append('limit', String(params.limit));
+    const queryString = query.toString();
+    return request<{ deployments: any[]; pagination: { page: number; limit: number; total: number; totalPages: number } }>(`/deployments${queryString ? `?${queryString}` : ''}`);
+  },
   deployment: (deploymentId: string) => request<{ deployment: any }>(`/deployments/${deploymentId}`),
   createDeployment: (b: any) => request<{ deployment: any }>('/deployments', { method: 'POST', body: JSON.stringify(b) }),
   startDeployment: (deploymentId: string) => request<any>(`/deployments/${deploymentId}/start`, { method: 'POST' }),

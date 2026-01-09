@@ -12,6 +12,19 @@ export function DeploymentsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [error, setError] = useState<string>('');
 
+  // Filtering and pagination state
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterMode, setFilterMode] = useState<string>('');
+  const [filterStatus, setFilterStatus] = useState<string>('');
+  const [filterTag, setFilterTag] = useState<string>('');
+  const [filterVlan, setFilterVlan] = useState<string>('');
+  const [filterFromDate, setFilterFromDate] = useState('');
+  const [filterToDate, setFilterToDate] = useState('');
+  const [sortBy, setSortBy] = useState<string>('created_at');
+  const [sortOrder, setSortOrder] = useState<'ASC' | 'DESC'>('DESC');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pagination, setPagination] = useState<{ page: number; limit: number; total: number; totalPages: number } | null>(null);
+
   // Form state
   const [formPolicyVersionId, setFormPolicyVersionId] = useState('');
   const [formMode, setFormMode] = useState<'CANARY' | 'PROGRESSIVE' | 'FULL'>('CANARY');
@@ -28,21 +41,44 @@ export function DeploymentsPage() {
     loadData();
   }, []);
 
+  useEffect(() => {
+    loadDeployments();
+  }, [currentPage, searchQuery, filterMode, filterStatus, filterTag, filterVlan, filterFromDate, filterToDate, sortBy, sortOrder]);
+
   async function loadData() {
     try {
-      const [dRes, tagsRes, vlansRes, hostsRes] = await Promise.all([
-        api.deployments(),
+      const [tagsRes, vlansRes, hostsRes] = await Promise.all([
         api.tags(),
         api.vlans(),
         api.hosts()
       ]);
-      setDeployments(dRes.deployments);
       setTags(tagsRes.tags);
       setVlans(vlansRes.vlans);
       setHosts(hostsRes.hosts);
+    } catch (e: any) {
+      setError(String(e.message || e));
+    }
+  }
 
-      // Load policy versions (simplified - would need to fetch from policy sets)
-      // For now, we'll let user paste version ID
+  async function loadDeployments() {
+    try {
+      const params: any = {
+        page: currentPage,
+        limit: 50,
+        sortBy,
+        sortOrder
+      };
+      if (searchQuery.trim()) params.search = searchQuery.trim();
+      if (filterMode) params.mode = filterMode;
+      if (filterStatus) params.status = filterStatus;
+      if (filterTag) params.tag = filterTag;
+      if (filterVlan) params.vlan = filterVlan;
+      if (filterFromDate) params.fromDate = filterFromDate;
+      if (filterToDate) params.toDate = filterToDate;
+
+      const dRes = await api.deployments(params);
+      setDeployments(dRes.deployments);
+      setPagination(dRes.pagination);
     } catch (e: any) {
       setError(String(e.message || e));
     }
@@ -114,7 +150,7 @@ export function DeploymentsPage() {
 
       await api.createDeployment(payload);
       resetForm();
-      loadData();
+      loadDeployments();
     } catch (e: any) {
       const errorMsg = e.message || String(e);
       // Try to extract a more user-friendly error message
@@ -132,7 +168,7 @@ export function DeploymentsPage() {
     if (!confirm('Start this deployment? This will apply firewall rules to target hosts.')) return;
     try {
       await api.startDeployment(deploymentId);
-      loadData();
+      loadDeployments();
     } catch (e: any) {
       setError(String(e.message || e));
     }
@@ -155,7 +191,7 @@ export function DeploymentsPage() {
     if (!confirm('Pause this deployment? You can resume it later.')) return;
     try {
       await api.pauseDeployment(deploymentId);
-      loadData();
+      loadDeployments();
     } catch (e: any) {
       setError(String(e.message || e));
     }
@@ -165,7 +201,7 @@ export function DeploymentsPage() {
     if (!confirm('Resume this deployment?')) return;
     try {
       await api.resumeDeployment(deploymentId);
-      loadData();
+      loadDeployments();
     } catch (e: any) {
       setError(String(e.message || e));
     }
@@ -175,7 +211,7 @@ export function DeploymentsPage() {
     if (!confirm('Stop this deployment? This will cancel all pending hosts and cannot be undone.')) return;
     try {
       await api.stopDeployment(deploymentId);
-      loadData();
+      loadDeployments();
     } catch (e: any) {
       setError(String(e.message || e));
     }
@@ -470,6 +506,147 @@ export function DeploymentsPage() {
       )}
 
       <div className="card">
+        <h3>Deployments</h3>
+        
+        {/* Filters */}
+        <div style={{ marginBottom: 16, padding: 16, background: '#f5f5f5', borderRadius: 8 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginBottom: 12 }}>
+            <div>
+              <label style={{ display: 'block', marginBottom: 4, fontSize: '0.9em', fontWeight: 500 }}>Search</label>
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => { setSearchQuery(e.target.value); setCurrentPage(1); }}
+                placeholder="Deployment or Policy Version ID"
+                style={{ width: '100%', padding: '6px 8px', border: '1px solid #ddd', borderRadius: 4 }}
+              />
+            </div>
+            <div>
+              <label style={{ display: 'block', marginBottom: 4, fontSize: '0.9em', fontWeight: 500 }}>Mode</label>
+              <select
+                value={filterMode}
+                onChange={(e) => { setFilterMode(e.target.value); setCurrentPage(1); }}
+                style={{ width: '100%', padding: '6px 8px', border: '1px solid #ddd', borderRadius: 4 }}
+              >
+                <option value="">All Modes</option>
+                <option value="CANARY">Canary</option>
+                <option value="PROGRESSIVE">Progressive</option>
+                <option value="FULL">Full</option>
+              </select>
+            </div>
+            <div>
+              <label style={{ display: 'block', marginBottom: 4, fontSize: '0.9em', fontWeight: 500 }}>Status</label>
+              <select
+                value={filterStatus}
+                onChange={(e) => { setFilterStatus(e.target.value); setCurrentPage(1); }}
+                style={{ width: '100%', padding: '6px 8px', border: '1px solid #ddd', borderRadius: 4 }}
+              >
+                <option value="">All Statuses</option>
+                <option value="QUEUED">Queued</option>
+                <option value="RUNNING">Running</option>
+                <option value="PAUSED">Paused</option>
+                <option value="SUCCEEDED">Succeeded</option>
+                <option value="FAILED">Failed</option>
+                <option value="PARTIAL">Partial</option>
+                <option value="CANCELLED">Cancelled</option>
+              </select>
+            </div>
+            <div>
+              <label style={{ display: 'block', marginBottom: 4, fontSize: '0.9em', fontWeight: 500 }}>Tag</label>
+              <select
+                value={filterTag}
+                onChange={(e) => { setFilterTag(e.target.value); setCurrentPage(1); }}
+                style={{ width: '100%', padding: '6px 8px', border: '1px solid #ddd', borderRadius: 4 }}
+              >
+                <option value="">All Tags</option>
+                {tags.map((t) => (
+                  <option key={t.id} value={t.name}>{t.name}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label style={{ display: 'block', marginBottom: 4, fontSize: '0.9em', fontWeight: 500 }}>VLAN</label>
+              <select
+                value={filterVlan}
+                onChange={(e) => { setFilterVlan(e.target.value); setCurrentPage(1); }}
+                style={{ width: '100%', padding: '6px 8px', border: '1px solid #ddd', borderRadius: 4 }}
+              >
+                <option value="">All VLANs</option>
+                {vlans.map((v) => (
+                  <option key={v.id} value={v.name}>{v.name} (VLAN {v.vlan_tag})</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label style={{ display: 'block', marginBottom: 4, fontSize: '0.9em', fontWeight: 500 }}>From Date</label>
+              <input
+                type="date"
+                value={filterFromDate}
+                onChange={(e) => { setFilterFromDate(e.target.value); setCurrentPage(1); }}
+                style={{ width: '100%', padding: '6px 8px', border: '1px solid #ddd', borderRadius: 4 }}
+              />
+            </div>
+            <div>
+              <label style={{ display: 'block', marginBottom: 4, fontSize: '0.9em', fontWeight: 500 }}>To Date</label>
+              <input
+                type="date"
+                value={filterToDate}
+                onChange={(e) => { setFilterToDate(e.target.value); setCurrentPage(1); }}
+                style={{ width: '100%', padding: '6px 8px', border: '1px solid #ddd', borderRadius: 4 }}
+              />
+            </div>
+            <div>
+              <label style={{ display: 'block', marginBottom: 4, fontSize: '0.9em', fontWeight: 500 }}>Sort By</label>
+              <select
+                value={sortBy}
+                onChange={(e) => { setSortBy(e.target.value); setCurrentPage(1); }}
+                style={{ width: '100%', padding: '6px 8px', border: '1px solid #ddd', borderRadius: 4 }}
+              >
+                <option value="created_at">Created Date</option>
+                <option value="started_at">Started Date</option>
+                <option value="finished_at">Finished Date</option>
+                <option value="status">Status</option>
+                <option value="mode">Mode</option>
+                <option value="target_count">Target Count</option>
+              </select>
+            </div>
+            <div>
+              <label style={{ display: 'block', marginBottom: 4, fontSize: '0.9em', fontWeight: 500 }}>Order</label>
+              <select
+                value={sortOrder}
+                onChange={(e) => { setSortOrder(e.target.value as 'ASC' | 'DESC'); setCurrentPage(1); }}
+                style={{ width: '100%', padding: '6px 8px', border: '1px solid #ddd', borderRadius: 4 }}
+              >
+                <option value="DESC">Newest First</option>
+                <option value="ASC">Oldest First</option>
+              </select>
+            </div>
+          </div>
+          {(searchQuery || filterMode || filterStatus || filterTag || filterVlan || filterFromDate || filterToDate) && (
+            <button
+              onClick={() => {
+                setSearchQuery('');
+                setFilterMode('');
+                setFilterStatus('');
+                setFilterTag('');
+                setFilterVlan('');
+                setFilterFromDate('');
+                setFilterToDate('');
+                setCurrentPage(1);
+              }}
+              className="btn-small btn-secondary"
+              style={{ marginTop: 8 }}
+            >
+              Clear Filters
+            </button>
+          )}
+          {pagination && (
+            <div style={{ fontSize: '0.9em', color: '#666', marginTop: 12 }}>
+              Showing {((currentPage - 1) * (pagination.limit || 50)) + 1} to {Math.min(currentPage * (pagination.limit || 50), pagination.total)} of {pagination.total} deployments
+            </div>
+          )}
+        </div>
+
         <table className="data-table">
           <thead>
             <tr>
@@ -515,13 +692,38 @@ export function DeploymentsPage() {
             ))}
             {deployments.length === 0 && (
               <tr>
-                <td colSpan={7} className="empty-state">
-                  No deployments yet. Click "Create Deployment" to create one.
+                <td colSpan={7} className="empty-state" style={{ textAlign: 'center', padding: '24px' }}>
+                  {searchQuery || filterMode || filterStatus || filterTag || filterVlan || filterFromDate || filterToDate
+                    ? 'No deployments match your filters. Try adjusting your search criteria.'
+                    : 'No deployments yet. Click "Create Deployment" to create one.'}
                 </td>
               </tr>
             )}
           </tbody>
         </table>
+
+        {/* Pagination */}
+        {pagination && pagination.totalPages > 1 && (
+          <div style={{ marginTop: 16, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8 }}>
+            <button
+              onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+              disabled={currentPage === 1}
+              className="btn-small"
+            >
+              Previous
+            </button>
+            <span style={{ padding: '0 16px' }}>
+              Page {pagination.page} of {pagination.totalPages}
+            </span>
+            <button
+              onClick={() => setCurrentPage(p => Math.min(pagination.totalPages, p + 1))}
+              disabled={currentPage === pagination.totalPages}
+              className="btn-small"
+            >
+              Next
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

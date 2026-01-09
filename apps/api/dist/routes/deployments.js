@@ -290,11 +290,105 @@ deploymentsRouter.post('/deployments', async (req, res) => {
     });
     res.status(201).json({ deployment });
 });
-deploymentsRouter.get('/deployments', async (_req, res) => {
+deploymentsRouter.get('/deployments', async (req, res) => {
     // Check for stale hosts before returning deployments
     await checkAndTimeoutStaleHosts();
-    const { rows } = await pool.query(`SELECT * FROM deployments ORDER BY created_at DESC`);
-    res.json({ deployments: rows });
+    // Parse query parameters
+    const search = req.query.search;
+    const mode = req.query.mode;
+    const status = req.query.status;
+    const tag = req.query.tag;
+    const vlan = req.query.vlan;
+    const fromDate = req.query.fromDate;
+    const toDate = req.query.toDate;
+    const sortBy = req.query.sortBy || 'created_at';
+    const sortOrder = req.query.sortOrder || 'DESC';
+    const page = parseInt(req.query.page) || 1;
+    const limit = Math.min(parseInt(req.query.limit) || 50, 100); // Max 100 per page
+    const offset = (page - 1) * limit;
+    // Build WHERE clause
+    const conditions = [];
+    const params = [];
+    let paramIndex = 1;
+    // Search by policy version ID or deployment ID
+    if (search) {
+        conditions.push(`(d.id::text ILIKE $${paramIndex} OR d.policy_version_id::text ILIKE $${paramIndex})`);
+        params.push(`%${search}%`);
+        paramIndex++;
+    }
+    // Filter by mode
+    if (mode && ['CANARY', 'PROGRESSIVE', 'FULL'].includes(mode)) {
+        conditions.push(`d.mode = $${paramIndex}`);
+        params.push(mode);
+        paramIndex++;
+    }
+    // Filter by status
+    if (status) {
+        conditions.push(`d.status = $${paramIndex}`);
+        params.push(status);
+        paramIndex++;
+    }
+    // Filter by date range
+    if (fromDate) {
+        conditions.push(`d.created_at >= $${paramIndex}::timestamptz`);
+        params.push(fromDate);
+        paramIndex++;
+    }
+    if (toDate) {
+        conditions.push(`d.created_at <= $${paramIndex}::timestamptz`);
+        params.push(toDate);
+        paramIndex++;
+    }
+    // Filter by tag (requires join with hosts and host_tags)
+    if (tag) {
+        conditions.push(`EXISTS (
+      SELECT 1 FROM deployment_hosts dh2
+      JOIN hosts h2 ON h2.id = dh2.host_id
+      JOIN host_tags ht ON ht.host_id = h2.id
+      JOIN tags t ON t.id = ht.tag_id
+      WHERE dh2.deployment_id = d.id AND t.name = $${paramIndex}
+    )`);
+        params.push(tag);
+        paramIndex++;
+    }
+    // Filter by VLAN (requires join with hosts)
+    if (vlan) {
+        conditions.push(`EXISTS (
+      SELECT 1 FROM deployment_hosts dh3
+      JOIN hosts h3 ON h3.id = dh3.host_id
+      JOIN vlans v ON v.id = h3.vlan_id
+      WHERE dh3.deployment_id = d.id AND (v.name = $${paramIndex} OR v.vlan_tag::text = $${paramIndex})
+    )`);
+        params.push(vlan);
+        paramIndex++;
+    }
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    // Validate sortBy and sortOrder
+    const validSortColumns = ['created_at', 'started_at', 'finished_at', 'status', 'mode', 'target_count'];
+    const sortColumn = validSortColumns.includes(sortBy) ? sortBy : 'created_at';
+    const sortDir = sortOrder.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+    // Get total count for pagination
+    const countRes = await pool.query(`SELECT COUNT(*) as total FROM deployments d ${whereClause}`, params);
+    const total = parseInt(countRes.rows[0].total, 10);
+    // Get paginated results
+    const query = `
+    SELECT d.*
+    FROM deployments d
+    ${whereClause}
+    ORDER BY d.${sortColumn} ${sortDir}
+    LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+  `;
+    params.push(limit, offset);
+    const { rows } = await pool.query(query, params);
+    res.json({
+        deployments: rows,
+        pagination: {
+            page,
+            limit,
+            total,
+            totalPages: Math.ceil(total / limit)
+        }
+    });
 });
 deploymentsRouter.get('/deployments/:deploymentId', async (req, res) => {
     const { rows } = await pool.query(`SELECT * FROM deployments WHERE id=$1`, [req.params.deploymentId]);
