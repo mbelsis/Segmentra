@@ -222,6 +222,12 @@ If you have LDAP configured and AD group mappings, you can login via `/api/auth/
   <img src="docs/images/policy-version.png" alt="Policy Version" style="max-width: 100%; height: auto;" />
 </div>
 
+-Add Rues to **Policy Version**
+
+<div align="center">
+  <img src="docs/images/policy-rules.png" alt="Policy Version" style="max-width: 100%; height: auto;" />
+</div>
+
 ### 5) Deploy
 
 - Create a Deployment targeting hosts/tags/vlans (policy version must be APPROVED)
