@@ -197,6 +197,9 @@ Base URL: `http://localhost:8080/api`
 - `GET /troubleshoot/policies/by-ip?ip=...` — Find which policies apply to a specific IP
 - `GET /troubleshoot/hosts/:hostId/policies` — Get all policies deployed to a host
 - `GET /troubleshoot/policy-versions/:versionId/hosts` — Get all hosts with a specific policy version
+- `POST /troubleshoot/simulate-communication` — Simulate communication between two IPs
+  - Body: `{ sourceIp, sourcePort?, destIp, destPort?, protocol? }`
+  - Returns: Analysis of whether communication would be blocked, matching rules, and host information
 
 ### SSH Credentials (Admin role required)
 
@@ -643,6 +646,72 @@ web-04 ansible_host=... segmentra_policy_file=/bundles/xxx/host_rules/web-04.nft
 ---
 
 ## Troubleshooting
+
+### Communication Simulation
+
+The communication simulation feature (`POST /troubleshoot/simulate-communication`) provides a powerful analytical tool to predict whether network traffic between two IP addresses would be blocked by deployed firewall policies. This is particularly useful for troubleshooting connectivity issues and validating policy configurations before deployment.
+
+#### How Simulation Works
+
+The simulation engine performs a comprehensive analysis by:
+
+1. **Host Resolution**: 
+   - Queries the inventory to find hosts matching the source and destination IPs
+   - Supports both exact IP matches and CIDR notation (e.g., `192.168.1.10` matches `192.168.1.10/32`)
+   - Returns host information including hostname, management IP, and deployment status
+
+2. **Policy Discovery**:
+   - Retrieves all successfully deployed (`SUCCEEDED` status) and approved (`APPROVED` status) policy versions for both source and destination hosts
+   - Only considers policies that have been successfully deployed to the hosts (not just created)
+   - Filters out failed or cancelled deployments
+
+3. **Rule Evaluation** (Source Host - OUT Direction):
+   - For each policy deployed to the source host, evaluates rules with `OUT` or `BOTH` direction
+   - Checks if the destination IP matches the rule's source specification:
+     - **CIDR**: Uses CIDR matching algorithm to check if destination IP falls within the CIDR range
+     - **HOST**: Resolves the host ID to its management IP and compares with destination IP
+     - **TAG**: Resolves all hosts with the tag, extracts their management IPs, and checks if destination IP matches
+     - **VLAN**: Resolves all hosts in the VLAN, extracts their management IPs, and checks if destination IP matches
+   - Validates protocol match (rule protocol must be `any` or match the specified protocol)
+   - Validates port match for TCP/UDP (supports single ports, comma-separated lists, and ranges like `1000-2000`)
+   - If all conditions match, records the rule as either `ALLOW` or `DENY`
+
+4. **Rule Evaluation** (Destination Host - IN Direction):
+   - For each policy deployed to the destination host, evaluates rules with `IN` or `BOTH` direction
+   - Checks if the source IP matches the rule's source specification (same resolution logic as above)
+   - Validates protocol and port matches (same as source host evaluation)
+   - Records matching rules
+
+5. **Result Determination**:
+   - Collects all matching rules from both source and destination hosts
+   - Sorts rules by order index to determine precedence
+   - Applies firewall rule evaluation logic:
+     - **First DENY rule wins**: If any DENY rule matches before an ALLOW rule, communication is blocked
+     - **ALLOW rules**: If an ALLOW rule matches and no DENY rule precedes it, communication is allowed
+     - **Default DENY**: If no rules match, the default policy is DENY (typical firewall behavior)
+   - Returns the blocking rule (if any) and all matching rules for review
+
+#### Technical Implementation Details
+
+The simulation uses the same rule matching logic as the policy compiler, ensuring consistency between simulation results and actual deployed firewall behavior. Key implementation aspects:
+
+- **CIDR Matching**: Implements bitwise AND operations with network masks for efficient CIDR range checking
+- **Port Parsing**: Handles port specifications including:
+  - Single ports: `"80"`
+  - Multiple ports: `"80,443"`
+  - Port ranges: `"1000-2000"`
+- **Source Type Resolution**: Dynamically resolves TAG, VLAN, and HOST source types to actual IP addresses at simulation time
+- **Direction Handling**: Correctly evaluates both IN and OUT directions, understanding that:
+  - Source host OUT rules control traffic leaving the source
+  - Destination host IN rules control traffic arriving at the destination
+- **Rule Ordering**: Respects the `order_index` field to determine rule precedence, matching how firewalls evaluate rules sequentially
+
+#### Use Cases
+
+- **Pre-deployment Validation**: Test if a new policy would block critical communication paths
+- **Connectivity Troubleshooting**: Determine why two hosts cannot communicate
+- **Policy Audit**: Verify that deployed policies match intended security posture
+- **Change Impact Analysis**: Understand the effect of policy changes on existing communication patterns
 
 ### Deployment Issues
 

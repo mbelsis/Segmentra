@@ -8,6 +8,16 @@ export function TroubleshootPage() {
   const [results, setResults] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Simulation state
+  const [simSourceIp, setSimSourceIp] = useState('');
+  const [simSourcePort, setSimSourcePort] = useState('');
+  const [simDestIp, setSimDestIp] = useState('');
+  const [simDestPort, setSimDestPort] = useState('');
+  const [simProtocol, setSimProtocol] = useState('tcp');
+  const [simLoading, setSimLoading] = useState(false);
+  const [simResults, setSimResults] = useState<any>(null);
+  const [simError, setSimError] = useState<string | null>(null);
+
   async function handleSearch() {
     if (!searchValue.trim()) {
       setError('Please enter a search value');
@@ -44,15 +54,212 @@ export function TroubleshootPage() {
     }
   }
 
+  async function handleSimulate() {
+    if (!simSourceIp.trim() || !simDestIp.trim()) {
+      setSimError('Source IP and Destination IP are required');
+      return;
+    }
+
+    setSimLoading(true);
+    setSimError(null);
+    setSimResults(null);
+
+    try {
+      const data = await api.troubleshoot.simulateCommunication({
+        sourceIp: simSourceIp.trim(),
+        sourcePort: simSourcePort ? parseInt(simSourcePort, 10) : null,
+        destIp: simDestIp.trim(),
+        destPort: simDestPort ? parseInt(simDestPort, 10) : null,
+        protocol: simProtocol
+      });
+      setSimResults(data);
+    } catch (e: any) {
+      setSimError(String(e?.message ?? e));
+    } finally {
+      setSimLoading(false);
+    }
+  }
+
   return (
     <div style={{ padding: 24 }}>
       <h1>Troubleshooting</h1>
       <p style={{ color: '#666', marginBottom: 24 }}>
-        Search for policies by IP address, find policies deployed to a host, or find hosts with a specific policy.
+        Simulate communication between IPs, search for policies by IP address, find policies deployed to a host, or find hosts with a specific policy.
       </p>
 
+      {/* Communication Simulation Section */}
       <div className="card" style={{ marginBottom: 24 }}>
-        <div style={{ display: 'flex', gap: 16, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+        <h2 style={{ marginTop: 0 }}>Simulate Communication</h2>
+        <p style={{ color: '#666', marginBottom: 16 }}>
+          Check if communication between two IP addresses would be blocked by deployed firewall policies.
+        </p>
+        
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 16, marginBottom: 16 }}>
+          <div>
+            <label style={{ display: 'block', marginBottom: 8, fontWeight: 500 }}>Source IP *</label>
+            <input
+              type="text"
+              value={simSourceIp}
+              onChange={(e) => setSimSourceIp(e.target.value)}
+              placeholder="e.g., 192.168.1.10"
+              style={{ width: '100%', padding: '8px', border: '1px solid #ddd', borderRadius: 4 }}
+            />
+          </div>
+          <div>
+            <label style={{ display: 'block', marginBottom: 8, fontWeight: 500 }}>Source Port (optional)</label>
+            <input
+              type="number"
+              value={simSourcePort}
+              onChange={(e) => setSimSourcePort(e.target.value)}
+              placeholder="e.g., 50000"
+              min="1"
+              max="65535"
+              style={{ width: '100%', padding: '8px', border: '1px solid #ddd', borderRadius: 4 }}
+            />
+          </div>
+          <div>
+            <label style={{ display: 'block', marginBottom: 8, fontWeight: 500 }}>Destination IP *</label>
+            <input
+              type="text"
+              value={simDestIp}
+              onChange={(e) => setSimDestIp(e.target.value)}
+              placeholder="e.g., 192.168.1.20"
+              style={{ width: '100%', padding: '8px', border: '1px solid #ddd', borderRadius: 4 }}
+            />
+          </div>
+          <div>
+            <label style={{ display: 'block', marginBottom: 8, fontWeight: 500 }}>Destination Port (optional)</label>
+            <input
+              type="number"
+              value={simDestPort}
+              onChange={(e) => setSimDestPort(e.target.value)}
+              placeholder="e.g., 80"
+              min="1"
+              max="65535"
+              style={{ width: '100%', padding: '8px', border: '1px solid #ddd', borderRadius: 4 }}
+            />
+          </div>
+          <div>
+            <label style={{ display: 'block', marginBottom: 8, fontWeight: 500 }}>Protocol</label>
+            <select
+              value={simProtocol}
+              onChange={(e) => setSimProtocol(e.target.value)}
+              style={{ width: '100%', padding: '8px', border: '1px solid #ddd', borderRadius: 4 }}
+            >
+              <option value="tcp">TCP</option>
+              <option value="udp">UDP</option>
+              <option value="icmp">ICMP</option>
+            </select>
+          </div>
+        </div>
+        
+        <button onClick={handleSimulate} disabled={simLoading} className="btn-primary">
+          {simLoading ? 'Simulating...' : 'Simulate'}
+        </button>
+      </div>
+
+      {simError && (
+        <div className="error-banner" style={{ marginBottom: 24 }}>
+          {simError}
+        </div>
+      )}
+
+      {simResults && (
+        <div className="card" style={{ marginBottom: 24 }}>
+          <h2 style={{ marginTop: 0 }}>
+            Simulation Results: {simResults.sourceIp}
+            {simResults.sourcePort && `:${simResults.sourcePort}`} → {simResults.destIp}
+            {simResults.destPort && `:${simResults.destPort}`} ({simResults.protocol.toUpperCase()})
+          </h2>
+          
+          <div style={{ marginBottom: 24, padding: 16, background: simResults.wouldBlock ? '#ffebee' : '#e8f5e9', borderRadius: 8, border: `2px solid ${simResults.wouldBlock ? '#f44336' : '#4CAF50'}` }}>
+            <div style={{ fontSize: '1.2em', fontWeight: 'bold', color: simResults.wouldBlock ? '#f44336' : '#4CAF50', marginBottom: 8 }}>
+              {simResults.wouldBlock ? '❌ Communication Would Be BLOCKED' : '✅ Communication Would Be ALLOWED'}
+            </div>
+            {simResults.blockingRule && (
+              <div style={{ marginTop: 12 }}>
+                <strong>Blocked by:</strong> {simResults.blockingRule.policyVersion.policySetName} v{simResults.blockingRule.policyVersion.versionNumber} 
+                - Rule #{simResults.blockingRule.rule.orderIndex} ({simResults.blockingRule.rule.action})
+                {simResults.blockingRule.host && ` on host ${simResults.blockingRule.host.hostname}`}
+              </div>
+            )}
+            {simResults.allRules.length === 0 && simResults.wouldBlock && (
+              <div style={{ marginTop: 12 }}>
+                <strong>Reason:</strong> No matching firewall rules found. Default policy is DENY.
+              </div>
+            )}
+          </div>
+
+          <div style={{ marginBottom: 16 }}>
+            <h3>Host Information</h3>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 16 }}>
+              <div style={{ padding: 12, background: '#f5f5f5', borderRadius: 4 }}>
+                <strong>Source Host:</strong>{' '}
+                {simResults.sourceHost ? (
+                  <span>{simResults.sourceHost.hostname} ({simResults.sourceHost.mgmtIp})</span>
+                ) : (
+                  <span style={{ color: '#666' }}>Not found in inventory</span>
+                )}
+              </div>
+              <div style={{ padding: 12, background: '#f5f5f5', borderRadius: 4 }}>
+                <strong>Destination Host:</strong>{' '}
+                {simResults.destHost ? (
+                  <span>{simResults.destHost.hostname} ({simResults.destHost.mgmtIp})</span>
+                ) : (
+                  <span style={{ color: '#666' }}>Not found in inventory</span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {simResults.allRules.length > 0 && (
+            <div>
+              <h3>Matching Firewall Rules ({simResults.allRules.length})</h3>
+              <div style={{ display: 'grid', gap: 16 }}>
+                {simResults.allRules.map((ruleInfo: any, idx: number) => (
+                  <div
+                    key={idx}
+                    style={{
+                      padding: 16,
+                      background: ruleInfo.rule.action === 'DENY' ? '#ffebee' : '#e8f5e9',
+                      borderRadius: 8,
+                      border: `2px solid ${ruleInfo.rule.action === 'DENY' ? '#f44336' : '#4CAF50'}`
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+                      <div>
+                        <strong style={{ color: ruleInfo.rule.action === 'DENY' ? '#f44336' : '#4CAF50' }}>
+                          {ruleInfo.rule.action} Rule #{ruleInfo.rule.orderIndex}
+                        </strong>
+                        <div style={{ fontSize: '0.9em', color: '#666', marginTop: 4 }}>
+                          Policy: {ruleInfo.policyVersion.policySetName} v{ruleInfo.policyVersion.versionNumber}
+                        </div>
+                        <div style={{ fontSize: '0.9em', color: '#666' }}>
+                          Host: {ruleInfo.host.hostname} ({ruleInfo.appliesTo === 'source' ? 'Source' : 'Destination'}, {ruleInfo.direction})
+                        </div>
+                      </div>
+                    </div>
+                    <div style={{ marginTop: 12, padding: 12, background: 'white', borderRadius: 4 }}>
+                      <div><strong>Protocol:</strong> {ruleInfo.rule.protocol}</div>
+                      {ruleInfo.rule.ports && <div><strong>Ports:</strong> {ruleInfo.rule.ports}</div>}
+                      <div><strong>Source:</strong> {ruleInfo.rule.sourceType} = {ruleInfo.rule.sourceValue}</div>
+                      <div><strong>Direction:</strong> {ruleInfo.rule.direction}</div>
+                      {ruleInfo.rule.comment && <div><strong>Comment:</strong> {ruleInfo.rule.comment}</div>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Existing Search Section */}
+      <div style={{ borderTop: '2px solid #e0e0e0', paddingTop: 24, marginTop: 24 }}>
+        <h2>Search Tools</h2>
+
+        <div className="card" style={{ marginBottom: 24 }}>
+          <div style={{ display: 'flex', gap: 16, alignItems: 'flex-end', flexWrap: 'wrap' }}>
           <div style={{ flex: 1, minWidth: 200 }}>
             <label style={{ display: 'block', marginBottom: 8, fontWeight: 500 }}>Search Type</label>
             <select
@@ -81,16 +288,16 @@ export function TroubleshootPage() {
           <button onClick={handleSearch} disabled={loading} className="btn-primary">
             {loading ? 'Searching...' : 'Search'}
           </button>
+          </div>
         </div>
-      </div>
 
-      {error && (
-        <div className="error-banner" style={{ marginBottom: 24 }}>
-          {error}
-        </div>
-      )}
+        {error && (
+          <div className="error-banner" style={{ marginBottom: 24 }}>
+            {error}
+          </div>
+        )}
 
-      {results && searchType === 'ip' && (
+        {results && searchType === 'ip' && (
         <div className="card">
           <h2>Policies Matching IP: {results.ip}</h2>
           {results.results.length === 0 ? (
@@ -242,6 +449,7 @@ export function TroubleshootPage() {
           )}
         </div>
       )}
+      </div>
     </div>
   );
 }

@@ -179,7 +179,30 @@ export const api = {
         host: any;
         deployments: any[];
       }>;
-    }>(`/troubleshoot/policy-versions/${versionId}/hosts`)
+    }>(`/troubleshoot/policy-versions/${versionId}/hosts`),
+    simulateCommunication: (params: {
+      sourceIp: string;
+      sourcePort?: number | null;
+      destIp: string;
+      destPort?: number | null;
+      protocol?: string;
+    }) => request<{
+      sourceIp: string;
+      sourcePort: number | null;
+      destIp: string;
+      destPort: number | null;
+      protocol: string;
+      sourceHost: any | null;
+      destHost: any | null;
+      wouldBlock: boolean;
+      blockingRule: any | null;
+      blockingRules: any[];
+      allowingRules: any[];
+      allRules: any[];
+    }>('/troubleshoot/simulate-communication', {
+      method: 'POST',
+      body: JSON.stringify(params)
+    })
   }
 };
 

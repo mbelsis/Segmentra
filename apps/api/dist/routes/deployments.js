@@ -7,6 +7,7 @@ import { runAnsiblePlaybook, runSshDeployment } from '@segmentra/executor';
 import { pool } from '../db/pool.js';
 import { env } from '../lib/env.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
+import { createAuditEvent } from '../services/audit.js';
 import { readSecretPlaintext } from '../services/secrets.js';
 export const deploymentsRouter = Router();
 deploymentsRouter.use(requireAuth, requireRole('operator', 'admin'));
@@ -49,14 +50,76 @@ export async function checkAndTimeoutStaleHosts() {
                     const failedCount = statusCounts['FAILED'] || 0;
                     const skippedCount = statusCounts['SKIPPED'] || 0;
                     const total = succeededCount + failedCount + skippedCount;
+                    let finalStatus;
                     if (failedCount > 0 && succeededCount > 0) {
+                        finalStatus = 'PARTIAL';
                         await pool.query(`UPDATE deployments SET status='PARTIAL', finished_at=now() WHERE id=$1`, [deploymentId]);
                     }
                     else if (failedCount === total) {
+                        finalStatus = 'FAILED';
                         await pool.query(`UPDATE deployments SET status='FAILED', finished_at=now() WHERE id=$1`, [deploymentId]);
                     }
                     else {
+                        finalStatus = 'SUCCEEDED';
                         await pool.query(`UPDATE deployments SET status='SUCCEEDED', finished_at=now() WHERE id=$1`, [deploymentId]);
+                    }
+                    // Create audit event for deployment completion (via timeout)
+                    const depRes = await pool.query(`SELECT d.*, ps.name as policy_set_name, pv.version_number, u.id as user_id
+             FROM deployments d
+             LEFT JOIN policy_versions pv ON d.policy_version_id = pv.id
+             LEFT JOIN policy_sets ps ON pv.policy_set_id = ps.id
+             LEFT JOIN users u ON d.created_by = u.id
+             WHERE d.id=$1`, [deploymentId]);
+                    const dep = depRes.rows[0];
+                    if (dep) {
+                        const targetQuery = dep.target_query || {};
+                        const targetNames = { tags: [], vlans: [], hosts: [] };
+                        if (targetQuery.tags && Array.isArray(targetQuery.tags) && targetQuery.tags.length > 0) {
+                            const tagRes = await pool.query(`SELECT name FROM tags WHERE id = ANY($1::uuid[])`, [targetQuery.tags]);
+                            targetNames.tags = tagRes.rows.map((r) => r.name);
+                        }
+                        if (targetQuery.vlans && Array.isArray(targetQuery.vlans) && targetQuery.vlans.length > 0) {
+                            const vlanRes = await pool.query(`SELECT name FROM vlans WHERE id = ANY($1::uuid[])`, [targetQuery.vlans]);
+                            targetNames.vlans = vlanRes.rows.map((r) => r.name);
+                        }
+                        if (targetQuery.hosts && Array.isArray(targetQuery.hosts) && targetQuery.hosts.length > 0) {
+                            const hostRes = await pool.query(`SELECT hostname FROM hosts WHERE id = ANY($1::uuid[])`, [targetQuery.hosts]);
+                            targetNames.hosts = hostRes.rows.map((r) => r.hostname);
+                        }
+                        const targetTypes = [];
+                        if (targetNames.tags.length > 0)
+                            targetTypes.push('Tags');
+                        if (targetNames.vlans.length > 0)
+                            targetTypes.push('VLANs');
+                        if (targetNames.hosts.length > 0)
+                            targetTypes.push('Hosts');
+                        const targetType = targetTypes.join(', ') || 'Unknown';
+                        await createAuditEvent({
+                            actorUserId: dep.user_id || null,
+                            action: 'DEPLOYMENT_FINISHED',
+                            entityType: 'DEPLOYMENT',
+                            entityId: deploymentId,
+                            metadata: {
+                                policySetName: dep.policy_set_name || 'Unknown',
+                                policyVersionNumber: dep.version_number || null,
+                                deploymentMode: dep.mode,
+                                targetType: targetType,
+                                targetTags: targetNames.tags,
+                                targetVlans: targetNames.vlans,
+                                targetHosts: targetNames.hosts,
+                                result: finalStatus,
+                                createdAt: dep.created_at,
+                                startedAt: dep.started_at,
+                                finishedAt: new Date().toISOString(),
+                                hostCounts: {
+                                    total: total,
+                                    succeeded: succeededCount,
+                                    failed: failedCount,
+                                    skipped: skippedCount
+                                },
+                                completedVia: 'timeout_check'
+                            }
+                        });
                     }
                 }
             }
@@ -123,6 +186,38 @@ deploymentsRouter.post('/deployments', async (req, res) => {
         });
     }
     const targetIds = await resolveTargets(b.targetQuery);
+    // Get user ID
+    const userRes = await pool.query(`SELECT id FROM users WHERE username=$1 LIMIT 1`, [req.auth.username]);
+    const userId = userRes.rows[0]?.id || null;
+    // Get policy set and version info
+    const policyInfoRes = await pool.query(`SELECT ps.name as policy_set_name, pv.version_number
+     FROM policy_versions pv
+     JOIN policy_sets ps ON ps.id = pv.policy_set_id
+     WHERE pv.id=$1`, [b.policyVersionId]);
+    const policyInfo = policyInfoRes.rows[0];
+    // Resolve target names
+    const targetNames = { tags: [], vlans: [], hosts: [] };
+    if (b.targetQuery.tags && b.targetQuery.tags.length > 0) {
+        const tagRes = await pool.query(`SELECT name FROM tags WHERE id = ANY($1::uuid[])`, [b.targetQuery.tags]);
+        targetNames.tags = tagRes.rows.map((r) => r.name);
+    }
+    if (b.targetQuery.vlans && b.targetQuery.vlans.length > 0) {
+        const vlanRes = await pool.query(`SELECT name FROM vlans WHERE id = ANY($1::uuid[])`, [b.targetQuery.vlans]);
+        targetNames.vlans = vlanRes.rows.map((r) => r.name);
+    }
+    if (b.targetQuery.hosts && b.targetQuery.hosts.length > 0) {
+        const hostRes = await pool.query(`SELECT hostname FROM hosts WHERE id = ANY($1::uuid[])`, [b.targetQuery.hosts]);
+        targetNames.hosts = hostRes.rows.map((r) => r.hostname);
+    }
+    // Determine target type
+    const targetTypes = [];
+    if (targetNames.tags.length > 0)
+        targetTypes.push('Tags');
+    if (targetNames.vlans.length > 0)
+        targetTypes.push('VLANs');
+    if (targetNames.hosts.length > 0)
+        targetTypes.push('Hosts');
+    const targetType = targetTypes.join(', ') || 'Unknown';
     const { rows } = await pool.query(`INSERT INTO deployments (policy_version_id, mode, target_query, target_count, created_by, canary_size, batch_size)
      VALUES ($1,$2,$3,$4,(SELECT id FROM users WHERE username=$5 LIMIT 1),$6,$7)
      RETURNING *`, [b.policyVersionId, b.mode, b.targetQuery, targetIds.length, req.auth.username, b.canarySize ?? null, b.batchSize ?? null]);
@@ -133,6 +228,27 @@ deploymentsRouter.post('/deployments', async (req, res) => {
             hostId
         ]);
     }
+    // Create audit event for deployment creation
+    await createAuditEvent({
+        actorUserId: userId,
+        action: 'DEPLOYMENT_CREATED',
+        entityType: 'DEPLOYMENT',
+        entityId: deployment.id,
+        ipAddress: req.ip,
+        metadata: {
+            policySetName: policyInfo?.policy_set_name || 'Unknown',
+            policyVersionNumber: policyInfo?.version_number || null,
+            deploymentMode: b.mode,
+            targetType: targetType,
+            targetTags: targetNames.tags,
+            targetVlans: targetNames.vlans,
+            targetHosts: targetNames.hosts,
+            targetCount: targetIds.length,
+            createdAt: deployment.created_at,
+            canarySize: b.canarySize || null,
+            batchSize: b.batchSize || null
+        }
+    });
     res.status(201).json({ deployment });
 });
 deploymentsRouter.get('/deployments', async (_req, res) => {
@@ -409,7 +525,89 @@ deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
        SET status=$2, finished_at=now(), message=$3
        WHERE deployment_id=$1 AND status='RUNNING'`, [deploymentId, ok ? 'SUCCEEDED' : 'FAILED', ok ? 'ok' : 'ansible_failed']);
     }
-    await pool.query(`UPDATE deployments SET status=$2, finished_at=now() WHERE id=$1`, [deploymentId, ok ? 'SUCCEEDED' : 'FAILED']);
+    // Get final host status counts to determine deployment status
+    const hostStatusRes = await pool.query(`SELECT status, COUNT(*) as count
+     FROM deployment_hosts
+     WHERE deployment_id=$1
+     GROUP BY status`, [deploymentId]);
+    const statusCounts = {};
+    for (const row of hostStatusRes.rows) {
+        statusCounts[row.status] = parseInt(row.count, 10);
+    }
+    const succeededCount = statusCounts['SUCCEEDED'] || 0;
+    const failedCount = statusCounts['FAILED'] || 0;
+    const skippedCount = statusCounts['SKIPPED'] || 0;
+    const total = succeededCount + failedCount + skippedCount;
+    // Determine final status
+    let finalStatus;
+    if (failedCount > 0 && succeededCount > 0) {
+        finalStatus = 'PARTIAL';
+    }
+    else if (failedCount === total || (failedCount > 0 && succeededCount === 0)) {
+        finalStatus = 'FAILED';
+    }
+    else {
+        finalStatus = 'SUCCEEDED';
+    }
+    await pool.query(`UPDATE deployments SET status=$2, finished_at=now() WHERE id=$1`, [deploymentId, finalStatus]);
+    // Get deployment info for audit
+    const depRes = await pool.query(`SELECT d.*, ps.name as policy_set_name, pv.version_number, u.id as user_id
+     FROM deployments d
+     LEFT JOIN policy_versions pv ON d.policy_version_id = pv.id
+     LEFT JOIN policy_sets ps ON pv.policy_set_id = ps.id
+     LEFT JOIN users u ON d.created_by = u.id
+     WHERE d.id=$1`, [deploymentId]);
+    const dep = depRes.rows[0];
+    // Resolve target names for audit
+    const targetQuery = dep.target_query || {};
+    const targetNames = { tags: [], vlans: [], hosts: [] };
+    if (targetQuery.tags && Array.isArray(targetQuery.tags) && targetQuery.tags.length > 0) {
+        const tagRes = await pool.query(`SELECT name FROM tags WHERE id = ANY($1::uuid[])`, [targetQuery.tags]);
+        targetNames.tags = tagRes.rows.map((r) => r.name);
+    }
+    if (targetQuery.vlans && Array.isArray(targetQuery.vlans) && targetQuery.vlans.length > 0) {
+        const vlanRes = await pool.query(`SELECT name FROM vlans WHERE id = ANY($1::uuid[])`, [targetQuery.vlans]);
+        targetNames.vlans = vlanRes.rows.map((r) => r.name);
+    }
+    if (targetQuery.hosts && Array.isArray(targetQuery.hosts) && targetQuery.hosts.length > 0) {
+        const hostRes = await pool.query(`SELECT hostname FROM hosts WHERE id = ANY($1::uuid[])`, [targetQuery.hosts]);
+        targetNames.hosts = hostRes.rows.map((r) => r.hostname);
+    }
+    const targetTypes = [];
+    if (targetNames.tags.length > 0)
+        targetTypes.push('Tags');
+    if (targetNames.vlans.length > 0)
+        targetTypes.push('VLANs');
+    if (targetNames.hosts.length > 0)
+        targetTypes.push('Hosts');
+    const targetType = targetTypes.join(', ') || 'Unknown';
+    // Create audit event for deployment completion
+    await createAuditEvent({
+        actorUserId: dep.user_id || null,
+        action: 'DEPLOYMENT_FINISHED',
+        entityType: 'DEPLOYMENT',
+        entityId: deploymentId,
+        ipAddress: req.ip,
+        metadata: {
+            policySetName: dep.policy_set_name || 'Unknown',
+            policyVersionNumber: dep.version_number || null,
+            deploymentMode: dep.mode,
+            targetType: targetType,
+            targetTags: targetNames.tags,
+            targetVlans: targetNames.vlans,
+            targetHosts: targetNames.hosts,
+            result: finalStatus,
+            createdAt: dep.created_at,
+            startedAt: dep.started_at,
+            finishedAt: new Date().toISOString(),
+            hostCounts: {
+                total: total,
+                succeeded: succeededCount,
+                failed: failedCount,
+                skipped: skippedCount
+            }
+        }
+    });
     res.json({ ok, exitCode, executionId });
 });
 deploymentsRouter.post('/deployments/:deploymentId/pause', async (req, res) => {

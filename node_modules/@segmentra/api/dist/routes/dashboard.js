@@ -101,6 +101,24 @@ dashboardRouter.get('/dashboard/stats', async (_req, res) => {
     const succeeded = parseInt(finishedRes.rows[0].succeeded || 0, 10);
     const finished = parseInt(finishedRes.rows[0].finished || 0, 10);
     const successRate = finished > 0 ? Math.round((succeeded / finished) * 100) : 0;
+    // Deployment activity over time (last 30 days)
+    const activityRes = await pool.query(`SELECT 
+       DATE(created_at) as date,
+       COUNT(*) as total,
+       COUNT(*) FILTER (WHERE status = 'SUCCEEDED') as succeeded,
+       COUNT(*) FILTER (WHERE status = 'FAILED') as failed,
+       COUNT(*) FILTER (WHERE status IN ('QUEUED', 'RUNNING')) as running
+     FROM deployments
+     WHERE created_at >= NOW() - INTERVAL '30 days'
+     GROUP BY DATE(created_at)
+     ORDER BY date ASC`);
+    const deploymentActivity = activityRes.rows.map((r) => ({
+        date: r.date,
+        total: parseInt(r.total, 10),
+        succeeded: parseInt(r.succeeded || 0, 10),
+        failed: parseInt(r.failed || 0, 10),
+        running: parseInt(r.running || 0, 10)
+    }));
     res.json({
         totalDeployments,
         runningDeployments,
@@ -108,6 +126,7 @@ dashboardRouter.get('/dashboard/stats', async (_req, res) => {
         statusBreakdown,
         topDeployers,
         recentDeployments: recentRes.rows,
-        currentDeployments
+        currentDeployments,
+        deploymentActivity
     });
 });
