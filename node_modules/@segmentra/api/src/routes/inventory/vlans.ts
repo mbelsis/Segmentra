@@ -5,9 +5,10 @@ import { pool } from '../../db/pool.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 
 export const vlansRouter = Router();
-vlansRouter.use(requireAuth, requireRole('operator', 'admin'));
+vlansRouter.use(requireAuth);
 
-vlansRouter.get('/', async (_req, res) => {
+// GET endpoints are read-only and accessible to viewers
+vlansRouter.get('/', requireRole('viewer', 'operator', 'admin'), async (_req, res) => {
   const { rows } = await pool.query(`SELECT * FROM vlans ORDER BY vlan_tag ASC`);
   res.json({ vlans: rows });
 });
@@ -19,7 +20,8 @@ const vlanSchema = z.object({
   subnet: z.string().optional()
 });
 
-vlansRouter.post('/', async (req, res) => {
+// Write operations require operator/admin
+vlansRouter.post('/', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = vlanSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
   const { rows } = await pool.query(
@@ -29,7 +31,7 @@ vlansRouter.post('/', async (req, res) => {
   res.status(201).json({ vlan: rows[0] });
 });
 
-vlansRouter.put('/:id', async (req, res) => {
+vlansRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = vlanSchema.partial().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
   const { rows } = await pool.query(
@@ -52,7 +54,7 @@ vlansRouter.put('/:id', async (req, res) => {
   res.json({ vlan: rows[0] });
 });
 
-vlansRouter.delete('/:id', async (req, res) => {
+vlansRouter.delete('/:id', requireRole('operator', 'admin'), async (req, res) => {
   const { rowCount } = await pool.query(`DELETE FROM vlans WHERE id=$1`, [req.params.id]);
   if (!rowCount) return res.status(404).json({ error: 'not_found' });
   res.json({ ok: true });

@@ -33,9 +33,10 @@ Segmentra is an on‑prem, web-based **fleet firewall & microsegmentation manage
 
 ### 🚀 Deployment Management
 - **Multiple Deployment Modes** (v1: modes are accepted and stored, but all selected hosts are processed immediately):
-  - **Canary**: Deploy to a small subset first
-  - **Progressive**: Deploy in batches
+  - **Canary**: Deploy to a small subset first (mode stored, but currently processes all hosts immediately)
+  - **Progressive**: Deploy in batches (mode stored, but currently processes all hosts immediately)
   - **Full**: Deploy to all targets at once
+  - **Note**: Canary and Progressive modes are currently experimental. The system accepts and stores these modes, but all selected hosts are processed in a single batch. Full orchestration (host-by-host canary testing and progressive batching) is planned for future versions.
 - **Scheduled Deployments**: Schedule deployments for future execution (e.g., maintenance windows)
 - **Deployment Executors**:
   - **Ansible** (Recommended): Better error handling, automatic rollback, parallel execution
@@ -160,8 +161,16 @@ This will automatically:
 - Start API and UI servers
 
 **Note**: The database persists between runs. To reset the database (deletes all data), set the environment variable:
+
+**Windows (cmd.exe):**
 ```batch
 set SEGMENTRA_RESET_DB=1
+start.bat dev
+```
+
+**Windows (PowerShell):**
+```powershell
+$env:SEGMENTRA_RESET_DB="1"
 start.bat dev
 ```
 
@@ -205,6 +214,8 @@ $env:DATABASE_URL="postgres://segmentra:segmentra@127.0.0.1:15432/segmentra"
 npm run db:migrate
 npm run db:seed
 ```
+
+**Note**: On Windows, use `set` in cmd.exe or `$env:` in PowerShell. The examples above show both syntaxes.
 
 **macOS/Linux:**
 ```bash
@@ -291,7 +302,6 @@ If you have LDAP configured and AD group mappings, you can login via `/api/auth/
 
 <div align="center">
   <img src="docs/images/inventory.png" alt="Inventory Management" style="max-width: 100%; height: auto;" />
-</div>
 
 ### 4) Create & approve a policy version
 

@@ -6,6 +6,7 @@ import { readSecretPlaintext } from './secrets.js';
 type LdapSettingsRow = {
   enabled: boolean;
   url: string | null;
+  use_ldaps: boolean;
   bind_dn: string | null;
   bind_password_secret_id: string | null;
   base_dn: string | null;
@@ -19,7 +20,7 @@ function interpolate(template: string, vars: Record<string, string>): string {
 
 export async function ldapLogin(params: { username: string; password: string }) {
   const settingsRes = await pool.query<LdapSettingsRow>(
-    `SELECT enabled, url, bind_dn, bind_password_secret_id, base_dn, user_filter, group_filter
+    `SELECT enabled, url, use_ldaps, bind_dn, bind_password_secret_id, base_dn, user_filter, group_filter
      FROM ldap_settings
      ORDER BY created_at DESC
      LIMIT 1`
@@ -27,6 +28,11 @@ export async function ldapLogin(params: { username: string; password: string }) 
   const s = settingsRes.rows[0];
   if (!s?.enabled || !s.url || !s.base_dn) {
     throw new Error('ldap_not_configured');
+  }
+
+  // Enforce LDAPS-only if use_ldaps is set
+  if (s.use_ldaps && !s.url.toLowerCase().startsWith('ldaps://')) {
+    throw new Error('ldaps_required');
   }
 
   const client = new Client({ url: s.url });

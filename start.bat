@@ -32,16 +32,16 @@ echo [segmentra] Docker check passed
 echo.
 
 REM Install dependencies if needed
-if exist node_modules goto skip_npm_install
-echo [segmentra] Installing dependencies...
-call npm install
-if errorlevel 1 (
-    echo [segmentra] ERROR: Failed to install dependencies
-    exit /b 1
+if not exist node_modules (
+    echo [segmentra] Installing dependencies...
+    call npm install
+    if errorlevel 1 (
+        echo [segmentra] ERROR: Failed to install dependencies
+        exit /b 1
+    )
+    echo [segmentra] Dependencies installed - OK
+    echo.
 )
-echo [segmentra] Dependencies installed - OK
-echo.
-:skip_npm_install
 
 REM Optional: wipe local dev DB volume (DATA LOSS) if SEGMENTRA_RESET_DB=1
 if not "%SEGMENTRA_RESET_DB%"=="1" goto skip_reset_db

@@ -55,22 +55,32 @@
 
     - name: Apply firewall rules with rollback on failure
       block:
+        - name: Set flag for nftables apply
+          set_fact:
+            nft_will_apply: "{{ nft_detect.stdout == 'nft' and segmentra_policy_file.endswith('.nft') }}"
+        
+        - name: Set flag for iptables apply
+          set_fact:
+            iptables_will_apply: "{{ nft_detect.stdout != 'nft' and segmentra_policy_file.endswith('.iptables') }}"
+
+        - name: Log backend detection vs policy file
+          debug:
+            msg: "Backend detection: {{ nft_detect.stdout }}, Policy file: {{ segmentra_policy_file }}, Will apply nftables: {{ nft_will_apply }}, Will apply iptables: {{ iptables_will_apply }}"
+
+        - name: Fail if backend mismatch detected (no apply task will run)
+          fail:
+            msg: "Backend mismatch: Detected backend is '{{ nft_detect.stdout }}', but policy file extension is '{{ segmentra_policy_file.split('.')[-1] }}'. Expected .nft for nftables or .iptables for iptables. Please check host firewall_backend setting. This indicates the compiled policy format does not match the host's firewall backend."
+          when: not nft_will_apply and not iptables_will_apply
+
         - name: Apply nftables ruleset from file
-          when: nft_detect.stdout == 'nft' and segmentra_policy_file.endswith('.nft')
+          when: nft_will_apply
           become: true
           shell: "nft -f /etc/segmentra.policy"
 
         - name: Apply iptables rules from file (restore)
-          when: nft_detect.stdout != 'nft' and segmentra_policy_file.endswith('.iptables')
+          when: iptables_will_apply
           become: true
           shell: "iptables-restore < /etc/segmentra.policy"
-
-        - name: Fail if backend mismatch detected
-          fail:
-            msg: "Backend mismatch: Detected {{ nft_detect.stdout }}, but policy file is {{ segmentra_policy_file }}. Expected .nft for nftables or .iptables for iptables. Please check host firewall_backend setting."
-          when: >
-            (nft_detect.stdout == 'nft' and not segmentra_policy_file.endswith('.nft')) or
-            (nft_detect.stdout != 'nft' and not segmentra_policy_file.endswith('.iptables'))
       rescue:
         - name: Roll back nftables from last backup
           when: nft_detect.stdout == 'nft'

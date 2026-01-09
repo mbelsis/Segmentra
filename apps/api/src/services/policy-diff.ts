@@ -101,19 +101,21 @@ export async function comparePolicyVersions(params: {
   const currentSignatures = new Set(currentRules.map(ruleSignature));
   const candidateSignatures = new Set(candidateRules.map(ruleSignature));
 
-  // Find added and removed rules
-  const addedRules: typeof candidateRules = [];
-  const removedRules: typeof currentRules = [];
+  // Find added and removed rules, preserving order_index
+  const addedRules: Array<typeof candidateRules[0] & { orderIndex: number }> = [];
+  const removedRules: Array<typeof currentRules[0] & { orderIndex: number }> = [];
 
-  for (const rule of candidateRules) {
+  for (let i = 0; i < candidateRulesRes.rows.length; i++) {
+    const rule = candidateRules[i];
     if (!currentSignatures.has(ruleSignature(rule))) {
-      addedRules.push(rule);
+      addedRules.push({ ...rule, orderIndex: candidateRulesRes.rows[i].order_index });
     }
   }
 
-  for (const rule of currentRules) {
+  for (let i = 0; i < currentRulesRes.rows.length; i++) {
+    const rule = currentRules[i];
     if (!candidateSignatures.has(ruleSignature(rule))) {
-      removedRules.push(rule);
+      removedRules.push({ ...rule, orderIndex: currentRulesRes.rows[i].order_index });
     }
   }
 
@@ -168,7 +170,7 @@ export async function comparePolicyVersions(params: {
     for (const rule of addedRules) {
       const diffRule: PolicyDiffRule = {
         type: 'added',
-        orderIndex: 0, // Will be set from candidate rules
+        orderIndex: rule.orderIndex,
         direction: rule.direction,
         action: rule.action,
         protocol: rule.protocol,
@@ -188,7 +190,7 @@ export async function comparePolicyVersions(params: {
     for (const rule of removedRules) {
       const diffRule: PolicyDiffRule = {
         type: 'removed',
-        orderIndex: 0, // Will be set from current rules
+        orderIndex: rule.orderIndex,
         direction: rule.direction,
         action: rule.action,
         protocol: rule.protocol,

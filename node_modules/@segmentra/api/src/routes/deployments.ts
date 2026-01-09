@@ -6,7 +6,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 
 import { compileHostPolicy } from '@segmentra/compiler';
-import { runAnsiblePlaybook, runSshDeployment, type SshHost } from '@segmentra/executor';
+import { runAnsiblePlaybook, runSshDeployment, checkHostReadiness, type SshHost, type SshHostInfo } from '@segmentra/executor';
 
 import { pool } from '../db/pool.js';
 import { env } from '../lib/env.js';
@@ -248,6 +248,21 @@ deploymentsRouter.post('/deployments', async (req, res) => {
   
   if (targetIds.length === 0) {
     return res.status(400).json({ error: 'no_targets', message: 'No enabled hosts match the target query' });
+  }
+
+  // Evaluate high-risk status based on policy version and target count
+  // Note: This re-evaluates in case target count changes the risk level
+  const isHighRisk = await isPolicyVersionHighRisk({
+    policyVersionId: b.policyVersionId,
+    targetCount: targetIds.length
+  });
+  
+  // Update policy version's is_high_risk flag if it changed
+  if (isHighRisk) {
+    await pool.query(
+      `UPDATE policy_versions SET is_high_risk=true WHERE id=$1`,
+      [b.policyVersionId]
+    );
   }
 
   // Safety check: verify SSH access will be preserved
@@ -492,7 +507,7 @@ async function generateBundle(deploymentId: string) {
   };
   fs.writeFileSync(path.join(bundleDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
 
-  // pick GLOBAL ssh credential for v1
+  // pick GLOBAL ssh credential for v1 (needed for auto-detection and bundle generation)
   const credRes = await pool.query(
     `SELECT * FROM ssh_credentials WHERE scope_type='GLOBAL' ORDER BY created_at DESC LIMIT 1`
   );
@@ -500,18 +515,55 @@ async function generateBundle(deploymentId: string) {
   if (!cred) throw new Error('missing_ssh_credential');
   const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
   const keyPath = path.join(bundleDir, 'ssh_key');
-  fs.writeFileSync(keyPath, keyPem, { encoding: 'utf8' });
+  fs.writeFileSync(keyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
+  
+  // Create temp key for auto-detection (will be cleaned up)
+  const tempKeyPath = path.join(env.BUNDLES_DIR, `temp_key_${deploymentId}_${Date.now()}`);
+  fs.writeFileSync(tempKeyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
 
   const inventoryLines: string[] = ['[all]'];
   const hostPolicyHashes: Map<string, string> = new Map(); // host_id -> policy hash
 
-  for (const h of hostRows.rows as any[]) {
-    const ifsRes = await pool.query(`SELECT name, role, enabled FROM host_interfaces WHERE host_id=$1`, [h.id]);
-    // Backend selection: 'iptables' explicitly uses iptables, everything else (including 'auto' and null) defaults to nftables
-    // Note: 'auto' defaults to nftables at compile time. Executors will detect and validate at runtime.
-    const backend = h.firewall_backend === 'iptables' ? 'iptables' : 'nftables';
+  try {
+    for (const h of hostRows.rows as any[]) {
+      const ifsRes = await pool.query(`SELECT name, role, enabled FROM host_interfaces WHERE host_id=$1`, [h.id]);
+      
+      // Auto-detect backend if set to 'auto' or null
+      let backend: 'nftables' | 'iptables';
+      if (h.firewall_backend === 'iptables') {
+        backend = 'iptables';
+      } else if (h.firewall_backend === 'auto' || !h.firewall_backend) {
+        // Perform auto-detection via SSH
+        try {
+          const sshHostInfo: SshHostInfo = {
+            hostname: h.hostname,
+            ip: String(h.mgmt_ip),
+            port: h.ssh_port || 22,
+            username: cred.username,
+            privateKeyPath: tempKeyPath
+          };
+          const readinessResult = await checkHostReadiness(sshHostInfo);
+          backend = readinessResult.backend === 'iptables' ? 'iptables' : 'nftables';
+          
+          // Update host's firewall_backend if auto-detected
+          if (readinessResult.backend !== 'unknown') {
+            await pool.query(
+              `UPDATE hosts SET firewall_backend=$1 WHERE id=$2`,
+              [readinessResult.backend, h.id]
+            );
+          }
+        } catch (detectionError: any) {
+          // If detection fails, default to nftables (as before)
+          // eslint-disable-next-line no-console
+          console.warn(`[Auto-detection failed for ${h.hostname}, defaulting to nftables]`, detectionError.message);
+          backend = 'nftables';
+        }
+      } else {
+        // Explicitly set to nftables
+        backend = 'nftables';
+      }
 
-    const rules = (rRes.rows as any[]).map((r) => {
+      const rules = (rRes.rows as any[]).map((r) => {
       const ruleScope =
         r.interface_scope_type === 'ALL_INTERFACES'
           ? { type: 'ALL_INTERFACES' as const }
@@ -523,50 +575,69 @@ async function generateBundle(deploymentId: string) {
       const remote = r.source_type === 'CIDR'
         ? ({ kind: 'CIDR' as const })
         : ({ kind: 'SET' as const, setName: `src_${r.source_type.toLowerCase()}_${String(r.source_value).replace(/-/g, '')}` });
-      return {
-        orderIndex: Number(r.order_index),
-        direction: (r.direction ?? 'IN') as 'IN' | 'OUT' | 'BOTH',
-        action: r.action,
-        protocol: r.protocol,
-        ports: r.ports,
-        sourceType: r.source_type,
-        sourceValue: r.source_value,
-        logMode: r.log_mode,
-        comment: r.comment,
-        usePolicyInterfaceScope: Boolean(r.use_policy_interface_scope),
-        interfaceScope: ruleScope,
-        remote
-      };
-    });
+        return {
+          orderIndex: Number(r.order_index),
+          direction: (r.direction ?? 'IN') as 'IN' | 'OUT' | 'BOTH',
+          action: r.action,
+          protocol: r.protocol,
+          ports: r.ports,
+          sourceType: r.source_type,
+          sourceValue: r.source_value,
+          logMode: r.log_mode,
+          comment: r.comment,
+          usePolicyInterfaceScope: Boolean(r.use_policy_interface_scope),
+          interfaceScope: ruleScope,
+          remote
+        };
+      });
 
-    const compiled = compileHostPolicy({
-      host: {
-        id: h.id,
-        hostname: h.hostname,
-        mgmtIp: h.mgmt_ip ? String(h.mgmt_ip) : null,
-        firewallBackend: backend,
-        interfaces: ifsRes.rows.map((i: any) => ({ name: i.name, role: i.role, enabled: i.enabled }))
-      },
-      policyInterfaceScope,
-      rules,
-      sets,
-      baseline: { mgmtSshCidrs: await getManagementVlanCidrs() }
-    });
+        host: {
+          id: h.id,
+          hostname: h.hostname,
+          mgmtIp: h.mgmt_ip ? String(h.mgmt_ip) : null,
+          firewallBackend: backend,
+          interfaces: ifsRes.rows.map((i: any) => ({ name: i.name, role: i.role, enabled: i.enabled }))
+        },
+        policyInterfaceScope,
+        rules,
+        sets,
+        baseline: { mgmtSshCidrs: await getManagementVlanCidrs() }
+      });
 
-    const ext = compiled.backend === 'nftables' ? 'nft' : 'iptables';
-    const policyFileHostPath = path.join(hostRulesDir, `${h.hostname}.${ext}`);
-    fs.writeFileSync(policyFileHostPath, compiled.text, 'utf8');
-    
-    // Store hash of compiled policy for this host (for drift detection)
-    const policyHash = crypto.createHash('sha256').update(compiled.text, 'utf8').digest('hex');
-    hostPolicyHashes.set(h.id, policyHash);
+      const ext = compiled.backend === 'nftables' ? 'nft' : 'iptables';
+      const policyFileHostPath = path.join(hostRulesDir, `${h.hostname}.${ext}`);
+      fs.writeFileSync(policyFileHostPath, compiled.text, 'utf8');
+      
+      // Store hash of compiled policy for this host (for drift detection)
+      const policyHash = crypto.createHash('sha256').update(compiled.text, 'utf8').digest('hex');
+      hostPolicyHashes.set(h.id, policyHash);
 
-    // Ansible runner sees bundle at /bundles/<deploymentId>/...
-    const policyFileRunnerPath = `/bundles/${deploymentId}/host_rules/${h.hostname}.${ext}`;
+      // Ansible runner sees bundle at /bundles/<deploymentId>/...
+      const policyFileRunnerPath = `/bundles/${deploymentId}/host_rules/${h.hostname}.${ext}`;
 
-    inventoryLines.push(
-      `${h.hostname} ansible_host=${String(h.mgmt_ip)} ansible_port=${h.ssh_port} ansible_user=${cred.username} ansible_ssh_private_key_file=/bundles/${deploymentId}/ssh_key ansible_become=yes ansible_become_method=sudo segmentra_policy_file=${policyFileRunnerPath}`
-    );
+      inventoryLines.push(
+        `${h.hostname} ansible_host=${String(h.mgmt_ip)} ansible_port=${h.ssh_port} ansible_user=${cred.username} ansible_ssh_private_key_file=/bundles/${deploymentId}/ssh_key ansible_become=yes ansible_become_method=sudo segmentra_policy_file=${policyFileRunnerPath}`
+      );
+    }
+  } finally {
+    // Clean up temp key file used for auto-detection
+    if (fs.existsSync(tempKeyPath)) {
+      try {
+        fs.unlinkSync(tempKeyPath);
+      } catch (e) {
+        // Ignore cleanup errors
+      }
+    }
+  }
+  } finally {
+    // Clean up temp key file used for auto-detection
+    if (fs.existsSync(tempKeyPath)) {
+      try {
+        fs.unlinkSync(tempKeyPath);
+      } catch (e) {
+        // Ignore cleanup errors
+      }
+    }
   }
 
   fs.writeFileSync(path.join(bundleDir, 'inventory.ini'), inventoryLines.join('\n') + '\n', 'utf8');

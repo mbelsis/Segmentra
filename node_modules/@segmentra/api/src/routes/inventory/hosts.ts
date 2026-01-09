@@ -6,9 +6,11 @@ import { requireAuth, requireRole } from '../../middleware/auth.js';
 
 export const hostsRouter = Router();
 
-hostsRouter.use(requireAuth, requireRole('operator', 'admin'));
+// Apply authentication to all routes
+hostsRouter.use(requireAuth);
 
-hostsRouter.get('/', async (req, res) => {
+// GET endpoints are read-only and accessible to viewers
+hostsRouter.get('/', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
   const hostname = String(req.query.hostname ?? '');
   const tag = String(req.query.tag ?? '');
   const vlan = String(req.query.vlan ?? '');
@@ -132,7 +134,8 @@ const createHostSchema = z.object({
   enabled: z.boolean().optional()
 });
 
-hostsRouter.post('/', async (req, res) => {
+// Write operations require operator/admin
+hostsRouter.post('/', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = createHostSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
   const b = parsed.data;
@@ -197,7 +200,7 @@ hostsRouter.post('/', async (req, res) => {
   }
 });
 
-hostsRouter.get('/:id', async (req, res) => {
+hostsRouter.get('/:id', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
   const { rows } = await pool.query(
     `SELECT h.*, v.vlan_tag, v.name as vlan_name
      FROM hosts h
@@ -222,7 +225,7 @@ hostsRouter.get('/:id', async (req, res) => {
 
 const updateHostSchema = createHostSchema.partial();
 
-hostsRouter.put('/:id', async (req, res) => {
+hostsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = updateHostSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
   const b = parsed.data;
@@ -305,7 +308,7 @@ hostsRouter.put('/:id', async (req, res) => {
   }
 });
 
-hostsRouter.delete('/:id', async (req, res) => {
+hostsRouter.delete('/:id', requireRole('operator', 'admin'), async (req, res) => {
   const { rowCount } = await pool.query(`DELETE FROM hosts WHERE id=$1`, [
     req.params.id
   ]);
@@ -318,7 +321,7 @@ const bulkOperationSchema = z.object({
   hostIds: z.array(z.string().uuid()).min(1)
 });
 
-hostsRouter.post('/bulk/delete', async (req, res) => {
+hostsRouter.post('/bulk/delete', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = bulkOperationSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
   
@@ -329,7 +332,7 @@ hostsRouter.post('/bulk/delete', async (req, res) => {
   res.json({ ok: true, deleted: rowCount });
 });
 
-hostsRouter.post('/bulk/assign-vlan', async (req, res) => {
+hostsRouter.post('/bulk/assign-vlan', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = bulkOperationSchema.extend({
     vlanId: z.string().uuid().nullable()
   }).safeParse(req.body);
@@ -342,7 +345,7 @@ hostsRouter.post('/bulk/assign-vlan', async (req, res) => {
   res.json({ ok: true, updated: rowCount });
 });
 
-hostsRouter.post('/bulk/assign-tag', async (req, res) => {
+hostsRouter.post('/bulk/assign-tag', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = bulkOperationSchema.extend({
     tagId: z.string().uuid()
   }).safeParse(req.body);
@@ -369,7 +372,7 @@ hostsRouter.post('/bulk/assign-tag', async (req, res) => {
   }
 });
 
-hostsRouter.post('/bulk/import', async (req, res) => {
+hostsRouter.post('/bulk/import', requireRole('operator', 'admin'), async (req, res) => {
   const body = z.object({
     csvData: z.string().min(1)
   }).safeParse(req.body);
@@ -551,7 +554,7 @@ hostsRouter.post('/bulk/import', async (req, res) => {
   }
 });
 
-hostsRouter.post('/bulk/set-enabled', async (req, res) => {
+hostsRouter.post('/bulk/set-enabled', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = bulkOperationSchema.extend({
     enabled: z.boolean()
   }).safeParse(req.body);

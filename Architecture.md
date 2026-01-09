@@ -243,9 +243,10 @@ Base URL: `http://localhost:8080/api`
 
 ### SSH Credentials (Admin role required)
 
-- `GET /ssh-credentials`
-- `POST /ssh-credentials` — Body: `{ name, username, privateKey, passphrase?, scopeType, scopeId? }` (stores private key encrypted)
-- `PUT /ssh-credentials/:id` — Body: `{ name?, username?, privateKey?, passphrase?, scopeType?, scopeId? }`
+- `GET /ssh-credentials` — List all SSH credentials
+- `POST /ssh-credentials` — Create new SSH credential. Body: `{ name, username, privateKeyPem, passphrase?, scopeType, scopeId? }` (stores private key encrypted)
+- `PUT /ssh-credentials/:id` — Update SSH credential metadata. Body: `{ name?, username?, scopeType?, scopeId? }`
+  - **Note**: The `PUT` endpoint does **not** update the private key or passphrase. SSH keys are immutable for security reasons. To rotate SSH keys, create a new credential via `POST` and delete the old one.
 
 ---
 
@@ -979,9 +980,9 @@ The simulation engine performs a comprehensive analysis by:
 
 #### Technical Implementation Details
 
-The simulation uses the same rule matching logic as the policy compiler, ensuring consistency between simulation results and actual deployed firewall behavior. Key implementation aspects:
+The simulation uses simplified rule matching logic designed for quick analysis. **Important**: The simulation is intentionally approximate and should be used as a guidance tool, not as exact ground truth. Key implementation aspects:
 
-- **CIDR Matching**: Implements bitwise AND operations with network masks for efficient CIDR range checking
+- **CIDR Matching**: Implements bitwise AND operations with network masks for IPv4 CIDR range checking. **Note**: IPv6 is not supported in the simulation.
 - **Port Parsing**: Handles port specifications including:
   - Single ports: `"80"`
   - Multiple ports: `"80,443"`
@@ -990,7 +991,18 @@ The simulation uses the same rule matching logic as the policy compiler, ensurin
 - **Direction Handling**: Correctly evaluates both IN and OUT directions, understanding that:
   - Source host OUT rules control traffic leaving the source
   - Destination host IN rules control traffic arriving at the destination
-- **Rule Ordering**: Respects the `order_index` field to determine rule precedence, matching how firewalls evaluate rules sequentially
+- **Rule Ordering**: Attempts to respect the `order_index` field, but **simplified evaluation**:
+  - For combined IN/OUT paths, the simulation builds separate lists of blocking and allowing rules
+  - **Pessimistic DENY interpretation**: The simulation treats DENY rules pessimistically - if any DENY rule matches, it assumes communication is blocked, even though firewalls evaluate rules strictly in order (first-match wins)
+  - This means the simulation may indicate blocking when an earlier ALLOW rule would actually permit the traffic
+  - **Recommendation**: Use simulation results as guidance, but verify critical paths by reviewing actual compiled firewall rules or testing in a non-production environment
+
+**Limitations**:
+- Does not perform exact first-match rule evaluation like actual firewalls
+- IPv6 addresses are not supported
+- Does not account for interface scoping or interface-specific rules
+- Does not model connection state (established/related) or other advanced firewall features
+- User IP safety warnings use very simplified CIDR matching (first octet comparison) and may produce false positives/negatives
 
 #### Use Cases
 
@@ -1308,20 +1320,21 @@ The `docker-compose.yml` file defines:
 
 1. **Docker Socket Mount**: The app container mounts `/var/run/docker.sock` for Ansible executor. This gives full Docker access - treat as high trust.
 2. **Secret Encryption**: SSH keys and LDAP passwords are encrypted using AES-256-GCM. Store `SEGMENTRA_KEK_B64` securely.
-3. **JWT Tokens**: Tokens expire after 24 hours. Store `JWT_SECRET` securely.
+3. **JWT Tokens**: Tokens expire after 12 hours. Store `JWT_SECRET` securely.
 4. **SSH Credentials**: Use sudo-capable accounts, not root. Ensure passwordless sudo for firewall commands.
 5. **LDAP**: Use LDAPS (port 636) for secure LDAP connections in production.
 
 ### Current v1 Limitations
 
 - Canary/progressive orchestration and advanced guardrails are stubbed at the API level (basic deployment flow is implemented). The deployment modes (`CANARY`, `PROGRESSIVE`, `FULL`) are accepted and stored, but all selected hosts are processed immediately without host-by-host orchestration.
-- Baseline mgmt SSH CIDR is configured via the management VLAN setting (`/admin/management-vlan-setting`). The system uses the `subnet` field from the VLAN referenced by `system_settings.management_vlan_id` to determine which CIDR ranges should have baseline SSH access. This is configurable per environment.
+- Baseline mgmt SSH CIDR is configured via the management VLAN setting (`/admin/management-vlan-setting`). The system uses the `subnet` field from the VLAN referenced by `system_settings.management_vlan_id` to determine which CIDR ranges should have baseline SSH access. This is configurable per environment. If no management VLAN is configured, baseline SSH access is disabled (no hardcoded CIDR).
 - SSH Direct executor runs sequentially (one host at a time); Ansible runs in parallel.
 - Deployment timeout is fixed at 10 minutes per host.
 - No built-in rollback UI (rollback happens automatically on failure).
-- Firewall backend `auto` setting defaults to `nftables` at compile time. Executors will detect the actual backend at runtime and validate that it matches the compiled policy format. If there's a mismatch, the deployment will fail with a clear error message.
+- Firewall backend `auto` setting is now auto-detected before compilation via SSH. If auto-detection fails, it defaults to `nftables`. The detected backend is stored in the host record for future deployments. Executors validate that the compiled policy format matches the detected backend at runtime.
 - Drift detection requires SSH access and passwordless sudo. Hosts without SSH credentials configured cannot be checked for compliance.
 - Scheduled deployments use simple datetime comparison. No support for recurring schedules, timezone handling, or complex scheduling rules.
+- **High-risk policy logic is not yet implemented**: The database has `policy_versions.is_high_risk` field, but there is currently no code that sets this flag, enforces extra approvals for high-risk changes, or restricts deployment modes based on target counts. The only approval constraint currently implemented is "maker ≠ checker" (with admin self-override).
 
 ---
 

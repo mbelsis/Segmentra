@@ -5,9 +5,10 @@ import { pool } from '../../db/pool.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 
 export const policyRulesRouter = Router();
-policyRulesRouter.use(requireAuth, requireRole('operator', 'admin'));
+policyRulesRouter.use(requireAuth);
 
-policyRulesRouter.get('/policy-versions/:versionId/rules', async (req, res) => {
+// GET endpoints are read-only and accessible to viewers
+policyRulesRouter.get('/policy-versions/:versionId/rules', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
   const { rows } = await pool.query(
     `SELECT * FROM policy_rules WHERE policy_version_id=$1 ORDER BY order_index ASC`,
     [req.params.versionId]
@@ -31,7 +32,8 @@ const ruleSchema = z.object({
   interfaceScopeNames: z.array(z.string()).optional().nullable()
 });
 
-policyRulesRouter.post('/policy-versions/:versionId/rules', async (req, res) => {
+// Write operations require operator/admin
+policyRulesRouter.post('/policy-versions/:versionId/rules', requireRole('operator', 'admin'), async (req, res) => {
   // Check if version is editable (DRAFT or REJECTED status can be edited)
   const versionRes = await pool.query(`SELECT status FROM policy_versions WHERE id=$1`, [req.params.versionId]);
   if (!versionRes.rows[0]) return res.status(404).json({ error: 'version_not_found' });
@@ -68,7 +70,7 @@ policyRulesRouter.post('/policy-versions/:versionId/rules', async (req, res) => 
   res.status(201).json({ rule: rows[0] });
 });
 
-policyRulesRouter.put('/policy-rules/:ruleId', async (req, res) => {
+policyRulesRouter.put('/policy-rules/:ruleId', requireRole('operator', 'admin'), async (req, res) => {
   // Check if version is editable (DRAFT or REJECTED status can be edited)
   const versionRes = await pool.query(
     `SELECT pv.status FROM policy_versions pv
@@ -122,7 +124,7 @@ policyRulesRouter.put('/policy-rules/:ruleId', async (req, res) => {
   res.json({ rule: rows[0] });
 });
 
-policyRulesRouter.delete('/policy-rules/:ruleId', async (req, res) => {
+policyRulesRouter.delete('/policy-rules/:ruleId', requireRole('operator', 'admin'), async (req, res) => {
   // Check if version is editable (DRAFT or REJECTED status can be edited)
   const versionRes = await pool.query(
     `SELECT pv.status FROM policy_versions pv

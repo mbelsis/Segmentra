@@ -4,11 +4,14 @@ import { z } from 'zod';
 import { pool } from '../../db/pool.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 import { comparePolicyVersions } from '../../services/policy-diff.js';
+import { isPolicyVersionHighRisk } from '../../services/high-risk.js';
+import { isPolicyVersionHighRisk } from '../../services/high-risk.js';
 
 export const policyVersionsRouter = Router();
-policyVersionsRouter.use(requireAuth, requireRole('operator', 'approver', 'admin'));
+policyVersionsRouter.use(requireAuth);
 
-policyVersionsRouter.get('/policy-sets/:id/versions', async (req, res) => {
+// GET endpoints are read-only and accessible to viewers
+policyVersionsRouter.get('/policy-sets/:id/versions', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const { rows } = await pool.query(
     `SELECT * FROM policy_versions WHERE policy_set_id=$1 ORDER BY version_number DESC`,
     [req.params.id]
@@ -23,7 +26,8 @@ const createVersionSchema = z.object({
   interfaceScopeNames: z.array(z.string()).optional()
 });
 
-policyVersionsRouter.post('/policy-sets/:id/versions', async (req, res) => {
+// Write operations require operator/admin
+policyVersionsRouter.post('/policy-sets/:id/versions', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = createVersionSchema.safeParse(req.body ?? {});
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
   const b = parsed.data;
@@ -67,7 +71,7 @@ policyVersionsRouter.post('/policy-sets/:id/versions', async (req, res) => {
   }
 });
 
-policyVersionsRouter.get('/policy-versions/:versionId', async (req, res) => {
+policyVersionsRouter.get('/policy-versions/:versionId', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const { rows } = await pool.query(`SELECT * FROM policy_versions WHERE id=$1`, [req.params.versionId]);
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
   res.json({ version: rows[0] });
@@ -94,18 +98,24 @@ policyVersionsRouter.put('/policy-versions/:versionId', async (req, res) => {
 policyVersionsRouter.post('/policy-versions/:versionId/submit-approval', async (req, res) => {
   const userRes = await pool.query(`SELECT id FROM users WHERE username=$1 LIMIT 1`, [req.auth!.username]);
   const userId = userRes.rows[0]?.id ?? null;
+  
+  // Evaluate high-risk status before submission
+  const isHighRisk = await isPolicyVersionHighRisk({
+    policyVersionId: req.params.versionId
+  });
+  
   const { rows } = await pool.query(
     `UPDATE policy_versions
-     SET status='PENDING_APPROVAL', submitted_at=now(), rejection_reason=NULL
+     SET status='PENDING_APPROVAL', submitted_at=now(), rejection_reason=NULL, is_high_risk=$2
      WHERE id=$1 AND (status='DRAFT' OR status='REJECTED')
      RETURNING *`,
-    [req.params.versionId]
+    [req.params.versionId, isHighRisk]
   );
   if (!rows[0]) return res.status(404).json({ error: 'not_found_or_not_submittable' });
   await pool.query(
     `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
      VALUES ($1,'POLICY_SUBMIT','policy_version',$2,$3)`,
-    [userId, req.params.versionId, { by: req.auth!.username, resubmitted: rows[0].status === 'REJECTED' }]
+    [userId, req.params.versionId, { by: req.auth!.username, resubmitted: rows[0].status === 'REJECTED', isHighRisk }]
   );
   res.json({ version: rows[0] });
 });
@@ -117,13 +127,14 @@ policyVersionsRouter.post(
     const userRes = await pool.query(`SELECT id FROM users WHERE username=$1 LIMIT 1`, [req.auth!.username]);
     const approverId = userRes.rows[0]?.id ?? null;
 
-    const vRes = await pool.query(`SELECT created_by FROM policy_versions WHERE id=$1`, [req.params.versionId]);
+    const vRes = await pool.query(`SELECT created_by, is_high_risk FROM policy_versions WHERE id=$1`, [req.params.versionId]);
     if (!vRes.rows[0]) return res.status(404).json({ error: 'not_found' });
+    
+    const isHighRisk = vRes.rows[0].is_high_risk === true;
+    const isAdmin = req.auth?.roles?.includes('admin') ?? false;
     
     // Check if approver is the creator - allow admin override for local development
     if (vRes.rows[0].created_by && vRes.rows[0].created_by === approverId) {
-      // Check if user has admin role (from auth middleware) - allow self-approval for admins
-      const isAdmin = req.auth?.roles?.includes('admin') ?? false;
       if (!isAdmin) {
         // eslint-disable-next-line no-console
         console.log(`[DEBUG] User ${req.auth?.username} attempting self-approval. Roles:`, req.auth?.roles);
@@ -132,7 +143,13 @@ policyVersionsRouter.post(
           message: 'You cannot approve a policy version that you created. If you are an admin, try logging out and logging back in to refresh your session. Otherwise, please have another approver review it.'
         });
       }
-      // Admin can self-approve (for local development)
+      // Admin can self-approve (for local development), but not for high-risk policies
+      if (isHighRisk) {
+        return res.status(400).json({
+          error: 'high_risk_requires_different_approver',
+          message: 'High-risk policy versions cannot be self-approved, even by admins. Please have another approver or admin review this policy version.'
+        });
+      }
       // eslint-disable-next-line no-console
       console.log(`[DEBUG] Admin ${req.auth?.username} self-approving policy version ${req.params.versionId}`);
     }
@@ -148,7 +165,7 @@ policyVersionsRouter.post(
     await pool.query(
       `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
        VALUES ($1,'POLICY_APPROVE','policy_version',$2,$3)`,
-      [approverId, req.params.versionId, { by: req.auth!.username }]
+      [approverId, req.params.versionId, { by: req.auth!.username, isHighRisk }]
     );
     res.json({ version: rows[0] });
   }
