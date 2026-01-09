@@ -14,10 +14,14 @@ export function ApprovalsPage() {
   const [loadingDiff, setLoadingDiff] = useState(false);
   const [sampleHostIds, setSampleHostIds] = useState<string[]>([]);
   const [hosts, setHosts] = useState<any[]>([]);
+  const [approvedVersions, setApprovedVersions] = useState<any[]>([]);
+  const [loadingVersions, setLoadingVersions] = useState(false);
 
   async function loadVersion() {
     if (!versionId.trim()) {
       setVersion(null);
+      setApprovedVersions([]);
+      setCurrentVersionId('');
       return;
     }
     setLoading(true);
@@ -26,11 +30,34 @@ export function ApprovalsPage() {
     try {
       const res = await api.version(versionId.trim());
       setVersion(res.version);
+      
+      // Load approved versions from the same policy set for comparison
+      if (res.version.policy_set_id) {
+        await loadApprovedVersions(res.version.policy_set_id);
+      }
     } catch (e: any) {
       setError(String(e.message || e));
       setVersion(null);
+      setApprovedVersions([]);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function loadApprovedVersions(policySetId: string) {
+    setLoadingVersions(true);
+    try {
+      const res = await api.versions(policySetId);
+      // Filter to only APPROVED versions and sort by version number descending
+      const approved = (res.versions || [])
+        .filter((v: any) => v.status === 'APPROVED')
+        .sort((a: any, b: any) => b.version_number - a.version_number);
+      setApprovedVersions(approved);
+    } catch (e: any) {
+      // Ignore errors, just don't show dropdown
+      setApprovedVersions([]);
+    } finally {
+      setLoadingVersions(false);
     }
   }
 
@@ -209,14 +236,36 @@ export function ApprovalsPage() {
                   Compare this candidate version against the current deployed version to see what changes.
                 </p>
                 <div className="form-group">
-                  <label><strong>Current Version ID</strong> (to compare against)</label>
-                  <input
-                    type="text"
-                    value={currentVersionId}
-                    onChange={(e) => setCurrentVersionId(e.target.value)}
-                    placeholder="Enter current deployed version UUID..."
-                    style={{ fontFamily: 'monospace', fontSize: '13px' }}
-                  />
+                  <label><strong>Current Version</strong> (to compare against)</label>
+                  {approvedVersions.length > 0 ? (
+                    <select
+                      value={currentVersionId}
+                      onChange={(e) => setCurrentVersionId(e.target.value)}
+                      style={{ width: '100%', padding: '8px', border: '1px solid #ddd', borderRadius: 4 }}
+                    >
+                      <option value="">Select a version...</option>
+                      {approvedVersions.map((v: any) => (
+                        <option key={v.id} value={v.id}>
+                          Version {v.version_number} {v.change_summary ? `- ${v.change_summary}` : ''} ({v.id.substring(0, 8)}...)
+                        </option>
+                      ))}
+                    </select>
+                  ) : loadingVersions ? (
+                    <div style={{ padding: '8px', color: '#666' }}>Loading approved versions...</div>
+                  ) : (
+                    <div>
+                      <input
+                        type="text"
+                        value={currentVersionId}
+                        onChange={(e) => setCurrentVersionId(e.target.value)}
+                        placeholder="Enter current deployed version UUID..."
+                        style={{ fontFamily: 'monospace', fontSize: '13px', width: '100%', padding: '8px', border: '1px solid #ddd', borderRadius: 4 }}
+                      />
+                      <small style={{ display: 'block', marginTop: 4, color: '#666' }}>
+                        No approved versions found for this policy set. Enter version UUID manually.
+                      </small>
+                    </div>
+                  )}
                 </div>
                 <div className="form-group">
                   <label><strong>Sample Hosts</strong> (select 1-3 hosts to analyze)</label>

@@ -771,6 +771,7 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                   <th>VLAN</th>
                   <th>Tags</th>
                   <th>Backend</th>
+                  <th>Compliance</th>
                   <th>Enabled</th>
                   <th>Actions</th>
                 </tr>
