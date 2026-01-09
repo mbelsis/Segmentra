@@ -21,25 +21,28 @@ export function AppShell() {
         <NavLink to="/troubleshoot">Troubleshoot</NavLink>
         <NavLink to="/audit">Audit</NavLink>
         <NavLink to="/admin">Admin</NavLink>
-        <div style={{ marginTop: 12 }}>
-          <button
-            onClick={() => {
-              clearToken();
-              navigate('/login');
-            }}
-          >
-            Logout
-          </button>
-        </div>
         <div style={{ 
           marginTop: 'auto', 
           paddingTop: 16, 
-          textAlign: 'center', 
-          fontSize: '0.75em', 
-          color: '#666',
           borderTop: '1px solid #e0e0e0'
         }}>
-          © Belsis Meletis
+          <div style={{ marginBottom: 12 }}>
+            <button
+              onClick={() => {
+                clearToken();
+                navigate('/login');
+              }}
+            >
+              Logout
+            </button>
+          </div>
+          <div style={{ 
+            textAlign: 'center', 
+            fontSize: '0.75em', 
+            color: '#666'
+          }}>
+            © Belsis Meletis
+          </div>
         </div>
       </nav>
       <main className="card">
