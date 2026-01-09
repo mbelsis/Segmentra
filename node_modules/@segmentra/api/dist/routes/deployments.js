@@ -10,6 +10,60 @@ import { requireAuth, requireRole } from '../middleware/auth.js';
 import { readSecretPlaintext } from '../services/secrets.js';
 export const deploymentsRouter = Router();
 deploymentsRouter.use(requireAuth, requireRole('operator', 'admin'));
+// Host deployment timeout: 10 minutes (600000 ms)
+const HOST_DEPLOYMENT_TIMEOUT_MS = 10 * 60 * 1000;
+/**
+ * Check for and timeout stale host deployments that have been RUNNING for too long
+ * This function is exported so it can be called from the main index.ts for periodic checks
+ */
+export async function checkAndTimeoutStaleHosts() {
+    const timeoutThreshold = new Date(Date.now() - HOST_DEPLOYMENT_TIMEOUT_MS);
+    // Find hosts that have been RUNNING for longer than the timeout
+    const staleHosts = await pool.query(`UPDATE deployment_hosts
+     SET status='FAILED', finished_at=now(), message='Deployment timeout: Host did not respond within 10 minutes'
+     WHERE status='RUNNING' 
+     AND started_at < $1
+     RETURNING deployment_id, host_id`, [timeoutThreshold]);
+    if (staleHosts.rows.length > 0) {
+        // Check if any deployments need to be updated to PARTIAL or FAILED
+        const deploymentIds = [...new Set(staleHosts.rows.map((r) => r.deployment_id))];
+        for (const deploymentId of deploymentIds) {
+            // Check deployment status
+            const depRes = await pool.query(`SELECT status FROM deployments WHERE id=$1`, [deploymentId]);
+            if (depRes.rows[0]?.status === 'RUNNING') {
+                // Check if all hosts are done (SUCCEEDED, FAILED, or SKIPPED)
+                const hostStatusRes = await pool.query(`SELECT status, COUNT(*) as count
+           FROM deployment_hosts
+           WHERE deployment_id=$1
+           GROUP BY status`, [deploymentId]);
+                const statusCounts = {};
+                for (const row of hostStatusRes.rows) {
+                    statusCounts[row.status] = parseInt(row.count, 10);
+                }
+                const runningCount = statusCounts['RUNNING'] || 0;
+                const pendingCount = statusCounts['PENDING'] || 0;
+                const pausedCount = statusCounts['PAUSED'] || 0;
+                // If no hosts are still running/pending/paused, mark deployment as complete
+                if (runningCount === 0 && pendingCount === 0 && pausedCount === 0) {
+                    const succeededCount = statusCounts['SUCCEEDED'] || 0;
+                    const failedCount = statusCounts['FAILED'] || 0;
+                    const skippedCount = statusCounts['SKIPPED'] || 0;
+                    const total = succeededCount + failedCount + skippedCount;
+                    if (failedCount > 0 && succeededCount > 0) {
+                        await pool.query(`UPDATE deployments SET status='PARTIAL', finished_at=now() WHERE id=$1`, [deploymentId]);
+                    }
+                    else if (failedCount === total) {
+                        await pool.query(`UPDATE deployments SET status='FAILED', finished_at=now() WHERE id=$1`, [deploymentId]);
+                    }
+                    else {
+                        await pool.query(`UPDATE deployments SET status='SUCCEEDED', finished_at=now() WHERE id=$1`, [deploymentId]);
+                    }
+                }
+            }
+        }
+    }
+    return staleHosts.rows.length;
+}
 const createDeploymentSchema = z.object({
     policyVersionId: z.string().uuid(),
     mode: z.enum(['CANARY', 'PROGRESSIVE', 'FULL']),
@@ -82,6 +136,8 @@ deploymentsRouter.post('/deployments', async (req, res) => {
     res.status(201).json({ deployment });
 });
 deploymentsRouter.get('/deployments', async (_req, res) => {
+    // Check for stale hosts before returning deployments
+    await checkAndTimeoutStaleHosts();
     const { rows } = await pool.query(`SELECT * FROM deployments ORDER BY created_at DESC`);
     res.json({ deployments: rows });
 });
@@ -92,6 +148,8 @@ deploymentsRouter.get('/deployments/:deploymentId', async (req, res) => {
     res.json({ deployment: rows[0] });
 });
 deploymentsRouter.get('/deployments/:deploymentId/hosts', async (req, res) => {
+    // Check for stale hosts before returning host status
+    await checkAndTimeoutStaleHosts();
     const { rows } = await pool.query(`SELECT dh.*, h.hostname, h.mgmt_ip
      FROM deployment_hosts dh
      JOIN hosts h ON h.id = dh.host_id
@@ -244,6 +302,8 @@ async function generateBundle(deploymentId) {
 }
 deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
     const deploymentId = req.params.deploymentId;
+    // Check for and timeout stale hosts before starting
+    await checkAndTimeoutStaleHosts();
     // Mark disabled hosts as SKIPPED before starting
     await pool.query(`UPDATE deployment_hosts 
      SET status='SKIPPED', finished_at=now(), message='Host is disabled'
@@ -351,6 +411,55 @@ deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
     }
     await pool.query(`UPDATE deployments SET status=$2, finished_at=now() WHERE id=$1`, [deploymentId, ok ? 'SUCCEEDED' : 'FAILED']);
     res.json({ ok, exitCode, executionId });
+});
+deploymentsRouter.post('/deployments/:deploymentId/pause', async (req, res) => {
+    const deploymentId = req.params.deploymentId;
+    // Check if deployment is running
+    const depRes = await pool.query(`SELECT status FROM deployments WHERE id=$1`, [deploymentId]);
+    if (!depRes.rows[0]) {
+        return res.status(404).json({ error: 'deployment_not_found' });
+    }
+    if (depRes.rows[0].status !== 'RUNNING') {
+        return res.status(400).json({ error: 'deployment_not_running', message: `Cannot pause deployment with status: ${depRes.rows[0].status}` });
+    }
+    // Update deployment status to PAUSED
+    await pool.query(`UPDATE deployments SET status='PAUSED' WHERE id=$1`, [deploymentId]);
+    // Mark RUNNING hosts as PAUSED, leave PENDING hosts as-is (for resume)
+    await pool.query(`UPDATE deployment_hosts SET status='PAUSED', finished_at=now(), message='Deployment paused by user' WHERE deployment_id=$1 AND status='RUNNING'`, [deploymentId]);
+    res.json({ ok: true });
+});
+deploymentsRouter.post('/deployments/:deploymentId/resume', async (req, res) => {
+    const deploymentId = req.params.deploymentId;
+    // Check if deployment is paused
+    const depRes = await pool.query(`SELECT status FROM deployments WHERE id=$1`, [deploymentId]);
+    if (!depRes.rows[0]) {
+        return res.status(404).json({ error: 'deployment_not_found' });
+    }
+    if (depRes.rows[0].status !== 'PAUSED') {
+        return res.status(400).json({ error: 'deployment_not_paused', message: `Cannot resume deployment with status: ${depRes.rows[0].status}` });
+    }
+    // Update deployment status back to RUNNING
+    await pool.query(`UPDATE deployments SET status='RUNNING' WHERE id=$1`, [deploymentId]);
+    // Mark PAUSED hosts back to RUNNING, and PENDING hosts remain PENDING
+    await pool.query(`UPDATE deployment_hosts SET status='RUNNING', finished_at=null, message=null WHERE deployment_id=$1 AND status='PAUSED'`, [deploymentId]);
+    res.json({ ok: true });
+});
+deploymentsRouter.post('/deployments/:deploymentId/stop', async (req, res) => {
+    const deploymentId = req.params.deploymentId;
+    // Check if deployment can be stopped
+    const depRes = await pool.query(`SELECT status FROM deployments WHERE id=$1`, [deploymentId]);
+    if (!depRes.rows[0]) {
+        return res.status(404).json({ error: 'deployment_not_found' });
+    }
+    const currentStatus = depRes.rows[0].status;
+    if (!['RUNNING', 'PAUSED'].includes(currentStatus)) {
+        return res.status(400).json({ error: 'deployment_not_stoppable', message: `Cannot stop deployment with status: ${currentStatus}` });
+    }
+    // Update deployment status to CANCELLED
+    await pool.query(`UPDATE deployments SET status='CANCELLED', finished_at=now() WHERE id=$1`, [deploymentId]);
+    // Mark all PENDING, RUNNING, and PAUSED hosts as SKIPPED
+    await pool.query(`UPDATE deployment_hosts SET status='SKIPPED', finished_at=now(), message='Deployment stopped by user' WHERE deployment_id=$1 AND status IN ('PENDING', 'RUNNING', 'PAUSED')`, [deploymentId]);
+    res.json({ ok: true });
 });
 deploymentsRouter.post('/deployments/:deploymentId/cancel', async (req, res) => {
     // v1: best-effort cancellation (no process tracking yet)

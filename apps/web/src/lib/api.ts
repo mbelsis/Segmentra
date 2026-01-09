@@ -145,6 +145,13 @@ export const api = {
       runningHosts: number;
       progressPercent: number;
     }>;
+    deploymentActivity: Array<{
+      date: string;
+      total: number;
+      succeeded: number;
+      failed: number;
+      running: number;
+    }>;
   }>('/dashboard/stats'),
 
   troubleshoot: {

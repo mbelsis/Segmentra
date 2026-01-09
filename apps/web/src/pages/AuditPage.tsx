@@ -96,7 +96,129 @@ export function AuditPage() {
     if (action.includes('REJECT') || action.includes('DELETE')) return '#F44336';
     if (action.includes('SUBMIT') || action.includes('START')) return '#2196F3';
     if (action.includes('UPDATE') || action.includes('EDIT')) return '#FF9800';
+    if (action.includes('DEPLOYMENT')) return '#9C27B0';
     return '#666';
+  }
+
+  function renderDeploymentMetadata(metadata: any, entityType: string, action: string) {
+    // Only render deployment metadata for deployment events
+    if (entityType !== 'DEPLOYMENT' || !metadata) {
+      return (
+        <details style={{ fontSize: '0.85em' }}>
+          <summary style={{ cursor: 'pointer', color: '#646cff' }}>View</summary>
+          <pre style={{ 
+            marginTop: 8, 
+            padding: 8, 
+            background: '#f5f5f5', 
+            borderRadius: 4,
+            fontSize: '0.8em',
+            overflow: 'auto',
+            maxWidth: '400px'
+          }}>
+            {JSON.stringify(metadata, null, 2)}
+          </pre>
+        </details>
+      );
+    }
+
+    // Render deployment-specific information
+    if (action === 'DEPLOYMENT_CREATED') {
+      return (
+        <div style={{ fontSize: '0.85em' }}>
+          <div><strong>Policy:</strong> {metadata.policySetName || 'Unknown'}</div>
+          {metadata.policyVersionNumber && <div><strong>Version:</strong> v{metadata.policyVersionNumber}</div>}
+          <div><strong>Mode:</strong> {metadata.deploymentMode}</div>
+          <div><strong>Target Type:</strong> {metadata.targetType}</div>
+          {metadata.targetTags && metadata.targetTags.length > 0 && (
+            <div><strong>Tags:</strong> {metadata.targetTags.join(', ')}</div>
+          )}
+          {metadata.targetVlans && metadata.targetVlans.length > 0 && (
+            <div><strong>VLANs:</strong> {metadata.targetVlans.join(', ')}</div>
+          )}
+          {metadata.targetHosts && metadata.targetHosts.length > 0 && (
+            <div><strong>Hosts:</strong> {metadata.targetHosts.slice(0, 5).join(', ')}{metadata.targetHosts.length > 5 ? ` (+${metadata.targetHosts.length - 5} more)` : ''}</div>
+          )}
+          <div><strong>Target Count:</strong> {metadata.targetCount}</div>
+        </div>
+      );
+    }
+
+    if (action === 'DEPLOYMENT_FINISHED') {
+      const resultColor = metadata.result === 'SUCCEEDED' ? '#4CAF50' : 
+                         metadata.result === 'PARTIAL' ? '#FF9800' : '#F44336';
+      
+      return (
+        <div style={{ fontSize: '0.85em' }}>
+          <div><strong>Policy:</strong> {metadata.policySetName || 'Unknown'}</div>
+          {metadata.policyVersionNumber && <div><strong>Version:</strong> v{metadata.policyVersionNumber}</div>}
+          <div><strong>Mode:</strong> {metadata.deploymentMode}</div>
+          <div><strong>Target Type:</strong> {metadata.targetType}</div>
+          {metadata.targetTags && metadata.targetTags.length > 0 && (
+            <div><strong>Tags:</strong> {metadata.targetTags.join(', ')}</div>
+          )}
+          {metadata.targetVlans && metadata.targetVlans.length > 0 && (
+            <div><strong>VLANs:</strong> {metadata.targetVlans.join(', ')}</div>
+          )}
+          {metadata.targetHosts && metadata.targetHosts.length > 0 && (
+            <div><strong>Hosts:</strong> {metadata.targetHosts.slice(0, 5).join(', ')}{metadata.targetHosts.length > 5 ? ` (+${metadata.targetHosts.length - 5} more)` : ''}</div>
+          )}
+          <div style={{ marginTop: 4 }}>
+            <strong>Result:</strong>{' '}
+            <span style={{ color: resultColor, fontWeight: 'bold' }}>{metadata.result}</span>
+          </div>
+          {metadata.hostCounts && (
+            <div style={{ marginTop: 4, fontSize: '0.9em' }}>
+              <strong>Hosts:</strong> {metadata.hostCounts.succeeded || 0} succeeded, {metadata.hostCounts.failed || 0} failed
+              {metadata.hostCounts.skipped > 0 && `, ${metadata.hostCounts.skipped} skipped`}
+            </div>
+          )}
+          {metadata.startedAt && (
+            <div style={{ marginTop: 4, fontSize: '0.85em', color: '#666' }}>
+              Duration: {formatDuration(metadata.startedAt, metadata.finishedAt)}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // Fallback to JSON view
+    return (
+      <details style={{ fontSize: '0.85em' }}>
+        <summary style={{ cursor: 'pointer', color: '#646cff' }}>View</summary>
+        <pre style={{ 
+          marginTop: 8, 
+          padding: 8, 
+          background: '#f5f5f5', 
+          borderRadius: 4,
+          fontSize: '0.8em',
+          overflow: 'auto',
+          maxWidth: '400px'
+        }}>
+          {JSON.stringify(metadata, null, 2)}
+        </pre>
+      </details>
+    );
+  }
+
+  function formatDuration(startedAt: string, finishedAt: string): string {
+    try {
+      const start = new Date(startedAt);
+      const finish = new Date(finishedAt);
+      const diffMs = finish.getTime() - start.getTime();
+      const diffSec = Math.floor(diffMs / 1000);
+      const diffMin = Math.floor(diffSec / 60);
+      const diffHour = Math.floor(diffMin / 60);
+      
+      if (diffHour > 0) {
+        return `${diffHour}h ${diffMin % 60}m ${diffSec % 60}s`;
+      } else if (diffMin > 0) {
+        return `${diffMin}m ${diffSec % 60}s`;
+      } else {
+        return `${diffSec}s`;
+      }
+    } catch {
+      return 'N/A';
+    }
   }
 
   const hasFilters = filterActor || filterAction || filterEntityType || filterFrom || filterTo;
@@ -224,20 +346,7 @@ export function AuditPage() {
                   </td>
                   <td>
                     {e.metadata && typeof e.metadata === 'object' ? (
-                      <details style={{ fontSize: '0.85em' }}>
-                        <summary style={{ cursor: 'pointer', color: '#646cff' }}>View</summary>
-                        <pre style={{ 
-                          marginTop: 8, 
-                          padding: 8, 
-                          background: '#f5f5f5', 
-                          borderRadius: 4,
-                          fontSize: '0.8em',
-                          overflow: 'auto',
-                          maxWidth: '400px'
-                        }}>
-                          {JSON.stringify(e.metadata, null, 2)}
-                        </pre>
-                      </details>
+                      renderDeploymentMetadata(e.metadata, e.entity_type, e.action)
                     ) : (
                       <span style={{ color: '#999' }}>-</span>
                     )}

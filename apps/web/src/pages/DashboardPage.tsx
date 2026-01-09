@@ -1,5 +1,22 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import {
+  PieChart,
+  Pie,
+  Cell,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+  LineChart,
+  Line,
+  Area,
+  AreaChart
+} from 'recharts';
 
 import { api } from '../lib/api';
 
@@ -24,6 +41,13 @@ interface DashboardStats {
     failedHosts: number;
     runningHosts: number;
     progressPercent: number;
+  }>;
+  deploymentActivity: Array<{
+    date: string;
+    total: number;
+    succeeded: number;
+    failed: number;
+    running: number;
   }>;
 }
 
@@ -236,74 +260,124 @@ export function DashboardPage() {
         </div>
       )}
 
-      {/* Top Deployers */}
-      {stats.topDeployers.length > 0 && (
-        <div className="card">
-          <h3 style={{ marginTop: 0 }}>Most Active Deployers</h3>
-          <div style={{ display: 'grid', gap: 12 }}>
-            {stats.topDeployers.map((deployer, idx) => (
-              <div
-                key={deployer.userId}
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  padding: 12,
-                  background: idx < 3 ? '#f5f5f5' : 'transparent',
-                  borderRadius: 8
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                  <div
-                    style={{
-                      width: 32,
-                      height: 32,
-                      borderRadius: '50%',
-                      background: idx === 0 ? '#FFD700' : idx === 1 ? '#C0C0C0' : idx === 2 ? '#CD7F32' : '#e0e0e0',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      fontWeight: 'bold',
-                      color: idx < 3 ? 'white' : '#666',
-                      fontSize: 14
-                    }}
-                  >
-                    {idx + 1}
-                  </div>
-                  <div>
-                    <div style={{ fontWeight: 'bold' }}>{deployer.displayName || deployer.username}</div>
-                    <div style={{ fontSize: 12, color: '#666' }}>@{deployer.username}</div>
-                  </div>
-                </div>
-                <div style={{ fontSize: 18, fontWeight: 'bold', color: '#2196F3' }}>{deployer.deploymentCount}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
 
-      {/* Status Breakdown */}
-      {stats.statusBreakdown.length > 0 && (
-        <div className="card">
-          <h3 style={{ marginTop: 0 }}>Deployment Status Breakdown</h3>
-          <div style={{ display: 'grid', gap: 8 }}>
-            {stats.statusBreakdown.map((s) => (
-              <div key={s.status} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <div
-                    style={{
-                      width: 12,
-                      height: 12,
-                      borderRadius: '50%',
-                      background: getStatusColor(s.status)
-                    }}
-                  />
-                  <span style={{ textTransform: 'capitalize' }}>{s.status.toLowerCase().replace('_', ' ')}</span>
-                </div>
-                <span style={{ fontWeight: 'bold' }}>{s.count}</span>
-              </div>
-            ))}
+      {/* Charts Section */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(400px, 1fr))',
+          gap: 24
+        }}
+      >
+        {/* Deployment Status Pie Chart */}
+        {stats.statusBreakdown.length > 0 && (
+          <div className="card">
+            <h3 style={{ marginTop: 0 }}>Deployment Status Breakdown</h3>
+            <ResponsiveContainer width="100%" height={300}>
+              <PieChart>
+                <Pie
+                  data={stats.statusBreakdown}
+                  cx="50%"
+                  cy="50%"
+                  labelLine={false}
+                  label={({ status, count, percent }) =>
+                    `${status.replace('_', ' ')}: ${count} (${(percent * 100).toFixed(0)}%)`
+                  }
+                  outerRadius={80}
+                  fill="#8884d8"
+                  dataKey="count"
+                >
+                  {stats.statusBreakdown.map((entry, index) => (
+                    <Cell key={`cell-${index}`} fill={getStatusColor(entry.status)} />
+                  ))}
+                </Pie>
+                <Tooltip />
+              </PieChart>
+            </ResponsiveContainer>
           </div>
+        )}
+
+        {/* Top Deployers Bar Chart */}
+        {stats.topDeployers.length > 0 && (
+          <div className="card">
+            <h3 style={{ marginTop: 0 }}>Most Active Deployers</h3>
+            <ResponsiveContainer width="100%" height={300}>
+              <BarChart
+                data={stats.topDeployers.map((d) => ({
+                  name: d.displayName || d.username,
+                  deployments: d.deploymentCount
+                }))}
+                margin={{ top: 20, right: 30, left: 20, bottom: 60 }}
+              >
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis
+                  dataKey="name"
+                  angle={-45}
+                  textAnchor="end"
+                  height={80}
+                  interval={0}
+                  style={{ fontSize: '12px' }}
+                />
+                <YAxis />
+                <Tooltip />
+                <Bar dataKey="deployments" fill="#2196F3" />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
+
+      {/* Deployment Activity Over Time */}
+      {stats.deploymentActivity && stats.deploymentActivity.length > 0 && (
+        <div className="card">
+          <h3 style={{ marginTop: 0 }}>Deployment Activity (Last 30 Days)</h3>
+          <ResponsiveContainer width="100%" height={350}>
+            <AreaChart
+              data={stats.deploymentActivity.map((d) => ({
+                date: new Date(d.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+                succeeded: d.succeeded,
+                failed: d.failed,
+                running: d.running,
+                total: d.total
+              }))}
+              margin={{ top: 10, right: 30, left: 0, bottom: 0 }}
+            >
+              <defs>
+                <linearGradient id="colorSucceeded" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#4CAF50" stopOpacity={0.8} />
+                  <stop offset="95%" stopColor="#4CAF50" stopOpacity={0} />
+                </linearGradient>
+                <linearGradient id="colorFailed" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#f44336" stopOpacity={0.8} />
+                  <stop offset="95%" stopColor="#f44336" stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="date" />
+              <YAxis />
+              <Tooltip />
+              <Legend />
+              <Area
+                type="monotone"
+                dataKey="succeeded"
+                stackId="1"
+                stroke="#4CAF50"
+                fillOpacity={1}
+                fill="url(#colorSucceeded)"
+                name="Succeeded"
+              />
+              <Area
+                type="monotone"
+                dataKey="failed"
+                stackId="1"
+                stroke="#f44336"
+                fillOpacity={1}
+                fill="url(#colorFailed)"
+                name="Failed"
+              />
+              <Line type="monotone" dataKey="total" stroke="#2196F3" strokeWidth={2} name="Total" />
+            </AreaChart>
+          </ResponsiveContainer>
         </div>
       )}
 
