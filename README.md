@@ -45,7 +45,9 @@ Segmentra is an on‑prem, web-based **fleet firewall & microsegmentation manage
 - **Status Breakdown**: Visual representation of deployment outcomes
 - **Top Deployers**: See who's most active in your organization
 
-![Dashboard](docs/images/dashboard.png)
+<div align="center">
+  <img src="docs/images/dashboard.png" alt="Dashboard" style="max-width: 100%; height: auto;" />
+</div>
 
 ### 🏷️ Inventory Management
 - **Host Management**: Add and manage Linux servers with management IPs
@@ -65,7 +67,9 @@ Segmentra is an on‑prem, web-based **fleet firewall & microsegmentation manage
   - Results (success, failed, partial success)
   - Host-level outcomes
 
-![Audit Log](docs/images/audit-log.png)
+<div align="center">
+  <img src="docs/images/audit-log.png" alt="Audit Log" style="max-width: 100%; height: auto;" />
+</div>
 
 ### 🛠️ Troubleshooting
 - **Policy Troubleshooting**: Query which policies apply to specific IPs
@@ -190,7 +194,9 @@ If you have LDAP configured and AD group mappings, you can login via `/api/auth/
   - The account must have passwordless sudo access to firewall commands (`nft`, `iptables`, `iptables-restore`)
   - The system automatically uses `sudo` for all privileged operations
 
-![Administration](docs/images/administration.png)
+<div align="center">
+  <img src="docs/images/administration.png" alt="Administration" style="max-width: 100%; height: auto;" />
+</div>
 
 ### 3) Add inventory
 
@@ -205,12 +211,16 @@ If you have LDAP configured and AD group mappings, you can login via `/api/auth/
 
 - Create a **Policy Set** (e.g., "DMZ Servers")
 
-![Policy Sets](docs/images/policy-sets.png)
+<div align="center">
+  <img src="docs/images/policy-sets.png" alt="Policy Sets" style="max-width: 100%; height: auto;" />
+</div>
 
 - Create a **Policy Version** (DRAFT), add rules, then **Submit for approval**
 - Approver/Admin approves in **Approvals**
 
-![Policy Version](docs/images/policy-version.png)
+<div align="center">
+  <img src="docs/images/policy-version.png" alt="Policy Version" style="max-width: 100%; height: auto;" />
+</div>
 
 ### 5) Deploy
 
@@ -218,9 +228,13 @@ If you have LDAP configured and AD group mappings, you can login via `/api/auth/
 - Start it (creates bundle + runs selected executor: Ansible or SSH Direct)
 - Review results in **Deployments** and logs via execution logs endpoint
 
-![Deployments](docs/images/deployments.png)
+<div align="center">
+  <img src="docs/images/deployments.png" alt="Deployments" style="max-width: 100%; height: auto;" />
+</div>
 
-![Deployment Details](docs/images/deployment-details.png)
+<div align="center">
+  <img src="docs/images/deployment-details.png" alt="Deployment Details" style="max-width: 100%; height: auto;" />
+</div>
 
 ---
 
