@@ -5,6 +5,7 @@ import { requireAuth, requireRole } from '../middleware/auth.js';
 import { readSecretPlaintext } from '../services/secrets.js';
 import path from 'node:path';
 import fs from 'node:fs';
+import os from 'node:os';
 import { env } from '../lib/env.js';
 
 const complianceRouter = Router();
@@ -57,7 +58,8 @@ complianceRouter.get('/hosts/:hostId', async (req, res) => {
   }
 
   const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
-  const tempKeyPath = path.join(env.BUNDLES_DIR, `temp_key_${hostId}_${Date.now()}`);
+  // Use os.tmpdir() for temporary keys to avoid dependency on BUNDLES_DIR existing
+  const tempKeyPath = path.join(os.tmpdir(), `segmentra_compliance_key_${hostId}_${Date.now()}`);
   fs.writeFileSync(tempKeyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
 
   try {
@@ -150,7 +152,8 @@ complianceRouter.post('/hosts/bulk', async (req, res) => {
   }
 
   const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
-  const tempKeyPath = path.join(env.BUNDLES_DIR, `temp_key_bulk_${Date.now()}`);
+  // Use os.tmpdir() for temporary keys to avoid dependency on BUNDLES_DIR existing
+  const tempKeyPath = path.join(os.tmpdir(), `segmentra_compliance_bulk_key_${Date.now()}`);
   fs.writeFileSync(tempKeyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
 
   try {

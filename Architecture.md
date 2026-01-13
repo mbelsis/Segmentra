@@ -22,6 +22,11 @@ This document provides detailed technical information about Segmentra's architec
    - [Host Policy Visualization](#host-policy-visualization)
 7. [Troubleshooting](#troubleshooting)
 8. [Configuration Details](#configuration-details)
+   - [Environment Variables](#environment-variables)
+   - [Docker Compose Configuration](#docker-compose-configuration)
+   - [Security Considerations](#security-considerations)
+   - [Secret Storage & Encryption](#secret-storage--encryption)
+   - [Current v1 Limitations](#current-v1-limitations)
 
 ---
 
@@ -980,20 +985,22 @@ Deployments can be scheduled for future execution, useful for maintenance window
 
 - **Simple Scheduling**: Specify `scheduledAt` datetime when creating deployment
 - **Background Processing**: Background job checks every minute for ready deployments
-- **Automatic Start**: Scheduled deployments automatically start when `scheduled_at <= now()`
+- **Queue Readiness**: When `scheduled_at <= now()`, the system clears `scheduled_at` and leaves the deployment in `QUEUED` status, ready to be started manually via the `/deployments/:id/start` endpoint
 - **No Calendar Logic**: Simple "tonight at 02:00" style scheduling
+- **Manual Start Required**: Scheduled deployments do not automatically start - they must be manually started via the start endpoint after the scheduled time has passed
 
 #### Usage
 
 - **UI**: Use datetime picker in deployment creation form
 - **API**: Include `scheduledAt: "2026-01-10T02:00:00Z"` in deployment creation payload
 - **Format**: ISO 8601 datetime string
+- **Starting**: After the scheduled time, call `POST /deployments/:id/start` to begin the deployment
 
 #### Implementation
 
 - **Database**: `deployments.scheduled_at` field (added in migration 007)
 - **Background Job**: Runs every minute in `apps/api/src/index.ts`
-- **Processing**: `processScheduledDeployments()` function clears `scheduled_at` when ready
+- **Processing**: `processScheduledDeployments()` function clears `scheduled_at` when `scheduled_at <= now()`, leaving deployments in `QUEUED` status for manual start
 
 #### Example
 
@@ -1525,6 +1532,94 @@ The `docker-compose.yml` file defines:
 4. **SSH Credentials**: Use sudo-capable accounts, not root. Ensure passwordless sudo for firewall commands.
 5. **LDAP**: Use LDAPS (port 636) for secure LDAP connections in production.
 
+### Secret Storage & Encryption
+
+Segmentra implements robust encryption for sensitive data stored in the database, including SSH private keys, SSH key passphrases, and LDAP bind passwords.
+
+#### Encryption Architecture
+
+**Storage Flow**:
+- When creating an SSH credential or LDAP setting, sensitive data (private keys, passphrases, passwords) is passed to `createSecret()` service function
+- `createSecret()` calls `encryptBlob()` which encrypts the data using **AES-256-GCM** (Galois/Counter Mode)
+- The encrypted blob is stored in the `secret_store` table in the `encrypted_blob` column (bytea type)
+- Reference tables (e.g., `ssh_credentials`, `ldap_settings`) only store UUID references (`private_key_secret_id`, `passphrase_secret_id`, `bind_password_secret_id`) to the encrypted secrets
+- The actual sensitive data is never stored in plaintext in the database
+
+**Encryption Algorithm**:
+- **Algorithm**: AES-256-GCM (Advanced Encryption Standard, 256-bit key, Galois/Counter Mode)
+- **Key Size**: 256 bits (32 bytes)
+- **IV (Initialization Vector)**: 12-byte random IV generated for each encryption (ensures same plaintext produces different ciphertext)
+- **Authentication Tag**: 16-byte authentication tag for integrity verification (prevents tampering)
+- **Format**: `[1-byte version][12-byte IV][16-byte tag][ciphertext...]`
+- **Implementation**: Uses Node.js `crypto.createCipheriv()` and `crypto.createDecipheriv()` with AES-256-GCM
+
+**Key Encryption Key (KEK)**:
+- **Primary Method**: Uses `SEGMENTRA_KEK_B64` environment variable
+  - Must be a 32-byte (256-bit) key, base64-encoded
+  - Example generation: `openssl rand -base64 32`
+  - This is the **Key Encryption Key (KEK)** used to encrypt/decrypt all secrets
+- **Development Fallback**: If `SEGMENTRA_KEK_B64` is not set, derives a key from `JWT_SECRET` using SHA-256
+  - **Warning**: This fallback is less secure and should **never be used in production**
+  - The derived key is deterministic (same JWT_SECRET = same encryption key), which reduces security
+  - Intended only for development/testing environments
+
+**Retrieval & Usage**:
+- When secrets are needed (e.g., for SSH deployments), `readSecretPlaintext()` retrieves the encrypted blob from `secret_store`
+- Calls `decryptBlob()` to decrypt using the same KEK
+- Decrypted data is only held in memory temporarily
+- For SSH operations, decrypted keys are written to temporary files in `os.tmpdir()` (system temporary directory)
+- Temporary files are created with restrictive permissions (mode 0o600) and cleaned up immediately after use
+- Keys are never logged or exposed in API responses
+
+#### Security Features
+
+- **Encryption at Rest**: All sensitive data is encrypted before being stored in the database
+- **Strong Algorithm**: AES-256-GCM provides authenticated encryption (confidentiality + integrity)
+- **Unique IVs**: Each encryption uses a random IV, ensuring identical plaintext produces different ciphertext
+- **Key Separation**: The encryption key (KEK) is stored separately (environment variable), never in the database
+- **Temporary File Handling**: Decrypted keys are only written to temporary files that are automatically cleaned up
+- **No Plaintext Storage**: The database never contains unencrypted sensitive data
+- **Immutable Secrets**: SSH keys cannot be updated via PUT endpoint - must create new credential and delete old one
+
+#### Production Recommendations
+
+1. **Set SEGMENTRA_KEK_B64**: Always set this environment variable in production
+   ```bash
+   # Generate a secure 32-byte key
+   export SEGMENTRA_KEK_B64=$(openssl rand -base64 32)
+   ```
+
+2. **Secure Key Storage**: Store `SEGMENTRA_KEK_B64` securely:
+   - Use a secrets management system (HashiCorp Vault, AWS Secrets Manager, etc.)
+   - Never commit to version control
+   - Rotate periodically (requires re-encrypting all secrets)
+
+3. **Key Rotation**: To rotate the KEK:
+   - Generate new KEK
+   - Decrypt all secrets with old KEK
+   - Re-encrypt with new KEK
+   - Update `SEGMENTRA_KEK_B64` environment variable
+   - Restart API server
+
+4. **Database Security**: Ensure PostgreSQL database is:
+   - Accessible only to the API server
+   - Using encrypted connections (SSL/TLS)
+   - Backed up securely (encrypted backups)
+   - Protected by network firewalls
+
+5. **Access Control**: Limit access to:
+   - Database containing encrypted secrets
+   - Environment variables containing KEK
+   - API server that can decrypt secrets
+   - Admin users who can create/manage SSH credentials
+
+#### Implementation Details
+
+- **Service**: `apps/api/src/services/secrets.ts` - Secret creation and retrieval
+- **Crypto**: `apps/api/src/services/crypto.ts` - AES-256-GCM encryption/decryption
+- **Database Table**: `secret_store` - Stores encrypted blobs
+- **Reference Tables**: `ssh_credentials`, `ldap_settings` - Store UUID references to secrets
+
 ### Current v1 Limitations
 
 - Canary/progressive orchestration and advanced guardrails are stubbed at the API level (basic deployment flow is implemented). The deployment modes (`CANARY`, `PROGRESSIVE`, `FULL`) are accepted and stored, but all selected hosts are processed immediately without host-by-host orchestration.
@@ -1534,7 +1629,7 @@ The `docker-compose.yml` file defines:
 - No built-in rollback UI (rollback happens automatically on failure).
 - Firewall backend `auto` setting is now auto-detected before compilation via SSH. If auto-detection fails, it defaults to `nftables`. The detected backend is stored in the host record for future deployments. Executors validate that the compiled policy format matches the detected backend at runtime.
 - Drift detection requires SSH access and passwordless sudo. Hosts without SSH credentials configured cannot be checked for compliance.
-- Scheduled deployments use simple datetime comparison. No support for recurring schedules, timezone handling, or complex scheduling rules.
+- Scheduled deployments use simple datetime comparison. When `scheduled_at <= now()`, the system clears `scheduled_at` and leaves the deployment in `QUEUED` status - manual start via `/deployments/:id/start` is still required. No support for recurring schedules, timezone handling, or complex scheduling rules.
 - **High-risk policy detection**: The system automatically evaluates policy versions for high-risk patterns and sets the `is_high_risk` flag. High-risk policies require a different approver (no self-approval, even for admins). Risk evaluation considers interface scope, target count, source ranges, and sensitive ports. See [High-Risk Policy Detection](#high-risk-policy-detection) for details.
 
 ---

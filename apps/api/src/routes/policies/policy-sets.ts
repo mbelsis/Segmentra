@@ -73,7 +73,7 @@ policySetsRouter.get('/:id', requireRole('viewer', 'operator', 'admin'), async (
   res.json({ policySet: rows[0] });
 });
 
-policySetsRouter.put('/:id', async (req, res) => {
+policySetsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = createPolicySetSchema.partial().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
   const b = parsed.data;
@@ -92,7 +92,7 @@ policySetsRouter.put('/:id', async (req, res) => {
   res.json({ policySet: rows[0] });
 });
 
-policySetsRouter.delete('/:id', async (req, res) => {
+policySetsRouter.delete('/:id', requireRole('operator', 'admin'), async (req, res) => {
   // soft delete not defined; hard delete for now
   const { rowCount } = await pool.query(`DELETE FROM policy_sets WHERE id=$1`, [req.params.id]);
   if (!rowCount) return res.status(404).json({ error: 'not_found' });

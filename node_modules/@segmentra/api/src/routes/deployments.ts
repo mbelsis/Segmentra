@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import { Router } from 'express';
@@ -626,7 +627,8 @@ async function generateBundle(deploymentId: string) {
   fs.writeFileSync(keyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
   
   // Create temp key for auto-detection (will be cleaned up)
-  const tempKeyPath = path.join(env.BUNDLES_DIR, `temp_key_${deploymentId}_${Date.now()}`);
+  // Use os.tmpdir() for temporary keys to avoid dependency on BUNDLES_DIR existing
+  const tempKeyPath = path.join(os.tmpdir(), `segmentra_deployment_key_${deploymentId}_${Date.now()}`);
   fs.writeFileSync(tempKeyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
 
   const inventoryLines: string[] = ['[all]'];
