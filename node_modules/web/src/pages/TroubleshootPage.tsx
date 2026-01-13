@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { api } from '../lib/api';
 
 export function TroubleshootPage() {
@@ -80,12 +80,315 @@ export function TroubleshootPage() {
     }
   }
 
+  // Firewall Audit state
+  const [auditHosts, setAuditHosts] = useState<string[]>([]);
+  const [auditHostInput, setAuditHostInput] = useState('');
+  const [auditDuration, setAuditDuration] = useState(60);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditSessions, setAuditSessions] = useState<any[]>([]);
+  const [selectedSessionHost, setSelectedSessionHost] = useState<string | null>(null);
+  const [auditError, setAuditError] = useState<string | null>(null);
+  const [allHosts, setAllHosts] = useState<any[]>([]);
+
+  // Load all hosts for selection
+  useEffect(() => {
+    api.hosts({ limit: 1000 }).then((res) => {
+      setAllHosts(res.hosts);
+    });
+  }, []);
+
+  // Load audit sessions
+  useEffect(() => {
+    loadAuditSessions();
+    const interval = setInterval(loadAuditSessions, 30000); // Refresh every 30 seconds
+    return () => clearInterval(interval);
+  }, []);
+
+  async function loadAuditSessions() {
+    try {
+      const res = await api.troubleshoot.audit.listSessions();
+      setAuditSessions(res.sessions);
+    } catch (e) {
+      // Ignore errors
+    }
+  }
+
+  async function handleStartAudit() {
+    if (auditHosts.length === 0) {
+      setAuditError('Please select at least one host');
+      return;
+    }
+    if (auditDuration < 1 || auditDuration > 1440) {
+      setAuditError('Duration must be between 1 and 1440 minutes');
+      return;
+    }
+
+    setAuditLoading(true);
+    setAuditError(null);
+
+    try {
+      await api.troubleshoot.audit.start({
+        hosts: auditHosts,
+        durationMinutes: auditDuration
+      });
+      setAuditHosts([]);
+      setAuditHostInput('');
+      await loadAuditSessions();
+    } catch (e: any) {
+      setAuditError(String(e?.message ?? e));
+    } finally {
+      setAuditLoading(false);
+    }
+  }
+
+  function addHostToAudit() {
+    const input = auditHostInput.trim();
+    if (!input) return;
+
+    // Try to find host by hostname or IP
+    const host = allHosts.find(
+      (h) => h.hostname.toLowerCase() === input.toLowerCase() || h.mgmt_ip === input || h.id === input
+    );
+
+    if (host && !auditHosts.includes(host.id)) {
+      setAuditHosts([...auditHosts, host.id]);
+      setAuditHostInput('');
+    } else if (!host) {
+      setAuditError(`Host "${input}" not found`);
+    }
+  }
+
+  function removeHostFromAudit(hostId: string) {
+    setAuditHosts(auditHosts.filter((id) => id !== hostId));
+  }
+
+  function formatTimeRemaining(session: any): string {
+    if (session.status !== 'RUNNING') return '';
+    const now = new Date();
+    const restoreAt = new Date(session.scheduled_restore_at);
+    const diff = restoreAt.getTime() - now.getTime();
+    if (diff <= 0) return 'Restoring...';
+    const minutes = Math.floor(diff / 60000);
+    const hours = Math.floor(minutes / 60);
+    const mins = minutes % 60;
+    return `${hours}h ${mins}m`;
+  }
+
+  const activeSessions = auditSessions.filter((s) => s.status === 'RUNNING');
+  const completedSessions = auditSessions.filter((s) => s.status === 'COMPLETED');
+
   return (
     <div style={{ padding: 24 }}>
       <h1>Troubleshooting</h1>
       <p style={{ color: '#666', marginBottom: 24 }}>
         Simulate communication between IPs, search for policies by IP address, find policies deployed to a host, or find hosts with a specific policy.
       </p>
+
+      {/* Firewall Audit Section */}
+      <div className="card" style={{ marginBottom: 24 }}>
+        <h2 style={{ marginTop: 0 }}>Firewall Audit</h2>
+        <p style={{ color: '#666', marginBottom: 16 }}>
+          Deploy log-only firewall rules to capture all network traffic without blocking. After the specified duration, original rules will be restored and communication flows will be displayed.
+        </p>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: 16, marginBottom: 16 }}>
+          <div>
+            <label style={{ display: 'block', marginBottom: 8, fontWeight: 500 }}>Hostname or IP *</label>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                type="text"
+                value={auditHostInput}
+                onChange={(e) => setAuditHostInput(e.target.value)}
+                onKeyPress={(e) => e.key === 'Enter' && addHostToAudit()}
+                placeholder="e.g., web-server-01 or 192.168.1.10"
+                style={{ flex: 1, padding: '8px', border: '1px solid #ddd', borderRadius: 4 }}
+              />
+              <button onClick={addHostToAudit} className="btn-primary" style={{ whiteSpace: 'nowrap' }}>
+                Add
+              </button>
+            </div>
+          </div>
+          <div>
+            <label style={{ display: 'block', marginBottom: 8, fontWeight: 500 }}>Duration (minutes) *</label>
+            <input
+              type="number"
+              value={auditDuration}
+              onChange={(e) => setAuditDuration(parseInt(e.target.value, 10) || 60)}
+              min="1"
+              max="1440"
+              style={{ width: '100%', padding: '8px', border: '1px solid #ddd', borderRadius: 4 }}
+            />
+          </div>
+        </div>
+
+        {auditHosts.length > 0 && (
+          <div style={{ marginBottom: 16 }}>
+            <strong>Selected Hosts:</strong>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
+              {auditHosts.map((hostId) => {
+                const host = allHosts.find((h) => h.id === hostId);
+                return (
+                  <span
+                    key={hostId}
+                    style={{
+                      padding: '4px 12px',
+                      background: '#e3f2fd',
+                      borderRadius: 16,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8
+                    }}
+                  >
+                    {host?.hostname || hostId}
+                    <button
+                      onClick={() => removeHostFromAudit(hostId)}
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        cursor: 'pointer',
+                        fontSize: '18px',
+                        color: '#666',
+                        padding: 0,
+                        width: 20,
+                        height: 20
+                      }}
+                    >
+                      ×
+                    </button>
+                  </span>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        <button onClick={handleStartAudit} disabled={auditLoading || auditHosts.length === 0} className="btn-primary">
+          {auditLoading ? 'Starting...' : 'Start Audit'}
+        </button>
+
+        {auditError && (
+          <div className="error-banner" style={{ marginTop: 16 }}>
+            {auditError}
+          </div>
+        )}
+      </div>
+
+      {/* Active Sessions */}
+      {activeSessions.length > 0 && (
+        <div className="card" style={{ marginBottom: 24 }}>
+          <h2 style={{ marginTop: 0 }}>Active Audit Sessions</h2>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Hostname</th>
+                <th>Duration</th>
+                <th>Time Remaining</th>
+                <th>Started</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {activeSessions.map((session) => (
+                <tr key={session.id}>
+                  <td><strong>{session.hostname}</strong></td>
+                  <td>{session.duration_minutes} minutes</td>
+                  <td>{formatTimeRemaining(session)}</td>
+                  <td>{new Date(session.started_at).toLocaleString()}</td>
+                  <td>
+                    <button
+                      onClick={async () => {
+                        if (confirm('Cancel this audit session and restore original firewall rules?')) {
+                          try {
+                            await api.troubleshoot.audit.cancelSession(session.id);
+                            await loadAuditSessions();
+                          } catch (e: any) {
+                            alert(`Error: ${e.message}`);
+                          }
+                        }
+                      }}
+                      style={{ padding: '4px 8px', fontSize: '0.9em' }}
+                    >
+                      Cancel
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Completed Sessions Results */}
+      {completedSessions.length > 0 && (
+        <div className="card" style={{ marginBottom: 24 }}>
+          <h2 style={{ marginTop: 0 }}>Completed Audit Sessions</h2>
+          
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ display: 'block', marginBottom: 8, fontWeight: 500 }}>Select Server:</label>
+            <select
+              value={selectedSessionHost || ''}
+              onChange={(e) => setSelectedSessionHost(e.target.value || null)}
+              style={{ width: '100%', maxWidth: 400, padding: '8px', border: '1px solid #ddd', borderRadius: 4 }}
+            >
+              <option value="">-- Select a server --</option>
+              {completedSessions.map((session) => (
+                <option key={session.id} value={session.id}>
+                  {session.hostname} - {new Date(session.started_at).toLocaleString()}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {selectedSessionHost && (() => {
+            const session = completedSessions.find((s) => s.id === selectedSessionHost);
+            if (!session || !session.log_data) {
+              return <p style={{ color: '#666' }}>No log data available for this session.</p>;
+            }
+
+            const logData = session.log_data;
+            const flows = logData.flows || [];
+
+            return (
+              <div>
+                <h3>Communication Flows ({flows.length} unique flows)</h3>
+                <p style={{ color: '#666', marginBottom: 16 }}>
+                  Total log entries: {logData.entries?.length || 0}
+                </p>
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Direction</th>
+                      <th>Source IP</th>
+                      <th>Destination IP</th>
+                      <th>Protocol</th>
+                      <th>Source Port</th>
+                      <th>Dest Port</th>
+                      <th>Count</th>
+                      <th>First Seen</th>
+                      <th>Last Seen</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {flows.map((flow: any, idx: number) => (
+                      <tr key={idx}>
+                        <td><code>{flow.direction}</code></td>
+                        <td>{flow.sourceIp}</td>
+                        <td>{flow.destinationIp}</td>
+                        <td><code>{flow.protocol}</code></td>
+                        <td>{flow.sourcePort || '-'}</td>
+                        <td>{flow.destinationPort || '-'}</td>
+                        <td><strong>{flow.count}</strong></td>
+                        <td>{new Date(flow.firstSeen).toLocaleString()}</td>
+                        <td>{new Date(flow.lastSeen).toLocaleString()}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            );
+          })()}
+        </div>
+      )}
 
       {/* Communication Simulation Section */}
       <div className="card" style={{ marginBottom: 24 }}>

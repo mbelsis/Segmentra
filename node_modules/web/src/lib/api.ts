@@ -229,7 +229,25 @@ export const api = {
     }>('/troubleshoot/simulate-communication', {
       method: 'POST',
       body: JSON.stringify(params)
-    })
+    }),
+    audit: {
+      start: (params: { hosts: string[]; durationMinutes: number }) =>
+        request<{ sessions: any[] }>('/troubleshoot/audit/start', {
+          method: 'POST',
+          body: JSON.stringify(params)
+        }),
+      listSessions: () => request<{ sessions: any[] }>('/troubleshoot/audit/sessions'),
+      getSession: (id: string) => request<{ session: any }>(`/troubleshoot/audit/sessions/${id}`),
+      restoreSession: (id: string) =>
+        request<{ success: boolean; flows: any[]; entryCount: number }>(`/troubleshoot/audit/sessions/${id}/restore`, {
+          method: 'POST'
+        }),
+      getSessionLogs: (id: string) => request<{ logData: any }>(`/troubleshoot/audit/sessions/${id}/logs`),
+      cancelSession: (id: string) =>
+        request<{ success: boolean }>(`/troubleshoot/audit/sessions/${id}/cancel`, {
+          method: 'POST'
+        })
+    }
   },
 
   // Compliance/Drift Detection

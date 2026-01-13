@@ -84,4 +84,15 @@ app.listen(env.PORT, () => {
             console.error('[Scheduled Deployments] Error processing scheduled deployments:', e);
         }
     }, 60 * 1000); // Check every 1 minute
+    // Start periodic audit session processor (every 1 minute)
+    setInterval(async () => {
+        try {
+            const { processExpiredAuditSessions } = await import('./services/audit-scheduler.js');
+            await processExpiredAuditSessions();
+        }
+        catch (e) {
+            // eslint-disable-next-line no-console
+            console.error('[Audit Scheduler] Error processing expired audit sessions:', e);
+        }
+    }, 60 * 1000); // Check every 1 minute
 });

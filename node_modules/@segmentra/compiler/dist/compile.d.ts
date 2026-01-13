@@ -46,6 +46,7 @@ export type CompileInput = {
     baseline: {
         mgmtSshCidrs: string[];
     };
+    logOnlyMode?: boolean;
 };
 export type CompileOutput = {
     backend: FirewallBackend;

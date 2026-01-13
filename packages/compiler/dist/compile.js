@@ -15,10 +15,13 @@ function resolveInterfaceNames(host, scope) {
 export function compileHostPolicy(input) {
     const backend = input.host.firewallBackend;
     const lines = [];
+    const logOnly = input.logOnlyMode ?? false;
     if (backend === 'nftables') {
         lines.push('flush ruleset');
         lines.push('table inet segmentra {');
-        lines.push('  chain input { type filter hook input priority 0; policy drop; }');
+        // In log-only mode, change default policy to accept so nothing is blocked
+        const inputPolicy = logOnly ? 'accept' : 'drop';
+        lines.push(`  chain input { type filter hook input priority 0; policy ${inputPolicy}; }`);
         lines.push('  chain output { type filter hook output priority 0; policy accept; }');
         // address sets (resolved by API)
         for (const [name, elements] of Object.entries(input.sets)) {
@@ -27,10 +30,20 @@ export function compileHostPolicy(input) {
         }
         lines.push('}');
         // Baseline
-        lines.push('add rule inet segmentra input iif lo accept');
-        lines.push('add rule inet segmentra input ct state established,related accept');
-        for (const cidr of input.baseline.mgmtSshCidrs) {
-            lines.push(`add rule inet segmentra input ip saddr ${cidr} tcp dport 22 accept comment \"mgmt_ssh\"`);
+        if (logOnly) {
+            // In log-only mode, log baseline traffic too
+            lines.push('add rule inet segmentra input iif lo log prefix "FW-AUDIT: ALLOW: loopback: " accept');
+            lines.push('add rule inet segmentra input ct state established,related log prefix "FW-AUDIT: ALLOW: established: " accept');
+            for (const cidr of input.baseline.mgmtSshCidrs) {
+                lines.push(`add rule inet segmentra input ip saddr ${cidr} tcp dport 22 log prefix "FW-AUDIT: ALLOW: mgmt_ssh: " accept comment \"mgmt_ssh\"`);
+            }
+        }
+        else {
+            lines.push('add rule inet segmentra input iif lo accept');
+            lines.push('add rule inet segmentra input ct state established,related accept');
+            for (const cidr of input.baseline.mgmtSshCidrs) {
+                lines.push(`add rule inet segmentra input ip saddr ${cidr} tcp dport 22 accept comment \"mgmt_ssh\"`);
+            }
         }
         // Policy rules (very v1: source resolution is performed by API; here we treat sourceValue as cidr/ipset name)
         const policyScopeNames = resolveInterfaceNames(input.host, input.policyInterfaceScope);
@@ -61,8 +74,17 @@ export function compileHostPolicy(input) {
             const emit = (chain) => {
                 const ifExpr = chain === 'input' ? iifExpr : oifExpr;
                 const remoteExpr = chain === 'input' ? remoteIn : remoteOut;
-                const parts = ['add rule inet segmentra', chain, ifExpr, remoteExpr, proto, portExpr, action, comment].filter(Boolean);
-                lines.push(parts.join(' '));
+                if (logOnly) {
+                    // In log-only mode, log the traffic then accept it
+                    const logPrefix = `log prefix "FW-AUDIT: ${r.action} ${r.comment ? r.comment.replace(/\"/g, '') : 'rule'}: "`;
+                    const logParts = ['add rule inet segmentra', chain, ifExpr, remoteExpr, proto, portExpr, logPrefix, 'accept', comment].filter(Boolean);
+                    lines.push(logParts.join(' '));
+                }
+                else {
+                    // Normal mode - apply the action
+                    const parts = ['add rule inet segmentra', chain, ifExpr, remoteExpr, proto, portExpr, action, comment].filter(Boolean);
+                    lines.push(parts.join(' '));
+                }
             };
             if (r.direction === 'IN')
                 emit('input');
@@ -73,17 +95,37 @@ export function compileHostPolicy(input) {
                 emit('output');
             }
         }
+        // In log-only mode, add catch-all rules to log all remaining traffic
+        if (logOnly) {
+            lines.push('add rule inet segmentra input log prefix "FW-AUDIT: ALLOW: catch-all: " accept');
+            lines.push('add rule inet segmentra output log prefix "FW-AUDIT: ALLOW: catch-all: " accept');
+        }
     }
     else {
         // iptables-restore format
         lines.push('*filter');
-        lines.push(':INPUT DROP [0:0]');
-        lines.push(':FORWARD DROP [0:0]');
+        // In log-only mode, change default policy to ACCEPT
+        const inputPolicy = logOnly ? 'ACCEPT' : 'DROP';
+        lines.push(`:INPUT ${inputPolicy} [0:0]`);
+        lines.push(`:FORWARD ${inputPolicy} [0:0]`);
         lines.push(':OUTPUT ACCEPT [0:0]');
-        lines.push('-A INPUT -i lo -j ACCEPT');
-        lines.push('-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT');
-        for (const cidr of input.baseline.mgmtSshCidrs) {
-            lines.push(`-A INPUT -p tcp -s ${cidr} --dport 22 -j ACCEPT`);
+        if (logOnly) {
+            // In log-only mode, log baseline traffic too
+            lines.push('-A INPUT -i lo -j LOG --log-prefix "FW-AUDIT: ALLOW: loopback: "');
+            lines.push('-A INPUT -i lo -j ACCEPT');
+            lines.push('-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j LOG --log-prefix "FW-AUDIT: ALLOW: established: "');
+            lines.push('-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT');
+            for (const cidr of input.baseline.mgmtSshCidrs) {
+                lines.push(`-A INPUT -p tcp -s ${cidr} --dport 22 -j LOG --log-prefix "FW-AUDIT: ALLOW: mgmt_ssh: "`);
+                lines.push(`-A INPUT -p tcp -s ${cidr} --dport 22 -j ACCEPT`);
+            }
+        }
+        else {
+            lines.push('-A INPUT -i lo -j ACCEPT');
+            lines.push('-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT');
+            for (const cidr of input.baseline.mgmtSshCidrs) {
+                lines.push(`-A INPUT -p tcp -s ${cidr} --dport 22 -j ACCEPT`);
+            }
         }
         const rulesSorted = [...input.rules].sort((a, b) => {
             if (a.action !== b.action)
@@ -107,7 +149,18 @@ export function compileHostPolicy(input) {
                 for (const elem of elements) {
                     const remote = chain === 'INPUT' ? `-s ${elem}` : `-d ${elem}`;
                     const iface = chain === 'INPUT' ? inIface : outIface;
-                    lines.push(`-A ${chain} ${iface} ${proto} ${remote} ${ports} -j ${action}`.replace(/\s+/g, ' ').trim());
+                    if (logOnly) {
+                        // In log-only mode, log then accept
+                        const logPrefix = `-j LOG --log-prefix "FW-AUDIT: ${r.action} ${r.comment ? r.comment.replace(/"/g, '') : 'rule'}: "`;
+                        const logLine = `-A ${chain} ${iface} ${proto} ${remote} ${ports} ${logPrefix}`.replace(/\s+/g, ' ').trim();
+                        lines.push(logLine);
+                        const acceptLine = `-A ${chain} ${iface} ${proto} ${remote} ${ports} -j ACCEPT`.replace(/\s+/g, ' ').trim();
+                        lines.push(acceptLine);
+                    }
+                    else {
+                        // Normal mode
+                        lines.push(`-A ${chain} ${iface} ${proto} ${remote} ${ports} -j ${action}`.replace(/\s+/g, ' ').trim());
+                    }
                 }
             };
             if (r.direction === 'IN')
@@ -118,6 +171,13 @@ export function compileHostPolicy(input) {
                 emit('INPUT');
                 emit('OUTPUT');
             }
+        }
+        // In log-only mode, add catch-all rules to log all remaining traffic
+        if (logOnly) {
+            lines.push('-A INPUT -j LOG --log-prefix "FW-AUDIT: ALLOW: catch-all: "');
+            lines.push('-A INPUT -j ACCEPT');
+            lines.push('-A OUTPUT -j LOG --log-prefix "FW-AUDIT: ALLOW: catch-all: "');
+            lines.push('-A OUTPUT -j ACCEPT');
         }
         lines.push('COMMIT');
     }

@@ -2,6 +2,14 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { pool } from '../db/pool.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
+import { compileHostPolicy } from '@segmentra/compiler';
+import { startAuditSession, deployLogOnlyPolicy, restoreAuditSession, retrieveAuditLogs, type AuditSshHost } from '@segmentra/executor';
+import { readSecretPlaintext } from '../services/secrets.js';
+import { parseFirewallLogs, groupCommunicationFlows } from '../services/log-parser.js';
+import { processExpiredAuditSessions } from '../services/audit-scheduler.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 
 export const troubleshootRouter = Router();
 troubleshootRouter.use(requireAuth, requireRole('operator', 'admin', 'viewer'));
@@ -627,5 +635,332 @@ troubleshootRouter.post('/simulate-communication', async (req, res) => {
     allowingRules,
     allRules
   });
+});
+
+// Firewall Audit Endpoints
+
+const startAuditSchema = z.object({
+  hosts: z.array(z.string().uuid()),
+  durationMinutes: z.number().int().min(1).max(1440) // Max 24 hours
+});
+
+// Start audit session(s)
+troubleshootRouter.post('/audit/start', requireRole('operator', 'admin'), async (req, res) => {
+  const parsed = startAuditSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'invalid_body', message: parsed.error.message });
+  }
+  const { hosts: hostIds, durationMinutes } = parsed.data;
+
+  // Get user ID
+  const userRes = await pool.query(`SELECT id FROM users WHERE username=$1 LIMIT 1`, [req.auth!.username]);
+  const userId = userRes.rows[0]?.id || null;
+
+  // Get SSH credentials
+  const credRes = await pool.query(
+    `SELECT * FROM ssh_credentials WHERE scope_type='GLOBAL' ORDER BY created_at DESC LIMIT 1`
+  );
+  const cred = credRes.rows[0];
+  if (!cred) {
+    return res.status(400).json({ error: 'missing_ssh_credential', message: 'SSH credentials are required' });
+  }
+
+  const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
+
+  // Get hosts
+  const hostRes = await pool.query(
+    `SELECT h.*, 
+            (SELECT array_agg(json_build_object('name', hi.name, 'role', hi.role, 'enabled', hi.enabled))
+             FROM host_interfaces hi WHERE hi.host_id = h.id) as interfaces
+     FROM hosts h
+     WHERE h.id = ANY($1::uuid[]) AND h.enabled = true`,
+    [hostIds]
+  );
+
+  if (hostRes.rows.length === 0) {
+    return res.status(400).json({ error: 'no_hosts_found', message: 'No enabled hosts found' });
+  }
+
+  const sessions = [];
+  const scheduledRestoreAt = new Date(Date.now() + durationMinutes * 60 * 1000);
+
+  // Get management VLAN CIDRs for baseline
+  const mgmtVlanRes = await pool.query(
+    `SELECT value FROM system_settings WHERE key='management_vlan_id'`
+  );
+  const mgmtVlanId = mgmtVlanRes.rows[0]?.value || null;
+  const mgmtSshCidrs: string[] = [];
+  if (mgmtVlanId) {
+    const vlanRes = await pool.query(`SELECT subnet FROM vlans WHERE id=$1`, [mgmtVlanId]);
+    if (vlanRes.rows[0]?.subnet) {
+      mgmtSshCidrs.push(vlanRes.rows[0].subnet);
+    }
+  }
+
+  for (const host of hostRes.rows) {
+    const tempKeyPath = path.join(os.tmpdir(), `audit_key_${host.id}_${Date.now()}`);
+    const logFilePath = `/var/log/segmentra-audit-${host.hostname}-${Date.now()}.log`;
+
+    try {
+      fs.writeFileSync(tempKeyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
+
+      const auditHost: AuditSshHost = {
+        hostname: host.hostname,
+        ip: String(host.mgmt_ip),
+        port: host.ssh_port || 22,
+        username: cred.username,
+        privateKeyPath: tempKeyPath,
+        backend: host.firewall_backend === 'iptables' ? 'iptables' : 'nftables'
+      };
+
+      // Start audit session (backup rules, configure logging)
+      const startResult = await startAuditSession(auditHost, logFilePath);
+      
+      if (!startResult.success) {
+        throw new Error(`Failed to start audit: ${startResult.stderr}`);
+      }
+
+      // Create empty policy rules for log-only mode (we want to log everything)
+      const emptyRules: any[] = [];
+      const policyInterfaceScope = { type: 'ALL_INTERFACES' as const };
+
+      // Compile log-only policy
+      const compiled = compileHostPolicy({
+        host: {
+          id: host.id,
+          hostname: host.hostname,
+          mgmtIp: host.mgmt_ip ? String(host.mgmt_ip) : null,
+          firewallBackend: auditHost.backend,
+          interfaces: (host.interfaces || []).map((i: any) => ({
+            name: i.name,
+            role: i.role,
+            enabled: i.enabled
+          }))
+        },
+        policyInterfaceScope,
+        rules: emptyRules,
+        sets: {},
+        baseline: { mgmtSshCidrs },
+        logOnlyMode: true
+      });
+
+      // Deploy log-only policy
+      const policyFilePath = path.join(os.tmpdir(), `audit_policy_${host.id}_${Date.now()}.${compiled.backend === 'nftables' ? 'nft' : 'iptables'}`);
+      const deployResult = await deployLogOnlyPolicy(auditHost, compiled.text, policyFilePath);
+
+      if (!deployResult.success) {
+        throw new Error(`Failed to deploy log-only policy: ${deployResult.stderr}`);
+      }
+
+      // Create database record
+      const sessionRes = await pool.query(
+        `INSERT INTO firewall_audit_sessions 
+         (host_id, status, duration_minutes, started_at, scheduled_restore_at, backup_path, log_file_path, created_by)
+         VALUES ($1, $2, $3, now(), $4, $5, $6, $7)
+         RETURNING *`,
+        [host.id, 'RUNNING', durationMinutes, scheduledRestoreAt, startResult.backupPath, logFilePath, userId]
+      );
+
+      sessions.push(sessionRes.rows[0]);
+
+      // Clean up temp files
+      if (fs.existsSync(tempKeyPath)) fs.unlinkSync(tempKeyPath);
+      if (fs.existsSync(policyFilePath)) fs.unlinkSync(policyFilePath);
+
+    } catch (error: any) {
+      // Clean up temp files on error
+      const tempKeyPath = path.join(os.tmpdir(), `audit_key_${host.id}_${Date.now()}`);
+      if (fs.existsSync(tempKeyPath)) {
+        try { fs.unlinkSync(tempKeyPath); } catch {}
+      }
+
+      return res.status(500).json({
+        error: 'audit_start_failed',
+        message: `Failed to start audit for ${host.hostname}: ${error.message}`
+      });
+    }
+  }
+
+  res.status(201).json({ sessions });
+});
+
+// List all audit sessions
+troubleshootRouter.get('/audit/sessions', async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT fas.*, h.hostname, h.mgmt_ip
+     FROM firewall_audit_sessions fas
+     JOIN hosts h ON h.id = fas.host_id
+     ORDER BY fas.created_at DESC
+     LIMIT 100`
+  );
+  res.json({ sessions: rows });
+});
+
+// Get audit session details
+troubleshootRouter.get('/audit/sessions/:id', async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT fas.*, h.hostname, h.mgmt_ip, h.firewall_backend
+     FROM firewall_audit_sessions fas
+     JOIN hosts h ON h.id = fas.host_id
+     WHERE fas.id = $1`,
+    [req.params.id]
+  );
+  if (!rows[0]) {
+    return res.status(404).json({ error: 'not_found' });
+  }
+  res.json({ session: rows[0] });
+});
+
+// Manually trigger restore
+troubleshootRouter.post('/audit/sessions/:id/restore', requireRole('operator', 'admin'), async (req, res) => {
+  const sessionRes = await pool.query(
+    `SELECT fas.*, h.hostname, h.mgmt_ip, h.ssh_port, h.firewall_backend
+     FROM firewall_audit_sessions fas
+     JOIN hosts h ON h.id = fas.host_id
+     WHERE fas.id = $1 AND fas.status = 'RUNNING'`,
+    [req.params.id]
+  );
+
+  if (!sessionRes.rows[0]) {
+    return res.status(404).json({ error: 'not_found', message: 'Session not found or not running' });
+  }
+
+  const session = sessionRes.rows[0];
+
+  // Get SSH credentials
+  const credRes = await pool.query(
+    `SELECT * FROM ssh_credentials WHERE scope_type='GLOBAL' ORDER BY created_at DESC LIMIT 1`
+  );
+  const cred = credRes.rows[0];
+  if (!cred) {
+    return res.status(400).json({ error: 'missing_ssh_credential' });
+  }
+
+  const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
+  const tempKeyPath = path.join(os.tmpdir(), `audit_restore_${session.id}_${Date.now()}`);
+
+  try {
+    fs.writeFileSync(tempKeyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
+
+    const auditHost: AuditSshHost = {
+      hostname: session.hostname,
+      ip: String(session.mgmt_ip),
+      port: session.ssh_port || 22,
+      username: cred.username,
+      privateKeyPath: tempKeyPath,
+      backend: session.firewall_backend === 'iptables' ? 'iptables' : 'nftables'
+    };
+
+    // Restore original rules
+    const restoreResult = await restoreAuditSession(auditHost, session.backup_path);
+
+    if (!restoreResult.success) {
+      throw new Error(`Restore failed: ${restoreResult.stderr}`);
+    }
+
+    // Retrieve and parse logs
+    let logContent = '';
+    if (session.log_file_path) {
+      const localLogPath = path.join(os.tmpdir(), `audit_log_${session.id}_${Date.now()}.log`);
+      const retrieveResult = await retrieveAuditLogs(auditHost, session.log_file_path, localLogPath);
+      
+      if (retrieveResult.success && fs.existsSync(localLogPath)) {
+        logContent = fs.readFileSync(localLogPath, 'utf8');
+        fs.unlinkSync(localLogPath);
+      }
+    }
+
+    const parsedEntries = parseFirewallLogs(logContent);
+    const flows = groupCommunicationFlows(parsedEntries);
+
+    // Update session
+    await pool.query(
+      `UPDATE firewall_audit_sessions 
+       SET status = 'COMPLETED', restored_at = now(), log_data = $1
+       WHERE id = $2`,
+      [JSON.stringify({ entries: parsedEntries, flows }), session.id]
+    );
+
+    res.json({ success: true, flows, entryCount: parsedEntries.length });
+
+  } catch (error: any) {
+    res.status(500).json({ error: 'restore_failed', message: error.message });
+  } finally {
+    if (fs.existsSync(tempKeyPath)) {
+      try { fs.unlinkSync(tempKeyPath); } catch {}
+    }
+  }
+});
+
+// Get parsed log data
+troubleshootRouter.get('/audit/sessions/:id/logs', async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT log_data FROM firewall_audit_sessions WHERE id = $1`,
+    [req.params.id]
+  );
+  if (!rows[0]) {
+    return res.status(404).json({ error: 'not_found' });
+  }
+  res.json({ logData: rows[0].log_data });
+});
+
+// Cancel running session
+troubleshootRouter.post('/audit/sessions/:id/cancel', requireRole('operator', 'admin'), async (req, res) => {
+  const sessionRes = await pool.query(
+    `SELECT fas.*, h.hostname, h.mgmt_ip, h.ssh_port, h.firewall_backend
+     FROM firewall_audit_sessions fas
+     JOIN hosts h ON h.id = fas.host_id
+     WHERE fas.id = $1 AND fas.status = 'RUNNING'`,
+    [req.params.id]
+  );
+
+  if (!sessionRes.rows[0]) {
+    return res.status(404).json({ error: 'not_found', message: 'Session not found or not running' });
+  }
+
+  const session = sessionRes.rows[0];
+
+  // Get SSH credentials
+  const credRes = await pool.query(
+    `SELECT * FROM ssh_credentials WHERE scope_type='GLOBAL' ORDER BY created_at DESC LIMIT 1`
+  );
+  const cred = credRes.rows[0];
+  if (!cred) {
+    return res.status(400).json({ error: 'missing_ssh_credential' });
+  }
+
+  const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
+  const tempKeyPath = path.join(os.tmpdir(), `audit_cancel_${session.id}_${Date.now()}`);
+
+  try {
+    fs.writeFileSync(tempKeyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
+
+    const auditHost: AuditSshHost = {
+      hostname: session.hostname,
+      ip: String(session.mgmt_ip),
+      port: session.ssh_port || 22,
+      username: cred.username,
+      privateKeyPath: tempKeyPath,
+      backend: session.firewall_backend === 'iptables' ? 'iptables' : 'nftables'
+    };
+
+    // Restore original rules
+    await restoreAuditSession(auditHost, session.backup_path);
+
+    // Update session status
+    await pool.query(
+      `UPDATE firewall_audit_sessions SET status = 'CANCELLED' WHERE id = $1`,
+      [session.id]
+    );
+
+    res.json({ success: true });
+
+  } catch (error: any) {
+    res.status(500).json({ error: 'cancel_failed', message: error.message });
+  } finally {
+    if (fs.existsSync(tempKeyPath)) {
+      try { fs.unlinkSync(tempKeyPath); } catch {}
+    }
+  }
 });
 
