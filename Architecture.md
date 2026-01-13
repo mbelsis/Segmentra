@@ -12,6 +12,7 @@ This document provides detailed technical information about Segmentra's architec
 4. [Deployment Executors](#deployment-executors)
 5. [Firewall Backend Configuration](#firewall-backend-configuration)
 6. [Advanced Features](#advanced-features)
+   - [Firewall Learning (Traffic Discovery)](#firewall-learning-traffic-discovery)
    - [Drift Detection & Configuration Compliance](#drift-detection--configuration-compliance)
    - [Safety Guardrails](#safety-guardrails)
    - [High-Risk Policy Detection](#high-risk-policy-detection)
@@ -49,6 +50,8 @@ apps/
         policy-diff.ts         # Policy version comparison
         safety-check.ts        # Pre-deployment safety validation
         high-risk.ts           # High-risk policy detection
+        log-parser.ts          # Firewall log parsing for learning sessions
+        audit-scheduler.ts     # Background job for expired audit sessions
       lib/                     # Environment config
       index.ts                 # Express app entry point
   web/                         # React UI (Vite)
@@ -68,18 +71,20 @@ packages/
     migrations/
       001_init.sql
       007_add_scheduled_deployments.sql
+      008_add_firewall_audit_sessions.sql
     scripts/
       seed-roles.js
   shared/                      # shared TS types
   compiler/                    # nftables/iptables rendering
     src/
-      compile.ts
+      compile.ts               # Supports logOnlyMode for firewall learning
   executor/                    # Ansible CLI runner + SSH direct executor
     src/
       run-ansible.ts
       run-ssh.ts
       read-rules.ts            # SSH-based firewall rule reading
       check-host-readiness.ts  # Host capability verification
+      audit-ssh.ts             # Firewall learning/audit session management
       types.ts                 # Shared executor types
 docker-compose.yml             # Postgres + app + ansible-runner
 ```
@@ -242,6 +247,23 @@ Base URL: `http://localhost:8080/api`
 - `POST /troubleshoot/simulate-communication` — Simulate communication between two IPs
   - Body: `{ sourceIp, sourcePort?, destIp, destPort?, protocol? }`
   - Returns: Analysis of whether communication would be blocked, matching rules, and host information
+
+#### Firewall Learning (Audit Sessions)
+
+- `POST /troubleshoot/audit/start` — Start firewall learning session(s) (Operator/Admin role required)
+  - Body: `{ hosts: string[], durationMinutes: number }`
+  - Creates audit sessions for specified hosts, backs up existing rules, deploys log-only policy
+  - Returns: `{ sessions: Array<{ id, host_id, status, duration_minutes, scheduled_restore_at, ... }> }`
+- `GET /troubleshoot/audit/sessions` — List all audit sessions
+  - Returns: `{ sessions: Array<{ id, host_id, status, duration_minutes, started_at, restored_at, log_data?, ... }> }`
+- `GET /troubleshoot/audit/sessions/:id` — Get audit session details
+- `POST /troubleshoot/audit/sessions/:id/restore` — Manually trigger restore (Operator/Admin role required)
+  - Restores original firewall rules and retrieves/parses logs
+  - Returns: `{ success: boolean, flows: Array<{ direction, sourceIp, destinationIp, protocol, count, ... }>, entryCount: number }`
+- `GET /troubleshoot/audit/sessions/:id/logs` — Get parsed log data
+  - Returns: `{ logData: { entries: Array<...>, flows: Array<...> } }`
+- `POST /troubleshoot/audit/sessions/:id/cancel` — Cancel running session (Operator/Admin role required)
+  - Restores original rules and marks session as CANCELLED
 
 ### SSH Credentials (Admin role required)
 
@@ -507,6 +529,20 @@ Migrations live in `packages/db/migrations/`.
 
 ### System Settings
 
+#### `firewall_audit_sessions`
+- `id` (uuid, PK)
+- `host_id` (uuid, FK → hosts.id)
+- `status` (text) — `RUNNING|COMPLETED|FAILED|CANCELLED`
+- `duration_minutes` (integer)
+- `started_at` (timestamptz)
+- `scheduled_restore_at` (timestamptz)
+- `restored_at` (timestamptz, nullable)
+- `backup_path` (text) — Path to backup file on remote server
+- `log_file_path` (text) — Path to log file on remote server
+- `log_data` (jsonb, nullable) — Parsed log entries and communication flows
+- `created_by` (uuid, FK → users.id)
+- `created_at` (timestamptz)
+
 #### `system_settings`
 - `key` (text, PK) — e.g., `deployment_executor`, `management_vlan_id`
 - `value` (text)
@@ -628,6 +664,84 @@ This runs the `docker` CLI command from inside the API container, which communic
 ---
 
 ## Advanced Features
+
+### Firewall Learning (Traffic Discovery)
+
+Firewall Learning is a powerful feature that helps administrators discover the correct firewall rules by observing actual network traffic patterns. This is particularly useful when deploying firewall policies to new systems or when you need to understand what traffic should be allowed without accidentally blocking legitimate communication.
+
+#### How It Works
+
+1. **Session Creation**: User selects one or more hosts and specifies a duration (e.g., 60 minutes)
+2. **Backup**: System automatically backs up existing firewall rules to `/var/backups/segmentra/`
+3. **Log-Only Policy Deployment**: 
+   - Compiles a log-only firewall policy that logs all traffic but doesn't block anything
+   - Changes default policy from `DROP` to `ACCEPT` (nftables) or `DROP` to `ACCEPT` (iptables)
+   - Adds logging rules before each action to capture traffic details
+   - Configures rsyslog to write FW-AUDIT logs to custom log file (`/var/log/segmentra-audit-*.log`)
+4. **Traffic Collection**: System collects traffic logs for the specified duration
+5. **Automatic Restore**: Background scheduler automatically restores original firewall rules when duration expires
+6. **Log Retrieval & Parsing**: System retrieves log file, parses entries, and groups into communication flows
+7. **Results Display**: User can view parsed communication flows showing:
+   - Direction (IN/OUT)
+   - Source and destination IPs
+   - Protocol (TCP/UDP/ICMP)
+   - Port numbers
+   - Traffic counts
+   - First and last seen timestamps
+
+#### Technical Implementation
+
+- **Compiler Enhancement**: `packages/compiler/src/compile.ts` supports `logOnlyMode` parameter
+  - When enabled, changes default policies to ACCEPT
+  - Adds logging rules before each action
+  - Includes catch-all logging rules for all remaining traffic
+- **Executor Functions**: `packages/executor/src/audit-ssh.ts` provides:
+  - `startAuditSession()` - Backs up rules and configures logging
+  - `deployLogOnlyPolicy()` - Deploys log-only firewall policy
+  - `restoreAuditSession()` - Restores original rules from backup
+  - `retrieveAuditLogs()` - Copies log file from remote server
+- **Log Parser**: `apps/api/src/services/log-parser.ts` parses firewall logs:
+  - Supports both nftables and iptables log formats
+  - Extracts IP addresses, ports, protocols, directions
+  - Groups entries into communication flows with counts
+- **Scheduler**: `apps/api/src/services/audit-scheduler.ts` processes expired sessions:
+  - Runs every minute to check for sessions that need restoration
+  - Automatically restores rules, retrieves logs, and parses results
+- **Database**: `firewall_audit_sessions` table stores session state and parsed log data
+
+#### Logging Configuration
+
+- **nftables**: Configures rsyslog to capture kernel messages with "FW-AUDIT" prefix
+- **iptables**: Configures rsyslog to capture LOG target messages with "FW-AUDIT" prefix
+- Logs are written to `/var/log/segmentra-audit-<hostname>-<timestamp>.log` on remote servers
+- rsyslog configuration is automatically cleaned up during restore
+
+#### Usage
+
+- **UI**: Navigate to Troubleshoot → Firewall Learning
+  - Add hosts by hostname or IP address
+  - Specify duration in minutes (1-1440, max 24 hours)
+  - Click "Start Audit" to begin
+  - View active sessions with countdown timers
+  - After completion, select server from dropdown to view communication flows
+- **API**: Use `/api/troubleshoot/audit/*` endpoints for programmatic access
+
+#### Benefits
+
+- **Zero-Risk Discovery**: Observe traffic without blocking anything
+- **Automatic Restoration**: Original rules are automatically restored after duration
+- **Multi-Server Support**: Run learning sessions on multiple servers simultaneously
+- **Parsed Results**: Communication flows are automatically parsed and grouped
+- **Session Persistence**: Sessions persist across page refreshes and API restarts
+- **Manual Control**: Can manually cancel or restore sessions if needed
+
+#### Limitations
+
+- Requires SSH access and passwordless sudo on target hosts
+- Log file size depends on traffic volume (may be large for busy servers)
+- Log parsing may be slow for very large log files
+- rsyslog configuration changes require sudo access
+- Background processes for log capture may not persist across system reboots (logs are written directly to file)
 
 ### Drift Detection & Configuration Compliance
 

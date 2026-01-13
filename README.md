@@ -109,6 +109,16 @@ Segmentra is an on‑prem, web-based **fleet firewall & microsegmentation manage
 ### 🛠️ Troubleshooting
 Segmentra provides comprehensive troubleshooting tools to help diagnose and resolve firewall policy issues. The **Communication Simulation** feature allows you to test whether communication between two IP addresses would be blocked by deployed firewall policies. Simply enter the source IP, destination IP, optional ports, and protocol, and the system will analyze all deployed policies on both hosts to determine if the traffic would be allowed or blocked, showing you exactly which rules match and their actions.
 
+**Firewall Learning** is a powerful feature that helps you discover the correct firewall rules by observing actual network traffic. Deploy log-only firewall rules to one or more servers for a specified duration (e.g., 60 minutes). The system will:
+- Automatically backup existing firewall rules
+- Deploy log-only rules that capture all network traffic without blocking
+- Collect traffic logs for the specified duration
+- Automatically restore original firewall rules after the duration expires
+- Parse and display communication flows showing source/destination IPs, protocols, ports, and traffic counts
+- Support multiple servers simultaneously with separate results per server
+
+This is ideal for understanding what traffic patterns exist before creating firewall policies, ensuring you don't accidentally block legitimate communication.
+
 Additional troubleshooting capabilities include:
 - **Policy Troubleshooting**: Query which policies apply to specific IPs
 - **Host Policy View**: See all policies deployed to a specific host

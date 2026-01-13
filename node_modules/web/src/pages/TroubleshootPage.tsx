@@ -80,7 +80,7 @@ export function TroubleshootPage() {
     }
   }
 
-  // Firewall Audit state
+  // Firewall Learning state
   const [auditHosts, setAuditHosts] = useState<string[]>([]);
   const [auditHostInput, setAuditHostInput] = useState('');
   const [auditDuration, setAuditDuration] = useState(60);
@@ -184,9 +184,9 @@ export function TroubleshootPage() {
         Simulate communication between IPs, search for policies by IP address, find policies deployed to a host, or find hosts with a specific policy.
       </p>
 
-      {/* Firewall Audit Section */}
+      {/* Firewall Learning Section */}
       <div className="card" style={{ marginBottom: 24 }}>
-        <h2 style={{ marginTop: 0 }}>Firewall Audit</h2>
+        <h2 style={{ marginTop: 0 }}>Firewall Learning</h2>
         <p style={{ color: '#666', marginBottom: 16 }}>
           Deploy log-only firewall rules to capture all network traffic without blocking. After the specified duration, original rules will be restored and communication flows will be displayed.
         </p>
