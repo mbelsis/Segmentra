@@ -82,7 +82,8 @@ export function TroubleshootPage() {
 
   // Firewall Learning state
   const [auditHosts, setAuditHosts] = useState<string[]>([]);
-  const [auditHostInput, setAuditHostInput] = useState('');
+  const [auditHostFilter, setAuditHostFilter] = useState('');
+  const [showHostDropdown, setShowHostDropdown] = useState(false);
   const [auditDuration, setAuditDuration] = useState(60);
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditSessions, setAuditSessions] = useState<any[]>([]);
@@ -90,9 +91,9 @@ export function TroubleshootPage() {
   const [auditError, setAuditError] = useState<string | null>(null);
   const [allHosts, setAllHosts] = useState<any[]>([]);
 
-  // Load all hosts for selection
+  // Load all hosts for selection (only enabled hosts)
   useEffect(() => {
-    api.hosts({ limit: 1000 }).then((res) => {
+    api.hosts({ enabled: true, limit: 1000 }).then((res) => {
       setAllHosts(res.hosts);
     });
   }, []);
@@ -141,26 +142,28 @@ export function TroubleshootPage() {
     }
   }
 
-  function addHostToAudit() {
-    const input = auditHostInput.trim();
-    if (!input) return;
-
-    // Try to find host by hostname or IP
-    const host = allHosts.find(
-      (h) => h.hostname.toLowerCase() === input.toLowerCase() || h.mgmt_ip === input || h.id === input
-    );
-
-    if (host && !auditHosts.includes(host.id)) {
-      setAuditHosts([...auditHosts, host.id]);
-      setAuditHostInput('');
-    } else if (!host) {
-      setAuditError(`Host "${input}" not found`);
+  function addHostToAudit(hostId: string) {
+    if (!auditHosts.includes(hostId)) {
+      setAuditHosts([...auditHosts, hostId]);
+      setAuditHostFilter(''); // Clear filter after selection
+      setShowHostDropdown(false); // Hide dropdown after selection
     }
   }
 
   function removeHostFromAudit(hostId: string) {
     setAuditHosts(auditHosts.filter((id) => id !== hostId));
   }
+
+  // Filter hosts based on search input
+  const filteredHosts = allHosts.filter((host) => {
+    if (!auditHostFilter.trim()) return true;
+    const filter = auditHostFilter.toLowerCase();
+    return (
+      host.hostname.toLowerCase().includes(filter) ||
+      (host.mgmt_ip && String(host.mgmt_ip).toLowerCase().includes(filter)) ||
+      host.id.toLowerCase().includes(filter)
+    );
+  });
 
   function formatTimeRemaining(session: any): string {
     if (session.status !== 'RUNNING') return '';
@@ -193,19 +196,73 @@ export function TroubleshootPage() {
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: 16, marginBottom: 16 }}>
           <div>
-            <label style={{ display: 'block', marginBottom: 8, fontWeight: 500 }}>Hostname or IP *</label>
-            <div style={{ display: 'flex', gap: 8 }}>
+            <label style={{ display: 'block', marginBottom: 8, fontWeight: 500 }}>Select Host *</label>
+            <div style={{ position: 'relative' }}>
               <input
                 type="text"
-                value={auditHostInput}
-                onChange={(e) => setAuditHostInput(e.target.value)}
-                onKeyPress={(e) => e.key === 'Enter' && addHostToAudit()}
-                placeholder="e.g., web-server-01 or 192.168.1.10"
-                style={{ flex: 1, padding: '8px', border: '1px solid #ddd', borderRadius: 4 }}
+                value={auditHostFilter}
+                onChange={(e) => {
+                  setAuditHostFilter(e.target.value);
+                  setShowHostDropdown(true);
+                }}
+                onFocus={() => setShowHostDropdown(true)}
+                onBlur={() => {
+                  // Delay hiding to allow clicks on dropdown items
+                  setTimeout(() => setShowHostDropdown(false), 200);
+                }}
+                placeholder="Search hostname or IP..."
+                style={{ width: '100%', padding: '8px', border: '1px solid #ddd', borderRadius: 4 }}
               />
-              <button onClick={addHostToAudit} className="btn-primary" style={{ whiteSpace: 'nowrap' }}>
-                Add
-              </button>
+              {showHostDropdown && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: '100%',
+                    left: 0,
+                    right: 0,
+                    background: 'white',
+                    border: '1px solid #ddd',
+                    borderRadius: 4,
+                    marginTop: 4,
+                    maxHeight: '200px',
+                    overflowY: 'auto',
+                    zIndex: 1000,
+                    boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+                  }}
+                  onMouseDown={(e) => e.preventDefault()} // Prevent blur when clicking dropdown
+                >
+                  {filteredHosts.length === 0 ? (
+                    <div style={{ padding: '8px', color: '#666', fontStyle: 'italic' }}>No hosts found</div>
+                  ) : filteredHosts.filter((host) => !auditHosts.includes(host.id)).length === 0 ? (
+                    <div style={{ padding: '8px', color: '#666', fontStyle: 'italic' }}>
+                      All available hosts are already selected
+                    </div>
+                  ) : (
+                    filteredHosts
+                      .filter((host) => !auditHosts.includes(host.id)) // Don't show already selected hosts
+                      .map((host) => (
+                        <div
+                          key={host.id}
+                          onClick={() => addHostToAudit(host.id)}
+                          style={{
+                            padding: '8px 12px',
+                            cursor: 'pointer',
+                            borderBottom: '1px solid #f0f0f0'
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.background = '#f5f5f5';
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.background = 'white';
+                          }}
+                        >
+                          <strong>{host.hostname}</strong>
+                          {host.mgmt_ip && <span style={{ color: '#666', marginLeft: 8 }}>| {host.mgmt_ip}</span>}
+                        </div>
+                      ))
+                  )}
+                </div>
+              )}
             </div>
           </div>
           <div>
@@ -240,6 +297,7 @@ export function TroubleshootPage() {
                     }}
                   >
                     {host?.hostname || hostId}
+                    {host?.mgmt_ip && <span style={{ color: '#666', marginLeft: 4 }}>| {host.mgmt_ip}</span>}
                     <button
                       onClick={() => removeHostFromAudit(hostId)}
                       style={{
