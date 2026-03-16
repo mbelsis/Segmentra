@@ -26,6 +26,12 @@ tagsRouter.post('/', requireRole('operator', 'admin'), async (req, res) => {
     `INSERT INTO tags (name, description) VALUES ($1, $2) RETURNING *`,
     [parsed.data.name, parsed.data.description ?? null]
   );
+  await pool.query(
+    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
+    [req.auth!.username, 'TAG_CREATE', 'tag', rows[0].id, JSON.stringify({ name: parsed.data.name })]
+  );
+
   res.status(201).json({ tag: rows[0] });
 });
 
@@ -41,12 +47,26 @@ tagsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
     [req.params.id, parsed.data.name ?? null, parsed.data.description ?? null]
   );
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
+
+  await pool.query(
+    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
+    [req.auth!.username, 'TAG_UPDATE', 'tag', req.params.id, JSON.stringify({ tagId: req.params.id, changes: parsed.data })]
+  );
+
   res.json({ tag: rows[0] });
 });
 
 tagsRouter.delete('/:id', requireRole('operator', 'admin'), async (req, res) => {
   const { rowCount } = await pool.query(`DELETE FROM tags WHERE id=$1`, [req.params.id]);
   if (!rowCount) return res.status(404).json({ error: 'not_found' });
+
+  await pool.query(
+    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
+    [req.auth!.username, 'TAG_DELETE', 'tag', req.params.id, JSON.stringify({ tagId: req.params.id })]
+  );
+
   res.json({ ok: true });
 });
 

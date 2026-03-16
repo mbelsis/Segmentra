@@ -109,6 +109,13 @@ tagRulesRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) =>
     ]
   );
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
+
+  await pool.query(
+    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
+    [req.auth!.username, 'TAG_RULE_UPDATE', 'tag_rule', req.params.id, JSON.stringify({ name: rows[0].name })]
+  );
+
   res.json({ tagRule: rows[0] });
 });
 
@@ -118,6 +125,13 @@ tagRulesRouter.delete('/:id', requireRole('operator', 'admin'), async (req, res)
   await pool.query(`DELETE FROM host_tags WHERE source = 'rule' AND source_rule_id = $1`, [req.params.id]);
   const { rowCount } = await pool.query(`DELETE FROM tag_rules WHERE id = $1`, [req.params.id]);
   if (!rowCount) return res.status(404).json({ error: 'not_found' });
+
+  await pool.query(
+    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
+    [req.auth!.username, 'TAG_RULE_DELETE', 'tag_rule', req.params.id, JSON.stringify({ ruleId: req.params.id })]
+  );
+
   res.json({ ok: true });
 });
 

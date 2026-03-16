@@ -63,6 +63,8 @@ integrationsRouter.put('/:id', requireRole('admin'), async (req, res) => {
         b.credentialsSecretId ?? null]);
     if (!rows[0])
         return res.status(404).json({ error: 'not_found' });
+    await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`, [req.auth.username, 'INTEGRATION_UPDATE', 'integration', req.params.id, JSON.stringify({ name: rows[0].name })]);
     res.json({ integration: rows[0] });
 });
 // Delete integration
@@ -70,6 +72,8 @@ integrationsRouter.delete('/:id', requireRole('admin'), async (req, res) => {
     const { rowCount } = await pool.query(`DELETE FROM integrations WHERE id = $1`, [req.params.id]);
     if (!rowCount)
         return res.status(404).json({ error: 'not_found' });
+    await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`, [req.auth.username, 'INTEGRATION_DELETE', 'integration', req.params.id, JSON.stringify({ integrationId: req.params.id })]);
     res.json({ ok: true });
 });
 // Test integration connectivity
@@ -81,6 +85,8 @@ integrationsRouter.post('/:id/test', requireRole('admin'), async (req, res) => {
     await pool.query(`INSERT INTO integration_events (integration_id, direction, event_type, payload, status)
      VALUES ($1, 'outbound', 'connectivity_test', '{}', 'SUCCESS')`, [req.params.id]);
     await pool.query(`UPDATE integrations SET last_sync_at = now(), last_sync_status = 'connected' WHERE id = $1`, [req.params.id]);
+    await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`, [req.auth.username, 'INTEGRATION_TEST', 'integration', req.params.id, JSON.stringify({ integrationId: req.params.id })]);
     res.json({ success: true, message: 'Integration connectivity test passed' });
 });
 // Sync integration
@@ -91,6 +97,8 @@ integrationsRouter.post('/:id/sync', requireRole('admin'), async (req, res) => {
     await pool.query(`UPDATE integrations SET last_sync_at = now(), last_sync_status = 'synced' WHERE id = $1`, [req.params.id]);
     await pool.query(`INSERT INTO integration_events (integration_id, direction, event_type, payload, status)
      VALUES ($1, 'inbound', 'sync', '{}', 'SUCCESS')`, [req.params.id]);
+    await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`, [req.auth.username, 'INTEGRATION_SYNC', 'integration', req.params.id, JSON.stringify({ integrationId: req.params.id })]);
     res.json({ success: true, message: 'Integration sync completed' });
 });
 // Get integration events

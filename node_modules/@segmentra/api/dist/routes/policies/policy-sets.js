@@ -42,6 +42,8 @@ policySetsRouter.post('/', requireRole('operator', 'admin'), async (req, res) =>
                 await client.query(`INSERT INTO policy_set_hosts (policy_set_id, host_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [policySet.id, hostId]);
             }
         }
+        await client.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+       VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`, [req.auth.username, 'POLICY_SET_CREATE', 'policy_set', policySet.id, JSON.stringify({ name: b.name, scopeType: b.scopeType })]);
         await client.query('COMMIT');
         res.status(201).json({ policySet });
     }
@@ -76,6 +78,8 @@ policySetsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) 
      RETURNING *`, [req.params.id, b.name ?? null, b.description ?? null, b.scopeType ?? null, b.scopeTagId ?? null, b.scopeVlanId ?? null]);
     if (!rows[0])
         return res.status(404).json({ error: 'not_found' });
+    await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`, [req.auth.username, 'POLICY_SET_UPDATE', 'policy_set', req.params.id, JSON.stringify({ policySetId: req.params.id })]);
     res.json({ policySet: rows[0] });
 });
 policySetsRouter.delete('/:id', requireRole('operator', 'admin'), async (req, res) => {
@@ -83,5 +87,7 @@ policySetsRouter.delete('/:id', requireRole('operator', 'admin'), async (req, re
     const { rowCount } = await pool.query(`DELETE FROM policy_sets WHERE id=$1`, [req.params.id]);
     if (!rowCount)
         return res.status(404).json({ error: 'not_found' });
+    await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`, [req.auth.username, 'POLICY_SET_DELETE', 'policy_set', req.params.id, JSON.stringify({ policySetId: req.params.id })]);
     res.json({ ok: true });
 });

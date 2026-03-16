@@ -53,6 +53,12 @@ topologyRouter.post('/views', requireRole('operator', 'admin'), async (req, res)
      VALUES ($1, $2, $3, $4) RETURNING *`,
     [b.name, b.description ?? null, JSON.stringify(b.layoutData ?? { nodes: [], edges: [] }), userId]
   );
+  await pool.query(
+    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [userId, 'TOPOLOGY_VIEW_CREATE', 'topology_view', rows[0].id, JSON.stringify({ name: b.name })]
+  );
+
   res.status(201).json({ view: rows[0] });
 });
 
@@ -72,6 +78,13 @@ topologyRouter.put('/views/:id', requireRole('operator', 'admin'), async (req, r
     [req.params.id, b.name ?? null, b.description ?? null, b.layoutData ? JSON.stringify(b.layoutData) : null]
   );
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
+
+  await pool.query(
+    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
+    [req.auth!.username, 'TOPOLOGY_VIEW_UPDATE', 'topology_view', req.params.id, JSON.stringify({ viewId: req.params.id })]
+  );
+
   res.json({ view: rows[0] });
 });
 
@@ -79,6 +92,13 @@ topologyRouter.put('/views/:id', requireRole('operator', 'admin'), async (req, r
 topologyRouter.delete('/views/:id', requireRole('operator', 'admin'), async (req, res) => {
   const { rowCount } = await pool.query(`DELETE FROM topology_views WHERE id = $1`, [req.params.id]);
   if (!rowCount) return res.status(404).json({ error: 'not_found' });
+
+  await pool.query(
+    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
+    [req.auth!.username, 'TOPOLOGY_VIEW_DELETE', 'topology_view', req.params.id, JSON.stringify({ viewId: req.params.id })]
+  );
+
   res.json({ ok: true });
 });
 

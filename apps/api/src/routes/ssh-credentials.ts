@@ -51,6 +51,12 @@ sshCredentialsRouter.post('/', async (req, res) => {
      RETURNING *`,
     [b.name, b.username, keySecret.id, passSecret?.id ?? null, b.scopeType, b.scopeId ?? null]
   );
+  await pool.query(
+    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
+    [req.auth!.username, 'SSH_CREDENTIAL_CREATE', 'ssh_credential', rows[0].id, JSON.stringify({ name: b.name, username: b.username, scopeType: b.scopeType })]
+  );
+
   res.status(201).json({ sshCredential: rows[0] });
 });
 

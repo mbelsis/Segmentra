@@ -67,6 +67,12 @@ policyRulesRouter.post('/policy-versions/:versionId/rules', requireRole('operato
       b.interfaceScopeNames ?? null
     ]
   );
+  await pool.query(
+    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
+    [req.auth!.username, 'POLICY_RULE_CREATE', 'policy_rule', rows[0].id, JSON.stringify({ versionId: req.params.versionId, direction: b.direction, action: b.action, protocol: b.protocol, ports: b.ports ?? null, sourceType: b.sourceType })]
+  );
+
   res.status(201).json({ rule: rows[0] });
 });
 
@@ -121,6 +127,13 @@ policyRulesRouter.put('/policy-rules/:ruleId', requireRole('operator', 'admin'),
     ]
   );
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
+
+  await pool.query(
+    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
+    [req.auth!.username, 'POLICY_RULE_UPDATE', 'policy_rule', req.params.ruleId, JSON.stringify({ ruleId: req.params.ruleId })]
+  );
+
   res.json({ rule: rows[0] });
 });
 
@@ -139,6 +152,13 @@ policyRulesRouter.delete('/policy-rules/:ruleId', requireRole('operator', 'admin
 
   const { rowCount } = await pool.query(`DELETE FROM policy_rules WHERE id=$1`, [req.params.ruleId]);
   if (!rowCount) return res.status(404).json({ error: 'not_found' });
+
+  await pool.query(
+    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
+    [req.auth!.username, 'POLICY_RULE_DELETE', 'policy_rule', req.params.ruleId, JSON.stringify({ ruleId: req.params.ruleId })]
+  );
+
   res.json({ ok: true });
 });
 

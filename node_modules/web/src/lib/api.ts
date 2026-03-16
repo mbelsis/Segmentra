@@ -448,9 +448,10 @@ export const api = {
     },
     getSession: (id: string) => request<{ session: any }>(`/policy-test/sessions/${id}`),
     start: (b: { policyVersionId: string; hostId: string; durationMinutes?: number }) =>
-      request<{ session: any; compiled?: any }>('/policy-test/start', { method: 'POST', body: JSON.stringify(b) }),
-    stop: (id: string) => request<{ session: any }>(`/policy-test/sessions/${id}/stop`, { method: 'POST' }),
-    analyze: (id: string) => request<{ analysis: any }>(`/policy-test/sessions/${id}/analyze`, { method: 'POST' }),
+      request<{ session: any; message: string; compiled?: any }>('/policy-test/start', { method: 'POST', body: JSON.stringify(b) }),
+    stop: (id: string) => request<{ session: any; message: string; flowCount: number; entryCount: number }>(`/policy-test/sessions/${id}/stop`, { method: 'POST' }),
+    collectLogs: (id: string) => request<{ message: string; flowCount: number; entryCount: number; flows: any[] }>(`/policy-test/sessions/${id}/collect-logs`, { method: 'POST' }),
+    analyze: (id: string) => request<{ analysis: any; message: string }>(`/policy-test/sessions/${id}/analyze`, { method: 'POST' }),
   },
 
   // === Capability 7: Kubernetes ===

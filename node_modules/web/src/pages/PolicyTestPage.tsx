@@ -6,13 +6,23 @@ const STATUS_COLORS: Record<string, string> = {
   ANALYZING: '#673AB7', COMPLETED: '#4CAF50', FAILED: '#f44336',
 };
 
+const STATUS_DESCRIPTIONS: Record<string, string> = {
+  DEPLOYING: 'Connecting to host via SSH, backing up current rules, deploying log-only policy...',
+  RUNNING: 'Log-only policy is active on the host. All traffic is being logged (nothing blocked). Original rules will be restored automatically when the timer expires.',
+  COLLECTING: 'Original rules restored. Traffic logs collected. Ready for analysis.',
+  COMPLETED: 'Analysis complete. See results below.',
+  FAILED: 'Test failed. Check error details.',
+};
+
 export function PolicyTestPage() {
   const [sessions, setSessions] = useState<any[]>([]);
   const [selectedSession, setSelectedSession] = useState<any>(null);
   const [hosts, setHosts] = useState<any[]>([]);
   const [policyVersions, setPolicyVersions] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState('');
+  const [statusMessage, setStatusMessage] = useState('');
   const [showStart, setShowStart] = useState(false);
   const [startForm, setStartForm] = useState({ policyVersionId: '', hostId: '', durationMinutes: 30 });
 
@@ -31,6 +41,14 @@ export function PolicyTestPage() {
 
   useEffect(() => { load(); }, []);
 
+  // Auto-refresh running sessions every 30 seconds
+  useEffect(() => {
+    const hasRunning = sessions.some(s => s.status === 'RUNNING' || s.status === 'DEPLOYING');
+    if (!hasRunning) return;
+    const timer = setInterval(() => { load(); }, 30000);
+    return () => clearInterval(timer);
+  }, [sessions]);
+
   const loadPolicyVersions = async () => {
     try {
       const psRes = await api.policySets();
@@ -46,6 +64,9 @@ export function PolicyTestPage() {
   };
 
   const startTest = async () => {
+    setActionLoading(true);
+    setError('');
+    setStatusMessage('');
     try {
       const result = await api.policyTest.start({
         policyVersionId: startForm.policyVersionId,
@@ -54,71 +75,140 @@ export function PolicyTestPage() {
       });
       setShowStart(false);
       setStartForm({ policyVersionId: '', hostId: '', durationMinutes: 30 });
+      setStatusMessage(result.message);
       load();
       selectSession(result.session);
     } catch (e: any) { setError(e.message); }
+    setActionLoading(false);
   };
 
   const selectSession = async (s: any) => {
     try {
       const res = await api.policyTest.getSession(s.id);
       setSelectedSession(res.session);
+      setStatusMessage('');
     } catch (e: any) { setError(e.message); }
   };
 
   const stopSession = async (id: string) => {
+    setActionLoading(true);
+    setError('');
+    setStatusMessage('Restoring original rules and collecting traffic logs...');
     try {
-      await api.policyTest.stop(id);
+      const result = await api.policyTest.stop(id);
+      setStatusMessage(result.message);
       load();
       const res = await api.policyTest.getSession(id);
       setSelectedSession(res.session);
-    } catch (e: any) { setError(e.message); }
+    } catch (e: any) { setError(e.message); setStatusMessage(''); }
+    setActionLoading(false);
+  };
+
+  const collectLogs = async (id: string) => {
+    setActionLoading(true);
+    setError('');
+    setStatusMessage('Connecting to host to collect current logs...');
+    try {
+      const result = await api.policyTest.collectLogs(id);
+      setStatusMessage(result.message);
+      // Refresh session to get updated raw_log_data
+      const res = await api.policyTest.getSession(id);
+      setSelectedSession(res.session);
+    } catch (e: any) { setError(e.message); setStatusMessage(''); }
+    setActionLoading(false);
   };
 
   const analyzeSession = async (id: string) => {
+    setActionLoading(true);
+    setError('');
+    setStatusMessage('Analyzing collected traffic against policy rules...');
     try {
-      await api.policyTest.analyze(id);
+      const result = await api.policyTest.analyze(id);
+      setStatusMessage(result.message);
       const res = await api.policyTest.getSession(id);
       setSelectedSession(res.session);
       load();
-    } catch (e: any) { setError(e.message); }
+    } catch (e: any) { setError(e.message); setStatusMessage(''); }
+    setActionLoading(false);
   };
 
   if (loading) return <div>Loading...</div>;
 
-  const analysis = selectedSession?.analysis_results ? (typeof selectedSession.analysis_results === 'string' ? JSON.parse(selectedSession.analysis_results) : selectedSession.analysis_results) : null;
+  const analysis = selectedSession?.analysis_results
+    ? (typeof selectedSession.analysis_results === 'string' ? JSON.parse(selectedSession.analysis_results) : selectedSession.analysis_results)
+    : null;
+
+  const rawLogData = selectedSession?.raw_log_data
+    ? (typeof selectedSession.raw_log_data === 'string' ? JSON.parse(selectedSession.raw_log_data) : selectedSession.raw_log_data)
+    : null;
+
+  const timeRemaining = selectedSession?.status === 'RUNNING' && selectedSession?.scheduled_end_at
+    ? Math.max(0, Math.round((new Date(selectedSession.scheduled_end_at).getTime() - Date.now()) / 60000))
+    : null;
 
   return (
     <div>
       <h2>Policy Testing</h2>
-      {error && <div style={{ color: 'red', marginBottom: 8 }}>{error} <button onClick={() => setError('')}>dismiss</button></div>}
+      <p style={{ color: '#666', marginBottom: 16 }}>
+        Test a firewall policy against real traffic <strong>before enforcing it</strong>. The policy is deployed in log-only mode
+        (nothing gets blocked), traffic is captured, then analyzed to find gaps.
+      </p>
+
+      {error && <div style={{ color: 'red', marginBottom: 8, padding: 8, background: '#FFEBEE', borderRadius: 4 }}>{error} <button onClick={() => setError('')}>dismiss</button></div>}
+      {statusMessage && <div style={{ color: '#1565C0', marginBottom: 8, padding: 8, background: '#E3F2FD', borderRadius: 4 }}>{statusMessage}</div>}
 
       <div style={{ marginBottom: 16 }}>
         <button onClick={() => { setShowStart(true); loadPolicyVersions(); }}>+ Start Policy Test</button>
       </div>
 
       {showStart && (
-        <div style={{ border: '1px solid #ccc', padding: 16, marginBottom: 16, borderRadius: 4 }}>
+        <div style={{ border: '1px solid #ccc', padding: 16, marginBottom: 16, borderRadius: 4, background: '#FAFAFA' }}>
           <h3>Start Policy Test</h3>
+          <p style={{ fontSize: '0.9em', color: '#666', marginBottom: 12 }}>
+            Select a policy version and a target host. Segmentra will SSH into the host, backup its current firewall rules,
+            deploy your policy in <strong>log-only mode</strong> (all traffic logged, nothing blocked), wait for the specified duration
+            to capture real traffic, then automatically restore the original rules and let you analyze the results.
+          </p>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-            <select value={startForm.policyVersionId} onChange={e => setStartForm(f => ({ ...f, policyVersionId: e.target.value }))}>
-              <option value="">Select policy version...</option>
-              {policyVersions.map(v => <option key={v.id} value={v.id}>{v.policySetName} v{v.version_number} ({v.status})</option>)}
-            </select>
-            <select value={startForm.hostId} onChange={e => setStartForm(f => ({ ...f, hostId: e.target.value }))}>
-              <option value="">Select host...</option>
-              {hosts.map(h => <option key={h.id} value={h.id}>{h.hostname} ({h.mgmt_ip})</option>)}
-            </select>
-            <label>Duration (minutes): <input type="number" value={startForm.durationMinutes} onChange={e => setStartForm(f => ({ ...f, durationMinutes: parseInt(e.target.value) || 30 }))} min={1} max={1440} /></label>
+            <div>
+              <label style={{ fontSize: '0.85em', fontWeight: 'bold' }}>Policy Version</label>
+              <select value={startForm.policyVersionId} onChange={e => setStartForm(f => ({ ...f, policyVersionId: e.target.value }))} style={{ width: '100%' }}>
+                <option value="">Select policy version...</option>
+                {policyVersions.map(v => <option key={v.id} value={v.id}>{v.policySetName} v{v.version_number} ({v.status})</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={{ fontSize: '0.85em', fontWeight: 'bold' }}>Target Host</label>
+              <select value={startForm.hostId} onChange={e => setStartForm(f => ({ ...f, hostId: e.target.value }))} style={{ width: '100%' }}>
+                <option value="">Select host...</option>
+                {hosts.map(h => <option key={h.id} value={h.id}>{h.hostname} ({h.mgmt_ip})</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={{ fontSize: '0.85em', fontWeight: 'bold' }}>Duration (minutes)</label>
+              <input type="number" value={startForm.durationMinutes} onChange={e => setStartForm(f => ({ ...f, durationMinutes: parseInt(e.target.value) || 30 }))} min={1} max={1440} style={{ width: '100%' }} />
+            </div>
           </div>
-          <div style={{ marginTop: 8 }}>
-            <button onClick={startTest} disabled={!startForm.policyVersionId || !startForm.hostId}>Start Test</button>
+          <div style={{ marginTop: 12 }}>
+            <button onClick={startTest} disabled={!startForm.policyVersionId || !startForm.hostId || actionLoading}>
+              {actionLoading ? 'Deploying...' : 'Start Test'}
+            </button>
             <button onClick={() => setShowStart(false)} style={{ marginLeft: 8 }}>Cancel</button>
           </div>
         </div>
       )}
 
+      {/* Workflow Steps Indicator */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 16, fontSize: '0.85em' }}>
+        {['1. Deploy log-only', '2. Capture traffic', '3. Restore & collect', '4. Analyze gaps'].map((step, i) => (
+          <div key={i} style={{ flex: 1, textAlign: 'center', padding: '6px 4px', background: '#f5f5f5', borderRadius: 4, border: '1px solid #ddd' }}>
+            {step}
+          </div>
+        ))}
+      </div>
+
       <div style={{ display: 'flex', gap: 24 }}>
+        {/* Sessions list */}
         <div style={{ flex: 1 }}>
           <table style={{ width: '100%' }}>
             <thead><tr><th>Host</th><th>Policy</th><th>Status</th><th>Duration</th><th>Started</th><th>Actions</th></tr></thead>
@@ -127,73 +217,169 @@ export function PolicyTestPage() {
                 <tr key={s.id} onClick={() => selectSession(s)} style={{ cursor: 'pointer', background: selectedSession?.id === s.id ? '#e8f0fe' : undefined }}>
                   <td>{s.hostname}</td>
                   <td>{s.policy_set_name} v{s.version_number}</td>
-                  <td><span style={{ color: STATUS_COLORS[s.status] || '#000' }}>{s.status}</span></td>
+                  <td><span style={{ color: STATUS_COLORS[s.status] || '#000', fontWeight: 'bold' }}>{s.status}</span></td>
                   <td>{s.duration_minutes}m</td>
                   <td>{s.started_at ? new Date(s.started_at).toLocaleString() : '-'}</td>
-                  <td>
-                    {s.status === 'RUNNING' && <button onClick={(e) => { e.stopPropagation(); stopSession(s.id); }}>Stop</button>}
-                    {(s.status === 'COLLECTING' || s.status === 'RUNNING') && <button onClick={(e) => { e.stopPropagation(); analyzeSession(s.id); }} style={{ marginLeft: 4 }}>Analyze</button>}
+                  <td onClick={e => e.stopPropagation()}>
+                    {s.status === 'RUNNING' && (
+                      <>
+                        <button onClick={() => collectLogs(s.id)} disabled={actionLoading} style={{ fontSize: '0.85em' }}>Peek Logs</button>
+                        <button onClick={() => stopSession(s.id)} disabled={actionLoading} style={{ marginLeft: 4, fontSize: '0.85em' }}>Stop & Collect</button>
+                      </>
+                    )}
+                    {s.status === 'COLLECTING' && (
+                      <button onClick={() => analyzeSession(s.id)} disabled={actionLoading} style={{ fontSize: '0.85em', background: '#4CAF50', color: 'white', border: 'none', padding: '4px 12px', borderRadius: 4, cursor: 'pointer' }}>
+                        Analyze
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
-              {sessions.length === 0 && <tr><td colSpan={6}>No test sessions</td></tr>}
+              {sessions.length === 0 && <tr><td colSpan={6} style={{ textAlign: 'center', color: '#666' }}>No test sessions. Click "+ Start Policy Test" to begin.</td></tr>}
             </tbody>
           </table>
         </div>
 
-        {selectedSession && analysis && (
+        {/* Session detail panel */}
+        {selectedSession && (
           <div style={{ flex: 1, border: '1px solid #ccc', padding: 16, borderRadius: 4 }}>
-            <h3>Analysis Results</h3>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 16 }}>
-              <div style={{ textAlign: 'center', padding: 8, background: '#E8F5E9', borderRadius: 4 }}>
-                <div style={{ fontSize: '1.5em', fontWeight: 'bold', color: '#4CAF50' }}>{analysis.summary.matched}</div>
-                <div>Matched Flows</div>
-              </div>
-              <div style={{ textAlign: 'center', padding: 8, background: '#FFF3E0', borderRadius: 4 }}>
-                <div style={{ fontSize: '1.5em', fontWeight: 'bold', color: '#FF9800' }}>{analysis.summary.unexpectedAllows}</div>
-                <div>Unmatched (would block)</div>
-              </div>
-              <div style={{ textAlign: 'center', padding: 8, background: '#FFEBEE', borderRadius: 4 }}>
-                <div style={{ fontSize: '1.5em', fontWeight: 'bold', color: '#f44336' }}>{analysis.summary.unexpectedBlocks}</div>
-                <div>Unexpected Blocks</div>
-              </div>
-            </div>
-            <div style={{ marginBottom: 8 }}>
-              <strong>Coverage:</strong> {analysis.summary.coveragePercent}% | <strong>Total Flows:</strong> {analysis.summary.totalFlows}
+            <h3>{selectedSession.hostname} — {selectedSession.policy_set_name} v{selectedSession.version_number}</h3>
+
+            {/* Status description */}
+            <div style={{ padding: 8, marginBottom: 12, borderRadius: 4, background: selectedSession.status === 'RUNNING' ? '#FFF3E0' : selectedSession.status === 'COMPLETED' ? '#E8F5E9' : selectedSession.status === 'FAILED' ? '#FFEBEE' : '#F3E5F5' }}>
+              <strong style={{ color: STATUS_COLORS[selectedSession.status] }}>{selectedSession.status}</strong>
+              {timeRemaining !== null && <span style={{ marginLeft: 8 }}>({timeRemaining} min remaining)</span>}
+              <div style={{ fontSize: '0.85em', marginTop: 4 }}>{STATUS_DESCRIPTIONS[selectedSession.status] || ''}</div>
             </div>
 
-            {analysis.unexpectedAllows?.length > 0 && (
-              <>
-                <h4 style={{ color: '#FF9800' }}>Unmatched Flows (would be blocked by default-deny)</h4>
-                <table style={{ width: '100%', fontSize: '0.85em' }}>
-                  <thead><tr><th>Dir</th><th>Source</th><th>Dest</th><th>Proto</th><th>Port</th><th>Count</th></tr></thead>
-                  <tbody>
-                    {analysis.unexpectedAllows.slice(0, 20).map((u: any, i: number) => (
-                      <tr key={i} style={{ background: '#FFF8E1' }}>
-                        <td>{u.flow.direction}</td><td>{u.flow.sourceIp}</td><td>{u.flow.destinationIp}</td>
-                        <td>{u.flow.protocol}</td><td>{u.flow.destinationPort || '*'}</td><td>{u.flow.count}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </>
+            {/* Action buttons */}
+            <div style={{ marginBottom: 12 }}>
+              {selectedSession.status === 'RUNNING' && (
+                <>
+                  <button onClick={() => collectLogs(selectedSession.id)} disabled={actionLoading} style={{ marginRight: 8 }}>
+                    Peek at Logs (while running)
+                  </button>
+                  <button onClick={() => stopSession(selectedSession.id)} disabled={actionLoading}>
+                    Stop Test & Collect Logs
+                  </button>
+                </>
+              )}
+              {selectedSession.status === 'COLLECTING' && (
+                <button onClick={() => analyzeSession(selectedSession.id)} disabled={actionLoading}
+                  style={{ background: '#4CAF50', color: 'white', border: 'none', padding: '8px 20px', borderRadius: 4, cursor: 'pointer', fontSize: '1em' }}>
+                  Analyze Traffic vs. Policy Rules
+                </button>
+              )}
+            </div>
+
+            {/* Collected flows summary (before analysis) */}
+            {rawLogData && !analysis && (
+              <div style={{ marginBottom: 12 }}>
+                <h4>Collected Traffic</h4>
+                <p style={{ fontSize: '0.9em', color: '#666' }}>
+                  {rawLogData.entries?.length || 0} log entries parsed into {rawLogData.flows?.length || 0} unique flows.
+                  Click <strong>Analyze</strong> to compare these flows against your policy rules.
+                </p>
+                {rawLogData.flows?.length > 0 && (
+                  <table style={{ width: '100%', fontSize: '0.85em' }}>
+                    <thead><tr><th>Dir</th><th>Source</th><th>Dest</th><th>Proto</th><th>Port</th><th>Count</th></tr></thead>
+                    <tbody>
+                      {rawLogData.flows.slice(0, 10).map((f: any, i: number) => (
+                        <tr key={i}>
+                          <td>{f.direction}</td><td>{f.sourceIp}</td><td>{f.destinationIp}</td>
+                          <td>{f.protocol}</td><td>{f.destinationPort || '*'}</td><td>{f.count}</td>
+                        </tr>
+                      ))}
+                      {rawLogData.flows.length > 10 && <tr><td colSpan={6} style={{ color: '#666' }}>... and {rawLogData.flows.length - 10} more flows</td></tr>}
+                    </tbody>
+                  </table>
+                )}
+              </div>
             )}
 
-            {analysis.unexpectedBlocks?.length > 0 && (
+            {/* Analysis results */}
+            {analysis && (
               <>
-                <h4 style={{ color: '#f44336' }}>Unexpected Blocks (DENY rule matches active traffic)</h4>
-                <table style={{ width: '100%', fontSize: '0.85em' }}>
-                  <thead><tr><th>Dir</th><th>Source</th><th>Dest</th><th>Proto</th><th>Port</th><th>Blocking Rule</th></tr></thead>
-                  <tbody>
-                    {analysis.unexpectedBlocks.slice(0, 20).map((u: any, i: number) => (
-                      <tr key={i} style={{ background: '#FFEBEE' }}>
-                        <td>{u.flow.direction}</td><td>{u.flow.sourceIp}</td><td>{u.flow.destinationIp}</td>
-                        <td>{u.flow.protocol}</td><td>{u.flow.destinationPort || '*'}</td>
-                        <td>{u.blockingRule?.comment || `Rule #${u.blockingRule?.order_index}`}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                <h4>Analysis Results</h4>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 16 }}>
+                  <div style={{ textAlign: 'center', padding: 12, background: '#E8F5E9', borderRadius: 4 }}>
+                    <div style={{ fontSize: '2em', fontWeight: 'bold', color: '#4CAF50' }}>{analysis.summary.matched}</div>
+                    <div style={{ fontSize: '0.85em' }}>Matched Flows</div>
+                    <div style={{ fontSize: '0.75em', color: '#666' }}>Traffic covered by ALLOW rules</div>
+                  </div>
+                  <div style={{ textAlign: 'center', padding: 12, background: '#FFF3E0', borderRadius: 4 }}>
+                    <div style={{ fontSize: '2em', fontWeight: 'bold', color: '#FF9800' }}>{analysis.summary.unexpectedAllows}</div>
+                    <div style={{ fontSize: '0.85em' }}>Unmatched Flows</div>
+                    <div style={{ fontSize: '0.75em', color: '#666' }}>Default-deny would BLOCK these</div>
+                  </div>
+                  <div style={{ textAlign: 'center', padding: 12, background: '#FFEBEE', borderRadius: 4 }}>
+                    <div style={{ fontSize: '2em', fontWeight: 'bold', color: '#f44336' }}>{analysis.summary.unexpectedBlocks}</div>
+                    <div style={{ fontSize: '0.85em' }}>DENY Hits</div>
+                    <div style={{ fontSize: '0.75em', color: '#666' }}>Active traffic matching DENY rules</div>
+                  </div>
+                </div>
+
+                <div style={{ marginBottom: 12, padding: 8, background: '#f5f5f5', borderRadius: 4 }}>
+                  <strong>Coverage:</strong> {analysis.summary.coveragePercent}% of observed traffic is covered by ALLOW rules |
+                  <strong> Total Flows:</strong> {analysis.summary.totalFlows}
+                </div>
+
+                {analysis.unexpectedAllows?.length > 0 && (
+                  <>
+                    <h4 style={{ color: '#FF9800' }}>Unmatched Flows — would be BLOCKED by default-deny</h4>
+                    <p style={{ fontSize: '0.85em', color: '#666' }}>These flows have no matching rule. If you enforce this policy, this traffic will be dropped. Add ALLOW rules for any legitimate traffic.</p>
+                    <table style={{ width: '100%', fontSize: '0.85em' }}>
+                      <thead><tr><th>Dir</th><th>Source IP</th><th>Dest IP</th><th>Proto</th><th>Dest Port</th><th>Packet Count</th></tr></thead>
+                      <tbody>
+                        {analysis.unexpectedAllows.slice(0, 20).map((u: any, i: number) => (
+                          <tr key={i} style={{ background: '#FFF8E1' }}>
+                            <td>{u.flow.direction}</td><td>{u.flow.sourceIp}</td><td>{u.flow.destinationIp}</td>
+                            <td>{u.flow.protocol}</td><td>{u.flow.destinationPort || '*'}</td><td>{u.flow.count}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    {analysis.unexpectedAllows.length > 20 && <p style={{ color: '#666', fontSize: '0.85em' }}>Showing first 20 of {analysis.unexpectedAllows.length}</p>}
+                  </>
+                )}
+
+                {analysis.unexpectedBlocks?.length > 0 && (
+                  <>
+                    <h4 style={{ color: '#f44336', marginTop: 16 }}>DENY Rule Hits — active traffic that would be blocked</h4>
+                    <p style={{ fontSize: '0.85em', color: '#666' }}>These flows match a DENY rule in your policy, but the traffic is actively flowing. Enforcing this policy will break these connections.</p>
+                    <table style={{ width: '100%', fontSize: '0.85em' }}>
+                      <thead><tr><th>Dir</th><th>Source IP</th><th>Dest IP</th><th>Proto</th><th>Dest Port</th><th>Blocking Rule</th></tr></thead>
+                      <tbody>
+                        {analysis.unexpectedBlocks.slice(0, 20).map((u: any, i: number) => (
+                          <tr key={i} style={{ background: '#FFEBEE' }}>
+                            <td>{u.flow.direction}</td><td>{u.flow.sourceIp}</td><td>{u.flow.destinationIp}</td>
+                            <td>{u.flow.protocol}</td><td>{u.flow.destinationPort || '*'}</td>
+                            <td>{u.blockingRule?.comment || `Rule #${u.blockingRule?.order_index}`}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </>
+                )}
+
+                {analysis.matchedFlows?.length > 0 && (
+                  <>
+                    <h4 style={{ color: '#4CAF50', marginTop: 16 }}>Matched Flows — covered by ALLOW rules</h4>
+                    <table style={{ width: '100%', fontSize: '0.85em' }}>
+                      <thead><tr><th>Dir</th><th>Source IP</th><th>Dest IP</th><th>Proto</th><th>Port</th><th>Matched Rule</th></tr></thead>
+                      <tbody>
+                        {analysis.matchedFlows.slice(0, 15).map((m: any, i: number) => (
+                          <tr key={i} style={{ background: '#F1F8E9' }}>
+                            <td>{m.flow.direction}</td><td>{m.flow.sourceIp}</td><td>{m.flow.destinationIp}</td>
+                            <td>{m.flow.protocol}</td><td>{m.flow.destinationPort || '*'}</td>
+                            <td>{m.matchedRule?.comment || `Rule #${m.matchedRule?.order_index} (${m.expectedAction})`}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    {analysis.matchedFlows.length > 15 && <p style={{ color: '#666', fontSize: '0.85em' }}>Showing first 15 of {analysis.matchedFlows.length}</p>}
+                  </>
+                )}
               </>
             )}
           </div>

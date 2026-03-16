@@ -68,6 +68,8 @@ enforcementPointsRouter.put('/:id', requireRole('admin'), async (req, res) => {
         b.sshCredentialId ?? null, b.enabled ?? null]);
     if (!rows[0])
         return res.status(404).json({ error: 'not_found' });
+    await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`, [req.auth.username, 'ENFORCEMENT_POINT_UPDATE', 'enforcement_point', req.params.id, JSON.stringify({ name: rows[0].name })]);
     res.json({ enforcementPoint: rows[0] });
 });
 // Delete enforcement point
@@ -75,6 +77,8 @@ enforcementPointsRouter.delete('/:id', requireRole('admin'), async (req, res) =>
     const { rowCount } = await pool.query(`DELETE FROM enforcement_points WHERE id = $1`, [req.params.id]);
     if (!rowCount)
         return res.status(404).json({ error: 'not_found' });
+    await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`, [req.auth.username, 'ENFORCEMENT_POINT_DELETE', 'enforcement_point', req.params.id, JSON.stringify({ pointId: req.params.id })]);
     res.json({ ok: true });
 });
 // Deploy ACL to enforcement point

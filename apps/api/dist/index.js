@@ -127,14 +127,79 @@ app.listen(env.PORT, () => {
         }
     }, 5 * 60 * 1000); // Check every 5 minutes
     // Start periodic policy test session expiry processor (every 1 minute)
+    // When a test session expires, SSH into the host to restore original rules and collect logs
     setInterval(async () => {
         try {
             const { pool } = await import('./db/pool.js');
-            const { rows } = await pool.query(`SELECT id FROM policy_test_sessions WHERE status = 'RUNNING' AND scheduled_end_at <= now()`);
-            for (const session of rows) {
-                await pool.query(`UPDATE policy_test_sessions SET status = 'COLLECTING', completed_at = now() WHERE id = $1`, [session.id]);
+            const { rows } = await pool.query(`SELECT pts.*, h.hostname, h.mgmt_ip, h.ssh_port, h.firewall_backend
+         FROM policy_test_sessions pts
+         JOIN hosts h ON h.id = pts.host_id
+         WHERE pts.status = 'RUNNING' AND pts.scheduled_end_at <= now()`);
+            if (rows.length === 0)
+                return;
+            const { restoreAuditSession, retrieveAuditLogs } = await import('@segmentra/executor');
+            const { readSecretPlaintext } = await import('./services/secrets.js');
+            const { parseFirewallLogs, groupCommunicationFlows } = await import('./services/log-parser.js');
+            const fs = await import('node:fs');
+            const path = await import('node:path');
+            const os = await import('node:os');
+            // Get SSH credentials once
+            const credRes = await pool.query(`SELECT * FROM ssh_credentials WHERE scope_type='GLOBAL' ORDER BY created_at DESC LIMIT 1`);
+            const cred = credRes.rows[0];
+            if (!cred) {
                 // eslint-disable-next-line no-console
-                console.log(`[Policy Test] Auto-stopped expired test session ${session.id}`);
+                console.error('[Policy Test] No SSH credentials found, cannot auto-restore expired sessions');
+                return;
+            }
+            const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
+            for (const session of rows) {
+                const tempKeyPath = path.join(os.tmpdir(), `policy_test_expire_${session.id}_${Date.now()}`);
+                try {
+                    fs.writeFileSync(tempKeyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
+                    const auditHost = {
+                        hostname: session.hostname,
+                        ip: String(session.mgmt_ip),
+                        port: session.ssh_port || 22,
+                        username: cred.username,
+                        privateKeyPath: tempKeyPath,
+                        backend: (session.firewall_backend === 'iptables' ? 'iptables' : 'nftables')
+                    };
+                    // Restore original firewall rules
+                    if (session.backup_path) {
+                        await restoreAuditSession(auditHost, session.backup_path);
+                    }
+                    // Retrieve and parse logs
+                    let logContent = '';
+                    if (session.log_file_path) {
+                        const localLogPath = path.join(os.tmpdir(), `policy_test_log_${session.id}_${Date.now()}.log`);
+                        const retrieveResult = await retrieveAuditLogs(auditHost, session.log_file_path, localLogPath);
+                        if (retrieveResult.success && fs.existsSync(localLogPath)) {
+                            logContent = fs.readFileSync(localLogPath, 'utf8');
+                            fs.unlinkSync(localLogPath);
+                        }
+                    }
+                    const parsedEntries = parseFirewallLogs(logContent);
+                    const flows = groupCommunicationFlows(parsedEntries);
+                    await pool.query(`UPDATE policy_test_sessions
+             SET status = 'COLLECTING', completed_at = now(),
+                 raw_log_data = $2
+             WHERE id = $1`, [session.id, JSON.stringify({ entries: parsedEntries, flows })]);
+                    // eslint-disable-next-line no-console
+                    console.log(`[Policy Test] Auto-restored ${session.hostname}, collected ${parsedEntries.length} entries, ${flows.length} flows`);
+                }
+                catch (e) {
+                    // eslint-disable-next-line no-console
+                    console.error(`[Policy Test] Failed to auto-restore session ${session.id}:`, e.message);
+                    await pool.query(`UPDATE policy_test_sessions SET status = 'FAILED', completed_at = now() WHERE id = $1`, [session.id]);
+                }
+                finally {
+                    if (fs.existsSync(tempKeyPath)) {
+                        try {
+                            fs.unlinkSync(tempKeyPath);
+                        }
+                        catch { }
+                    }
+                }
             }
         }
         catch (e) {

@@ -62,6 +62,8 @@ flowCollectorsRouter.put('/:id', requireRole('admin'), async (req, res) => {
         b.config ? JSON.stringify(b.config) : null, b.enabled ?? null]);
     if (!rows[0])
         return res.status(404).json({ error: 'not_found' });
+    await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`, [req.auth.username, 'FLOW_COLLECTOR_UPDATE', 'flow_collector', req.params.id, JSON.stringify({ name: rows[0].name })]);
     res.json({ collector: rows[0] });
 });
 // Delete collector
@@ -69,6 +71,8 @@ flowCollectorsRouter.delete('/:id', requireRole('admin'), async (req, res) => {
     const { rowCount } = await pool.query(`DELETE FROM flow_collectors WHERE id = $1`, [req.params.id]);
     if (!rowCount)
         return res.status(404).json({ error: 'not_found' });
+    await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`, [req.auth.username, 'FLOW_COLLECTOR_DELETE', 'flow_collector', req.params.id, JSON.stringify({ collectorId: req.params.id })]);
     res.json({ ok: true });
 });
 // Get flows for collector

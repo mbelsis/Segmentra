@@ -58,6 +58,13 @@ recommendationsRouter.post('/generate', requireRole('operator', 'admin'), async 
 
   try {
     const result = await generateRecommendations(parsed.data.auditSessionId, parsed.data.hostId);
+
+    await pool.query(
+      `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+       VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
+      [req.auth!.username, 'RECOMMENDATION_GENERATE', 'policy_recommendation', null, JSON.stringify({ auditSessionId: parsed.data.auditSessionId, hostId: parsed.data.hostId })]
+    );
+
     res.status(201).json(result);
   } catch (e: any) {
     res.status(400).json({ error: e.message });
@@ -75,6 +82,13 @@ recommendationsRouter.post('/:id/accept', requireRole('operator', 'admin'), asyn
     [req.params.id, userId]
   );
   if (!rows[0]) return res.status(404).json({ error: 'not_found_or_not_pending' });
+
+  await pool.query(
+    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [userId, 'RECOMMENDATION_ACCEPT', 'policy_recommendation', req.params.id, JSON.stringify({ recommendationId: req.params.id })]
+  );
+
   res.json({ recommendation: rows[0] });
 });
 
@@ -89,6 +103,13 @@ recommendationsRouter.post('/:id/reject', requireRole('operator', 'admin'), asyn
     [req.params.id, userId]
   );
   if (!rows[0]) return res.status(404).json({ error: 'not_found_or_not_pending' });
+
+  await pool.query(
+    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [userId, 'RECOMMENDATION_REJECT', 'policy_recommendation', req.params.id, JSON.stringify({ recommendationId: req.params.id })]
+  );
+
   res.json({ recommendation: rows[0] });
 });
 

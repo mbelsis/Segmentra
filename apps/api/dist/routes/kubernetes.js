@@ -66,6 +66,8 @@ kubernetesRouter.put('/clusters/:id', requireRole('admin'), async (req, res) => 
         b.defaultNamespace ?? null, b.enabled ?? null]);
     if (!rows[0])
         return res.status(404).json({ error: 'not_found' });
+    await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`, [req.auth.username, 'K8S_CLUSTER_UPDATE', 'k8s_cluster', req.params.id, JSON.stringify({ name: rows[0].name })]);
     res.json({ cluster: rows[0] });
 });
 // Delete cluster
@@ -73,6 +75,8 @@ kubernetesRouter.delete('/clusters/:id', requireRole('admin'), async (req, res) 
     const { rowCount } = await pool.query(`DELETE FROM k8s_clusters WHERE id = $1`, [req.params.id]);
     if (!rowCount)
         return res.status(404).json({ error: 'not_found' });
+    await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`, [req.auth.username, 'K8S_CLUSTER_DELETE', 'k8s_cluster', req.params.id, JSON.stringify({ clusterId: req.params.id })]);
     res.json({ ok: true });
 });
 // Sync cluster workloads (discovery)
@@ -82,6 +86,8 @@ kubernetesRouter.post('/clusters/:id/sync', requireRole('operator', 'admin'), as
         return res.status(404).json({ error: 'not_found' });
     // Placeholder sync — in production this would call k8s API
     await pool.query(`UPDATE k8s_clusters SET last_sync_at = now(), last_sync_status = 'synced' WHERE id = $1`, [req.params.id]);
+    await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`, [req.auth.username, 'K8S_CLUSTER_SYNC', 'k8s_cluster', req.params.id, JSON.stringify({ clusterId: req.params.id })]);
     res.json({ success: true, message: 'Cluster sync initiated' });
 });
 // List workloads

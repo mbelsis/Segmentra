@@ -112,6 +112,13 @@ templatesRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) =
      b.interfaceScopeRoles ?? null, b.interfaceScopeNames ?? null]
   );
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
+
+  await pool.query(
+    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
+    [req.auth!.username, 'TEMPLATE_UPDATE', 'policy_template', req.params.id, JSON.stringify({ name: rows[0].name })]
+  );
+
   res.json({ template: rows[0] });
 });
 
@@ -119,6 +126,13 @@ templatesRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) =
 templatesRouter.delete('/:id', requireRole('operator', 'admin'), async (req, res) => {
   const { rowCount } = await pool.query(`DELETE FROM policy_templates WHERE id = $1`, [req.params.id]);
   if (!rowCount) return res.status(404).json({ error: 'not_found' });
+
+  await pool.query(
+    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
+    [req.auth!.username, 'TEMPLATE_DELETE', 'policy_template', req.params.id, JSON.stringify({ templateId: req.params.id })]
+  );
+
   res.json({ ok: true });
 });
 

@@ -106,6 +106,8 @@ iotAssetsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) =
         b.fingerprint ? JSON.stringify(b.fingerprint) : null, b.enabled ?? null]);
     if (!rows[0])
         return res.status(404).json({ error: 'not_found' });
+    await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`, [req.auth.username, 'IOT_ASSET_UPDATE', 'iot_asset', req.params.id, JSON.stringify({ name: rows[0].name })]);
     res.json({ asset: rows[0] });
 });
 // Delete IoT asset
@@ -113,6 +115,8 @@ iotAssetsRouter.delete('/:id', requireRole('operator', 'admin'), async (req, res
     const { rowCount } = await pool.query(`DELETE FROM iot_assets WHERE id = $1`, [req.params.id]);
     if (!rowCount)
         return res.status(404).json({ error: 'not_found' });
+    await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`, [req.auth.username, 'IOT_ASSET_DELETE', 'iot_asset', req.params.id, JSON.stringify({ assetId: req.params.id })]);
     res.json({ ok: true });
 });
 // Bulk import IoT assets
@@ -134,6 +138,8 @@ iotAssetsRouter.post('/bulk-import', requireRole('operator', 'admin'), async (re
             // Skip duplicate/invalid entries
         }
     }
+    await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`, [req.auth.username, 'IOT_ASSET_BULK_IMPORT', 'iot_asset', null, JSON.stringify({ imported, total: parsed.data.assets.length })]);
     res.json({ imported, total: parsed.data.assets.length });
 });
 // Assign tag to IoT asset
@@ -166,5 +172,7 @@ iotAssetsRouter.post('/:id/baseline', requireRole('operator', 'admin'), async (r
     const { rows: flows } = await pool.query(`SELECT * FROM iot_observed_flows WHERE source_ip = $1 OR dest_ip = $1`, [asset[0].ip_address]);
     // Store baseline in fingerprint
     await pool.query(`UPDATE iot_assets SET fingerprint = jsonb_set(COALESCE(fingerprint, '{}'), '{baseline}', $2), updated_at = now() WHERE id = $1`, [req.params.id, JSON.stringify({ flows: flows.length, capturedAt: new Date().toISOString(), flowSummary: flows.slice(0, 50) })]);
+    await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`, [req.auth.username, 'IOT_ASSET_BASELINE', 'iot_asset', req.params.id, JSON.stringify({ assetId: req.params.id, flows: flows.length })]);
     res.json({ ok: true, baselineFlows: flows.length });
 });
