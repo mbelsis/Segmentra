@@ -95,6 +95,13 @@ export function IoTPage() {
   return (
     <div>
       <h2>OT/IoT Microsegmentation</h2>
+      <p style={{ color: '#78644e', fontSize: '13.5px', marginTop: -4, marginBottom: 16, lineHeight: 1.6 }}>
+        Manage devices that cannot run agents or host-based firewalls — PLCs, HMIs, sensors, cameras, medical equipment, and other OT/IoT assets.
+        Segmentra does <strong>not</strong> deploy firewall rules directly to these devices. Instead, policies are enforced on
+        <strong> upstream gateway Linux servers or managed switches</strong> that sit between the IoT devices and the rest of the network.
+        Track assets with vendor/model/firmware details, observe traffic passively via NetFlow/sFlow collectors,
+        capture traffic baselines, and deploy ACLs to enforcement points (gateway firewalls, managed switches) via SSH.
+      </p>
       {error && <div style={{ color: 'red', marginBottom: 8 }}>{error} <button onClick={() => setError('')}>dismiss</button></div>}
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>

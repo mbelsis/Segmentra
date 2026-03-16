@@ -8,7 +8,7 @@ export function AppShell() {
     <div className="appShell">
       <nav className="nav">
         <div style={{ marginBottom: 16, textAlign: 'center' }}>
-          <img src="/segmentra.png" alt="Segmentra" style={{ maxWidth: '100%', height: 'auto', marginBottom: 8 }} />
+          <img src="/segmentra.png" alt="Segmentra" style={{ maxWidth: '115%', height: 'auto', marginBottom: 8, marginLeft: '-7.5%' }} />
         </div>
         <NavLink to="/" end>
           Dashboard

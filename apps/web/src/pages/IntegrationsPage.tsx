@@ -94,6 +94,11 @@ export function IntegrationsPage() {
   return (
     <div>
       <h2>Integrations</h2>
+      <p style={{ color: '#78644e', fontSize: '13.5px', marginTop: -4, marginBottom: 16, lineHeight: 1.6 }}>
+        Connect Segmentra to your security ecosystem. Forward audit events to your SIEM, receive automated actions from SOAR platforms,
+        import vulnerability data from scanners to track CVEs per host, and subscribe to threat intelligence feeds
+        to maintain IP/CIDR blocklists with confidence scoring and automatic expiry.
+      </p>
       {error && <div style={{ color: 'red', marginBottom: 8 }}>{error} <button onClick={() => setError('')}>dismiss</button></div>}
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
