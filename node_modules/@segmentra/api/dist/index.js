@@ -14,6 +14,14 @@ import { dashboardRouter } from './routes/dashboard.js';
 import { troubleshootRouter } from './routes/troubleshoot.js';
 import complianceRouter from './routes/compliance.js';
 import hostReadinessRouter from './routes/host-readiness.js';
+import { topologyRouter } from './routes/topology.js';
+import { recommendationsRouter } from './routes/recommendations.js';
+import { integrationsRouter } from './routes/integrations.js';
+import { policyTestingRouter } from './routes/policy-testing.js';
+import { kubernetesRouter } from './routes/kubernetes.js';
+import { iotAssetsRouter } from './routes/iot-assets.js';
+import { flowCollectorsRouter } from './routes/flow-collectors.js';
+import { enforcementPointsRouter } from './routes/enforcement-points.js';
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
@@ -29,6 +37,14 @@ app.use('/api', dashboardRouter);
 app.use('/api/troubleshoot', troubleshootRouter);
 app.use('/api/compliance', complianceRouter);
 app.use('/api/host-readiness', hostReadinessRouter);
+app.use('/api/topology', topologyRouter);
+app.use('/api/recommendations', recommendationsRouter);
+app.use('/api/integrations', integrationsRouter);
+app.use('/api/policy-test', policyTestingRouter);
+app.use('/api/k8s', kubernetesRouter);
+app.use('/api/iot-assets', iotAssetsRouter);
+app.use('/api/flow-collectors', flowCollectorsRouter);
+app.use('/api/enforcement-points', enforcementPointsRouter);
 // Global error handler middleware (must be last)
 app.use((err, req, res, next) => {
     // eslint-disable-next-line no-console
@@ -93,6 +109,37 @@ app.listen(env.PORT, () => {
         catch (e) {
             // eslint-disable-next-line no-console
             console.error('[Audit Scheduler] Error processing expired audit sessions:', e);
+        }
+    }, 60 * 1000); // Check every 1 minute
+    // Start periodic tag rule evaluation (every 5 minutes)
+    setInterval(async () => {
+        try {
+            const { evaluateAllRules } = await import('./services/tag-rule-engine.js');
+            const result = await evaluateAllRules();
+            if (result.rulesEvaluated > 0) {
+                // eslint-disable-next-line no-console
+                console.log(`[Tag Rules] Evaluated ${result.rulesEvaluated} rule(s), ${result.totalMatches} match(es)`);
+            }
+        }
+        catch (e) {
+            // eslint-disable-next-line no-console
+            console.error('[Tag Rules] Error evaluating tag rules:', e);
+        }
+    }, 5 * 60 * 1000); // Check every 5 minutes
+    // Start periodic policy test session expiry processor (every 1 minute)
+    setInterval(async () => {
+        try {
+            const { pool } = await import('./db/pool.js');
+            const { rows } = await pool.query(`SELECT id FROM policy_test_sessions WHERE status = 'RUNNING' AND scheduled_end_at <= now()`);
+            for (const session of rows) {
+                await pool.query(`UPDATE policy_test_sessions SET status = 'COLLECTING', completed_at = now() WHERE id = $1`, [session.id]);
+                // eslint-disable-next-line no-console
+                console.log(`[Policy Test] Auto-stopped expired test session ${session.id}`);
+            }
+        }
+        catch (e) {
+            // eslint-disable-next-line no-console
+            console.error('[Policy Test] Error processing expired test sessions:', e);
         }
     }, 60 * 1000); // Check every 1 minute
 });

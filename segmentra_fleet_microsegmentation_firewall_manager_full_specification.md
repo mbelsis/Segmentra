@@ -537,3 +537,92 @@ The executor only ships + applies these artifacts. Interface selection is alread
 - Audit Log (filters + export)
 - Admin settings (LDAP, secrets, SSH credentials, guardrails)
 
+---
+
+# 13) Expanded Capabilities (v2)
+
+## 13.1 Auto-Tagging with Rule-Based Criteria
+Replace manual-only tag assignment with a rule engine. Define criteria like "hostname matches `web-*` → tag 'web-server'" or "VLAN 100 → tag 'production'". Rules auto-evaluate on host create/update and every 5 minutes via background job.
+
+**Tables**: `tag_rules` (criteria as JSONB), `tag_rule_results`, extended `host_tags` with `source` column.
+**API**: CRUD + evaluate endpoints under `/api/tag-rules`.
+
+## 13.2 Template-Driven Policies
+Reusable policy blueprints (e.g., "Web Server Template" = allow 80/443 in, allow 53 out). Instantiation creates real policy_sets/versions/rules in DRAFT status. Optional auto-apply when hosts gain a matching tag.
+
+**Tables**: `policy_templates`, `policy_template_rules` (mirrors `policy_rules` schema), extended `policy_sets`/`policy_versions` with `source_template_id`.
+**API**: CRUD + rules + instantiate/preview under `/api/policy-templates`.
+
+## 13.3 Visual Policy Design
+Network topology canvas where users define groups (tags, VLANs, CIDRs) as nodes and draw connections as allowed/denied flows. Connections translate into policy rules via bidirectional flow decomposition.
+
+**Tables**: `topology_views` (JSONB layout), `topology_flows`.
+**API**: CRUD + generate-policies + auto-discover under `/api/topology`.
+
+## 13.4 Policy Auto-Recommendation
+After a firewall audit session completes, analyze observed traffic flows and suggest policy rules. The engine resolves IPs to tags/VLANs, groups flows by port, assigns confidence scores, and deduplicates against existing deployed rules.
+
+**Tables**: `policy_recommendations` (JSONB recommended_rules with confidence per rule).
+**API**: Generate/accept/reject/apply under `/api/recommendations`.
+
+## 13.5 Integrations (SIEM, SOAR, Vulnerability DB, Threat Intelligence)
+Adapter-based integration framework. Each integration has a standard interface (sync, test, handleEvent). Credentials stored in existing `secret_store` with AES-256-GCM encryption.
+
+**Tables**: `integrations`, `integration_events`, `host_vulnerabilities`, `threat_intel_entries`.
+**API**: CRUD + test/sync under `/api/integrations`, vulnerability and threat intel queries.
+
+## 13.6 On-Device Policy Testing
+Structured "test mode" that deploys a policy version in log-only mode, captures real traffic, then analyzes observed flows against the policy rules to identify gaps before enforcement. Reuses existing audit infrastructure (compiler logOnlyMode, executor audit-ssh, log-parser).
+
+**Tables**: `policy_test_sessions` (JSONB analysis_results with matched/unmatched/unexpected flows).
+**API**: Start/stop/analyze under `/api/policy-test`.
+
+## 13.7 Container Microsegmentation (Kubernetes)
+Agentless Kubernetes NetworkPolicy management via K8s API. Discover namespaces/pods/services, map K8s labels to Segmentra tags, compile policy rules into NetworkPolicy manifests, deploy via API.
+
+**Tables**: `k8s_clusters`, `k8s_workloads`, `k8s_workload_tags`, `k8s_network_policies`.
+**API**: Cluster management, workload discovery, policy deployment under `/api/k8s`.
+
+## 13.8 OT/IoT Microsegmentation
+Passive traffic discovery + upstream enforcement for devices that can't run agents. Discover assets via NetFlow/sFlow/SPAN, fingerprint protocols, enforce via switch ACLs or gateway firewalls over SSH.
+
+**Tables**: `iot_assets`, `iot_asset_tags`, `flow_collectors`, `iot_observed_flows`, `enforcement_points`, `enforcement_acls`.
+**API**: Asset management under `/api/iot-assets`, collectors under `/api/flow-collectors`, enforcement under `/api/enforcement-points`.
+
+---
+
+# 14) UI pages (expanded)
+
+In addition to the original pages (Section 12), v2 adds:
+
+- **Policy Templates** (`/policy-templates`) — Template list by category, rule editor, instantiate wizard
+- **Visual Topology** (`/topology`) — Topology views, flow editor, auto-discover, generate policies button
+- **Policy Testing** (`/policy-testing`) — Test session management, analysis report (color-coded: green=matched, yellow=unmatched, red=blocked)
+- **Integrations** (`/integrations`) — Integration catalog, config forms per type, sync status, event log, threat intel dashboard
+- **Kubernetes** (`/kubernetes`) — Cluster management, workload browser, label-to-tag mapping, network policy status
+- **OT/IoT** (`/iot`) — Asset inventory with OT-specific fields, flow collectors, enforcement points, traffic baseline
+
+---
+
+# 15) Background Jobs
+
+| Job | Interval | Purpose |
+|-----|----------|---------|
+| Stale deployment timeout | 2 min | Timeout hosts stuck in RUNNING > 10 min |
+| Scheduled deployments | 1 min | Process deployments scheduled for future execution |
+| Expired audit sessions | 1 min | Auto-restore firewall rules after learning session expires |
+| Tag rule evaluation | 5 min | Re-evaluate all enabled auto-tagging rules |
+| Policy test session expiry | 1 min | Auto-stop test sessions past scheduled end time |
+
+---
+
+# 16) Cross-Cutting Patterns
+
+All new code follows existing patterns:
+- **Migrations**: Numbered .sql + .js files in `packages/db/migrations/` (009 through 016)
+- **RBAC**: `requireAuth` + `requireRole()` on every route
+- **Audit**: Insert `audit_events` for all state changes
+- **Validation**: Zod schemas for all request bodies
+- **API client**: New methods in `apps/web/src/lib/api.ts`
+- **Background jobs**: `setInterval` in `apps/api/src/index.ts`
+

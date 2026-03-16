@@ -133,7 +133,7 @@ export function TroubleshootPage() {
         durationMinutes: auditDuration
       });
       setAuditHosts([]);
-      setAuditHostInput('');
+      setAuditHostFilter('');
       await loadAuditSessions();
     } catch (e: any) {
       setAuditError(String(e?.message ?? e));

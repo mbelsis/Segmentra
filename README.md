@@ -141,8 +141,60 @@ Additional troubleshooting capabilities include:
   <img src="docs/images/troubleshooting.png" alt="Troubleshooting" style="max-width: 100%; height: auto;" />
 </div>
 
+### Auto-Tagging & Rule Engine
+- **Rule-Based Auto-Tagging**: Define criteria to automatically tag hosts (hostname patterns, CIDR ranges, VLAN membership, OS family, existing tags)
+- **Flexible Conditions**: AND/OR logic with operators: equals, not_equals, matches (regex), contains, in_cidr, has_tag
+- **Source Tracking**: Track whether tags were assigned manually, by rules, or by integrations
+- **Background Evaluation**: Rules auto-evaluate every 5 minutes and on-demand
+- **Non-Destructive**: Rule engine never overwrites manually assigned tags
 
+### Policy Templates
+- **Reusable Blueprints**: Create template policies (e.g., "Web Server", "Database Server") with pre-defined rules
+- **One-Click Instantiation**: Generate real policy sets + versions from templates in DRAFT status
+- **Auto-Apply**: Optionally auto-create DRAFT policies when hosts gain a matching tag
+- **Category Organization**: Organize templates by category for easy discovery
+- **Preview Before Apply**: See which hosts would be affected before instantiating
 
+### Visual Topology Design
+- **Network Topology Canvas**: Define network groups (tags, VLANs, CIDRs) and draw connections as allowed/denied flows
+- **Auto-Discovery**: Automatically build topology from existing inventory and deployed policies
+- **Policy Generation**: Convert visual flows into real policy sets + versions (DRAFT status)
+- **Bidirectional Flow Decomposition**: A single visual connection generates rules on both source and target sides
+
+### Policy Auto-Recommendations
+- **Audit-to-Policy Pipeline**: After a firewall learning session, generate policy rule recommendations from observed traffic
+- **IP-to-Entity Resolution**: Automatically resolves raw IPs to tags, VLANs, or hosts for maintainable rules
+- **Confidence Scoring**: Each recommendation includes a confidence score based on frequency, known ports, and inventory presence
+- **Deduplication**: Skips recommendations that duplicate already-deployed rules
+- **Accept/Reject/Apply Workflow**: Review recommendations individually, then apply accepted ones as DRAFT policy versions
+
+### Integrations (SIEM, SOAR, Vulnerability DB, Threat Intelligence)
+- **Adapter Framework**: Pluggable integration system supporting SIEM, SOAR, vulnerability scanners, and threat feeds
+- **Credential Management**: Integration credentials stored in existing AES-256-GCM encrypted secret store
+- **Vulnerability Tracking**: Track CVEs per host with severity levels and patching status
+- **Threat Intelligence**: Maintain threat intel entries (malicious IPs/CIDRs) with confidence scores and expiry
+- **Event Logging**: Full event trail for all integration sync and webhook operations
+
+### On-Device Policy Testing
+- **Pre-Enforcement Validation**: Deploy a specific policy version in log-only mode and analyze observed traffic against the rules
+- **Gap Analysis**: Identifies matched flows, unmatched flows (would be blocked by default-deny), and unexpected blocks (DENY rules matching active traffic)
+- **Coverage Reporting**: Shows percentage of observed traffic covered by policy rules
+- **Reuses Existing Infrastructure**: Same compiler (logOnlyMode), executor (audit-ssh), and log parser as Firewall Learning
+- **Separate From Audit**: Different semantics — audit discovers unknown traffic; testing validates known policies
+
+### Container Microsegmentation (Kubernetes)
+- **Agentless K8s Management**: Manage Kubernetes NetworkPolicy resources via K8s API — no sidecar or service mesh required
+- **Workload Discovery**: Discover namespaces, pods, deployments, services, and their labels
+- **Label-to-Tag Mapping**: Sync Kubernetes labels to Segmentra tags for unified policy management
+- **NetworkPolicy Generation**: Translate Segmentra policy rules into K8s NetworkPolicy manifests
+- **Multi-Cluster Support**: Manage multiple Kubernetes clusters from a single Segmentra instance
+
+### OT/IoT Microsegmentation
+- **Passive Asset Discovery**: Discover OT/IoT devices via NetFlow/sFlow/SPAN traffic analysis
+- **Asset Inventory**: Track PLCs, HMIs, sensors, cameras, printers, HVAC, medical devices with OT-specific fields (vendor, model, firmware, Purdue zone)
+- **Flow Collection**: Configure NetFlow/sFlow/IPFIX collectors to observe traffic between IoT assets
+- **Enforcement Points**: Manage upstream switches and gateway firewalls that enforce policies on behalf of unmanaged devices
+- **Traffic Baseline**: Snapshot current traffic patterns as an allowed baseline for anomaly detection
 
 
 
@@ -401,15 +453,37 @@ Segmentra now includes several advanced features for production-ready firewall m
 - **Risk Evaluation**: Re-evaluates risk during deployment creation based on actual target count
 - **Audit Trail**: High-risk status is logged in audit events for compliance
 
+### New Capabilities (v2)
+
+### Auto-Tagging & Rule Engine
+- **Automatic Host Classification**: Rule-based tag assignment with regex, CIDR, and multi-condition support
+- **Background Processing**: Rules evaluate periodically and on host create/update
+
+### Policy Templates & Visual Design
+- **Reusable Policy Blueprints**: Define templates with pre-configured rules, instantiate as DRAFT policies
+- **Visual Topology Editor**: Draw network flows between groups, auto-discover from existing infrastructure, generate policies
+
+### Intelligence & Recommendations
+- **Audit-to-Policy Pipeline**: Generate recommended rules from firewall learning sessions with confidence scoring
+- **Integration Framework**: Connect to SIEM, SOAR, vulnerability scanners, and threat intelligence feeds
+
+### Pre-Enforcement Testing
+- **On-Device Policy Testing**: Validate policies against real traffic before enforcement, with gap analysis and coverage reporting
+
+### Extended Enforcement Domains
+- **Kubernetes NetworkPolicy**: Agentless management of K8s NetworkPolicy resources across multiple clusters
+- **OT/IoT Microsegmentation**: Passive discovery, flow collection, and upstream enforcement for unmanaged devices
+
 ---
 
 ## Architecture Overview
 
 This repository is a **TypeScript monorepo**:
 - **API**: Express + PostgreSQL (`apps/api`)
-- **UI**: React (Vite) (`apps/web`)
+- **UI**: React (Vite) (`apps/web`) — includes pages for Policy Templates, Topology, Integrations, Policy Testing, Kubernetes, and OT/IoT
 - **Compiler**: policy → per-host firewall rules (`packages/compiler`)
 - **Executor**: Ansible CLI runner wrapper + SSH direct executor (`packages/executor`)
+- **Services**: Tag rule engine, template engine, recommendation engine, policy test analyzer, topology-to-policy converter (`apps/api/src/services/`)
 - **DB**: migrations + seed scripts (`packages/db`)
 
 For detailed technical documentation, see [Architecture.md](Architecture.md).

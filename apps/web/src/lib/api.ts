@@ -355,7 +355,161 @@ export const api = {
     }>(`/policy-versions/${candidateVersionId}/impact-diff`, {
       method: 'POST',
       body: JSON.stringify({ currentVersionId, hostIds })
-    })
+    }),
+
+  // === Capability 1: Tag Rules (Auto-Tagging) ===
+  tagRules: {
+    list: () => request<{ tagRules: any[] }>('/tag-rules'),
+    get: (id: string) => request<{ tagRule: any; matchedHosts: any[] }>(`/tag-rules/${id}`),
+    create: (b: any) => request<{ tagRule: any }>('/tag-rules', { method: 'POST', body: JSON.stringify(b) }),
+    update: (id: string, b: any) => request<{ tagRule: any }>(`/tag-rules/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
+    delete: (id: string) => request<{ ok: boolean }>(`/tag-rules/${id}`, { method: 'DELETE' }),
+    evaluate: (id: string) => request<{ matched: number; total: number }>(`/tag-rules/${id}/evaluate`, { method: 'POST' }),
+    evaluateAll: () => request<{ rulesEvaluated: number; totalMatches: number }>('/tag-rules/evaluate-all', { method: 'POST' }),
+    evaluateHost: (hostId: string) => request<{ rulesMatched: number; tagsAssigned: string[] }>(`/tag-rules/evaluate-host/${hostId}`, { method: 'POST' }),
+  },
+
+  // === Capability 2: Policy Templates ===
+  templates: {
+    list: (category?: string) => {
+      const q = category ? `?category=${encodeURIComponent(category)}` : '';
+      return request<{ templates: any[] }>(`/policy-templates${q}`);
+    },
+    categories: () => request<{ categories: string[] }>('/policy-templates/categories'),
+    get: (id: string) => request<{ template: any; rules: any[] }>(`/policy-templates/${id}`),
+    create: (b: any) => request<{ template: any }>('/policy-templates', { method: 'POST', body: JSON.stringify(b) }),
+    update: (id: string, b: any) => request<{ template: any }>(`/policy-templates/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
+    delete: (id: string) => request<{ ok: boolean }>(`/policy-templates/${id}`, { method: 'DELETE' }),
+    getRules: (id: string) => request<{ rules: any[] }>(`/policy-templates/${id}/rules`),
+    addRule: (id: string, b: any) => request<{ rule: any }>(`/policy-templates/${id}/rules`, { method: 'POST', body: JSON.stringify(b) }),
+    updateRule: (ruleId: string, b: any) => request<{ rule: any }>(`/policy-templates/rules/${ruleId}`, { method: 'PUT', body: JSON.stringify(b) }),
+    deleteRule: (ruleId: string) => request<{ ok: boolean }>(`/policy-templates/rules/${ruleId}`, { method: 'DELETE' }),
+    instantiate: (id: string, b?: any) => request<{ policySet: any; version: any; rulesCreated: number }>(`/policy-templates/${id}/instantiate`, { method: 'POST', body: JSON.stringify(b ?? {}) }),
+    preview: (id: string) => request<{ template: any; rules: any[]; targetHosts: any[] }>(`/policy-templates/${id}/preview`, { method: 'POST' }),
+  },
+
+  // === Capability 3: Visual Topology ===
+  topology: {
+    listViews: () => request<{ views: any[] }>('/topology/views'),
+    getView: (id: string) => request<{ view: any; flows: any[] }>(`/topology/views/${id}`),
+    createView: (b: any) => request<{ view: any }>('/topology/views', { method: 'POST', body: JSON.stringify(b) }),
+    updateView: (id: string, b: any) => request<{ view: any }>(`/topology/views/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
+    deleteView: (id: string) => request<{ ok: boolean }>(`/topology/views/${id}`, { method: 'DELETE' }),
+    addFlow: (viewId: string, b: any) => request<{ flow: any }>(`/topology/views/${viewId}/flows`, { method: 'POST', body: JSON.stringify(b) }),
+    deleteFlow: (flowId: string) => request<{ ok: boolean }>(`/topology/flows/${flowId}`, { method: 'DELETE' }),
+    generatePolicies: (viewId: string) => request<{ policySetsCreated: number; versionsCreated: number; rulesCreated: number }>(`/topology/views/${viewId}/generate-policies`, { method: 'POST' }),
+    autoDiscover: () => request<{ nodes: any[]; edges: any[] }>('/topology/auto-discover'),
+  },
+
+  // === Capability 4: Policy Recommendations ===
+  recommendations: {
+    list: (params?: { status?: string; hostId?: string }) => {
+      const q = new URLSearchParams();
+      if (params?.status) q.append('status', params.status);
+      if (params?.hostId) q.append('hostId', params.hostId);
+      const qs = q.toString();
+      return request<{ recommendations: any[] }>(`/recommendations${qs ? `?${qs}` : ''}`);
+    },
+    get: (id: string) => request<{ recommendation: any }>(`/recommendations/${id}`),
+    generate: (auditSessionId: string, hostId: string) =>
+      request<{ recommendationId: string; ruleCount: number; avgConfidence: number }>('/recommendations/generate', {
+        method: 'POST', body: JSON.stringify({ auditSessionId, hostId })
+      }),
+    accept: (id: string) => request<{ recommendation: any }>(`/recommendations/${id}/accept`, { method: 'POST' }),
+    reject: (id: string) => request<{ recommendation: any }>(`/recommendations/${id}/reject`, { method: 'POST' }),
+    apply: (id: string, policySetId?: string) =>
+      request<{ versionId: string; rulesCreated: number }>(`/recommendations/${id}/apply`, {
+        method: 'POST', body: JSON.stringify({ policySetId })
+      }),
+  },
+
+  // === Capability 5: Integrations ===
+  integrations: {
+    list: () => request<{ integrations: any[] }>('/integrations'),
+    get: (id: string) => request<{ integration: any; recentEvents: any[] }>(`/integrations/${id}`),
+    create: (b: any) => request<{ integration: any }>('/integrations', { method: 'POST', body: JSON.stringify(b) }),
+    update: (id: string, b: any) => request<{ integration: any }>(`/integrations/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
+    delete: (id: string) => request<{ ok: boolean }>(`/integrations/${id}`, { method: 'DELETE' }),
+    test: (id: string) => request<{ success: boolean; message: string }>(`/integrations/${id}/test`, { method: 'POST' }),
+    sync: (id: string) => request<{ success: boolean; message: string }>(`/integrations/${id}/sync`, { method: 'POST' }),
+    events: (id: string, limit?: number) => request<{ events: any[] }>(`/integrations/${id}/events${limit ? `?limit=${limit}` : ''}`),
+    hostVulnerabilities: (hostId: string) => request<{ vulnerabilities: any[] }>(`/integrations/vulnerabilities/by-host/${hostId}`),
+    threatIntel: () => request<{ entries: any[] }>('/integrations/threat-intel'),
+  },
+
+  // === Capability 6: Policy Testing ===
+  policyTest: {
+    listSessions: (params?: { hostId?: string; status?: string }) => {
+      const q = new URLSearchParams();
+      if (params?.hostId) q.append('hostId', params.hostId);
+      if (params?.status) q.append('status', params.status);
+      const qs = q.toString();
+      return request<{ sessions: any[] }>(`/policy-test/sessions${qs ? `?${qs}` : ''}`);
+    },
+    getSession: (id: string) => request<{ session: any }>(`/policy-test/sessions/${id}`),
+    start: (b: { policyVersionId: string; hostId: string; durationMinutes?: number }) =>
+      request<{ session: any; compiled?: any }>('/policy-test/start', { method: 'POST', body: JSON.stringify(b) }),
+    stop: (id: string) => request<{ session: any }>(`/policy-test/sessions/${id}/stop`, { method: 'POST' }),
+    analyze: (id: string) => request<{ analysis: any }>(`/policy-test/sessions/${id}/analyze`, { method: 'POST' }),
+  },
+
+  // === Capability 7: Kubernetes ===
+  k8s: {
+    clusters: () => request<{ clusters: any[] }>('/k8s/clusters'),
+    cluster: (id: string) => request<{ cluster: any; workloadSummary: any[]; namespaces: any[] }>(`/k8s/clusters/${id}`),
+    createCluster: (b: any) => request<{ cluster: any }>('/k8s/clusters', { method: 'POST', body: JSON.stringify(b) }),
+    updateCluster: (id: string, b: any) => request<{ cluster: any }>(`/k8s/clusters/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
+    deleteCluster: (id: string) => request<{ ok: boolean }>(`/k8s/clusters/${id}`, { method: 'DELETE' }),
+    syncCluster: (id: string) => request<{ success: boolean }>(`/k8s/clusters/${id}/sync`, { method: 'POST' }),
+    workloads: (clusterId: string, params?: { namespace?: string; kind?: string }) => {
+      const q = new URLSearchParams();
+      if (params?.namespace) q.append('namespace', params.namespace);
+      if (params?.kind) q.append('kind', params.kind);
+      const qs = q.toString();
+      return request<{ workloads: any[] }>(`/k8s/clusters/${clusterId}/workloads${qs ? `?${qs}` : ''}`);
+    },
+    mapWorkloadTag: (workloadId: string, tagId: string) =>
+      request<{ ok: boolean }>(`/k8s/workloads/${workloadId}/map-tag`, { method: 'POST', body: JSON.stringify({ tagId }) }),
+    networkPolicies: (clusterId: string) => request<{ networkPolicies: any[] }>(`/k8s/clusters/${clusterId}/network-policies`),
+    deployPolicy: (clusterId: string, b: any) =>
+      request<{ networkPolicy: any }>(`/k8s/clusters/${clusterId}/deploy-policy`, { method: 'POST', body: JSON.stringify(b) }),
+  },
+
+  // === Capability 8: OT/IoT ===
+  iot: {
+    assets: (params?: { assetType?: string; zone?: string; vlanId?: string }) => {
+      const q = new URLSearchParams();
+      if (params?.assetType) q.append('assetType', params.assetType);
+      if (params?.zone) q.append('zone', params.zone);
+      if (params?.vlanId) q.append('vlanId', params.vlanId);
+      const qs = q.toString();
+      return request<{ assets: any[] }>(`/iot-assets${qs ? `?${qs}` : ''}`);
+    },
+    asset: (id: string) => request<{ asset: any; observedFlows: any[]; tags: any[] }>(`/iot-assets/${id}`),
+    createAsset: (b: any) => request<{ asset: any }>('/iot-assets', { method: 'POST', body: JSON.stringify(b) }),
+    updateAsset: (id: string, b: any) => request<{ asset: any }>(`/iot-assets/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
+    deleteAsset: (id: string) => request<{ ok: boolean }>(`/iot-assets/${id}`, { method: 'DELETE' }),
+    bulkImport: (assets: any[]) => request<{ imported: number; total: number }>('/iot-assets/bulk-import', { method: 'POST', body: JSON.stringify({ assets }) }),
+    addTag: (assetId: string, tagId: string) => request<{ ok: boolean }>(`/iot-assets/${assetId}/tags`, { method: 'POST', body: JSON.stringify({ tagId }) }),
+    removeTag: (assetId: string, tagId: string) => request<{ ok: boolean }>(`/iot-assets/${assetId}/tags/${tagId}`, { method: 'DELETE' }),
+    flows: (assetId: string) => request<{ flows: any[] }>(`/iot-assets/${assetId}/flows`),
+    baseline: (assetId: string) => request<{ ok: boolean; baselineFlows: number }>(`/iot-assets/${assetId}/baseline`, { method: 'POST' }),
+    // Flow Collectors
+    collectors: () => request<{ collectors: any[] }>('/flow-collectors'),
+    collector: (id: string) => request<{ collector: any; recentFlows: any[] }>(`/flow-collectors/${id}`),
+    createCollector: (b: any) => request<{ collector: any }>('/flow-collectors', { method: 'POST', body: JSON.stringify(b) }),
+    updateCollector: (id: string, b: any) => request<{ collector: any }>(`/flow-collectors/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
+    deleteCollector: (id: string) => request<{ ok: boolean }>(`/flow-collectors/${id}`, { method: 'DELETE' }),
+    collectorFlows: (id: string) => request<{ flows: any[] }>(`/flow-collectors/${id}/flows`),
+    // Enforcement Points
+    enforcementPoints: () => request<{ enforcementPoints: any[] }>('/enforcement-points'),
+    enforcementPoint: (id: string) => request<{ enforcementPoint: any; acls: any[] }>(`/enforcement-points/${id}`),
+    createEnforcementPoint: (b: any) => request<{ enforcementPoint: any }>('/enforcement-points', { method: 'POST', body: JSON.stringify(b) }),
+    updateEnforcementPoint: (id: string, b: any) => request<{ enforcementPoint: any }>(`/enforcement-points/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
+    deleteEnforcementPoint: (id: string) => request<{ ok: boolean }>(`/enforcement-points/${id}`, { method: 'DELETE' }),
+    deployAcl: (epId: string, b: any) => request<{ acl: any }>(`/enforcement-points/${epId}/deploy-acl`, { method: 'POST', body: JSON.stringify(b) }),
+    listAcls: (epId: string) => request<{ acls: any[] }>(`/enforcement-points/${epId}/acls`),
+  },
 };
 
 

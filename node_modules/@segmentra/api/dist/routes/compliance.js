@@ -5,7 +5,7 @@ import { requireAuth, requireRole } from '../middleware/auth.js';
 import { readSecretPlaintext } from '../services/secrets.js';
 import path from 'node:path';
 import fs from 'node:fs';
-import { env } from '../lib/env.js';
+import os from 'node:os';
 const complianceRouter = Router();
 complianceRouter.use(requireAuth, requireRole('operator', 'admin'));
 /**
@@ -39,7 +39,8 @@ complianceRouter.get('/hosts/:hostId', async (req, res) => {
         return res.status(400).json({ error: 'missing_ssh_credential' });
     }
     const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
-    const tempKeyPath = path.join(env.BUNDLES_DIR, `temp_key_${hostId}_${Date.now()}`);
+    // Use os.tmpdir() for temporary keys to avoid dependency on BUNDLES_DIR existing
+    const tempKeyPath = path.join(os.tmpdir(), `segmentra_compliance_key_${hostId}_${Date.now()}`);
     fs.writeFileSync(tempKeyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
     try {
         // Read current rules from host
@@ -120,7 +121,8 @@ complianceRouter.post('/hosts/bulk', async (req, res) => {
         return res.status(400).json({ error: 'missing_ssh_credential' });
     }
     const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
-    const tempKeyPath = path.join(env.BUNDLES_DIR, `temp_key_bulk_${Date.now()}`);
+    // Use os.tmpdir() for temporary keys to avoid dependency on BUNDLES_DIR existing
+    const tempKeyPath = path.join(os.tmpdir(), `segmentra_compliance_bulk_key_${Date.now()}`);
     fs.writeFileSync(tempKeyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
     try {
         // Get last deployment hashes for all hosts

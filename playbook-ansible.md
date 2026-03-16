@@ -210,3 +210,24 @@ GET /api/executions/:executionId/logs
 4. **Verify SSH access** before deploying to ensure connectivity
 5. **Use progressive deployments** for large fleets to minimize risk
 
+---
+
+## Extended Deployment Capabilities
+
+### Policy Testing Mode
+
+Segmentra can deploy policies in **log-only mode** for pre-enforcement testing. This uses the same compiler infrastructure but with `logOnlyMode: true`, which:
+- Sets default policy to ACCEPT (nothing gets blocked)
+- Adds logging rules that capture all traffic with `FW-AUDIT` prefix
+- Allows the policy test analyzer to compare observed flows against policy rules
+
+The Ansible playbook handles log-only policies identically to enforcement policies — the difference is entirely in the compiled ruleset content.
+
+### Kubernetes NetworkPolicy Deployment
+
+For Kubernetes environments, Segmentra generates and applies NetworkPolicy manifests directly via the K8s API — **the Ansible playbook is not used** for container microsegmentation. This is a separate deployment path through the `packages/k8s-executor` concept.
+
+### OT/IoT ACL Deployment
+
+For OT/IoT enforcement, Segmentra deploys vendor-specific ACLs to switches and gateways via SSH. This uses the same SSH credential infrastructure as host deployments but with a different compilation target (vendor ACL syntax vs. nftables/iptables).
+

@@ -15,9 +15,15 @@ export function AppShell() {
         </NavLink>
         <NavLink to="/inventory">Inventory</NavLink>
         <NavLink to="/policies">Policy Sets</NavLink>
+        <NavLink to="/policy-templates">Templates</NavLink>
+        <NavLink to="/topology">Topology</NavLink>
         <NavLink to="/approvals">Approvals</NavLink>
         <NavLink to="/deployments">Deployments</NavLink>
+        <NavLink to="/policy-testing">Policy Testing</NavLink>
         <NavLink to="/troubleshoot">Troubleshoot</NavLink>
+        <NavLink to="/integrations">Integrations</NavLink>
+        <NavLink to="/kubernetes">Kubernetes</NavLink>
+        <NavLink to="/iot">OT/IoT</NavLink>
         <NavLink to="/audit">Audit</NavLink>
         <NavLink to="/admin">Admin</NavLink>
         <div style={{ 

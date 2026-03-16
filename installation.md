@@ -220,4 +220,54 @@ Both executors:
 - **Ansible Executor**: Requires Docker socket mounting (`/var/run/docker.sock`). Treat the API container as **high trust**.
 - **SSH Direct Executor**: No Docker socket needed, but requires `ssh` and `scp` commands (included in container).
 
+---
+
+## Database Migrations (v2 Capabilities)
+
+When upgrading to v2, run migrations to add the new tables:
+
+```bash
+npm run db:migrate
+```
+
+This will apply migrations 009 through 016:
+- `009_add_tag_rules` — Auto-tagging rule engine
+- `010_add_policy_templates` — Template-driven policies
+- `011_add_visual_topologies` — Visual topology design
+- `012_add_policy_recommendations` — Policy auto-recommendations
+- `013_add_integrations` — SIEM/SOAR/Vulnerability/Threat Intel framework
+- `014_add_policy_test_sessions` — On-device policy testing
+- `015_add_kubernetes_clusters` — Kubernetes microsegmentation
+- `016_add_ot_iot` — OT/IoT asset management and flow collection
+
+All migrations are additive (new tables and columns only) — no existing data is modified.
+
+## New Navigation Links
+
+After upgrading, the sidebar will show 6 new pages:
+- **Templates** — Policy template management
+- **Topology** — Visual policy design
+- **Policy Testing** — Pre-enforcement validation
+- **Integrations** — External tool connections
+- **Kubernetes** — K8s cluster and NetworkPolicy management
+- **OT/IoT** — IoT asset inventory and enforcement
+
+## Kubernetes Setup (Optional)
+
+To use Kubernetes microsegmentation:
+1. Go to **Kubernetes** in the sidebar
+2. Add a cluster with its API server URL and authentication method
+3. Store credentials (kubeconfig/service account token) in SSH Credentials / Secrets
+4. Use **Sync** to discover workloads
+5. Map K8s labels to Segmentra tags for unified policy management
+
+## OT/IoT Setup (Optional)
+
+To use OT/IoT microsegmentation:
+1. Go to **OT/IoT** in the sidebar
+2. Add IoT assets manually or via bulk import
+3. (Optional) Configure flow collectors for passive traffic discovery
+4. Configure enforcement points (managed switches/gateways) with SSH credentials
+5. Use **Baseline** to snapshot current traffic as the allowed baseline
+
 

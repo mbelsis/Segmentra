@@ -20,6 +20,14 @@ This document provides detailed technical information about Segmentra's architec
    - [Host Readiness Verification](#host-readiness-verification)
    - [Scheduled Deployments](#scheduled-deployments)
    - [Host Policy Visualization](#host-policy-visualization)
+   - [Auto-Tagging Rule Engine](#auto-tagging-rule-engine)
+   - [Policy Templates](#policy-templates)
+   - [Visual Topology Design](#visual-topology-design)
+   - [Policy Auto-Recommendations](#policy-auto-recommendations)
+   - [Integrations Framework](#integrations-framework)
+   - [On-Device Policy Testing](#on-device-policy-testing)
+   - [Kubernetes Microsegmentation](#kubernetes-microsegmentation)
+   - [OT/IoT Microsegmentation](#otiot-microsegmentation)
 7. [Troubleshooting](#troubleshooting)
 8. [Configuration Details](#configuration-details)
    - [Environment Variables](#environment-variables)
@@ -48,15 +56,30 @@ apps/
         health.ts
         host-readiness.ts      # Host capability verification
         inventory/             # Hosts, tags, VLANs, interfaces
+          tag-rules.ts           # Auto-tagging rule engine
         policies/              # Policy sets, versions, rules
+          templates.ts           # Policy templates
         ssh-credentials.ts
         troubleshoot.ts
+        topology.ts              # Visual topology design
+        recommendations.ts       # Policy auto-recommendations
+        integrations.ts          # SIEM/SOAR/Vuln/ThreatIntel integrations
+        policy-testing.ts        # On-device policy testing
+        kubernetes.ts            # Kubernetes cluster management
+        iot-assets.ts            # IoT/OT asset management
+        flow-collectors.ts       # NetFlow/sFlow collectors
+        enforcement-points.ts    # Switch/gateway enforcement
       services/                # LDAP, secrets crypto, JWT, audit, ...
         policy-diff.ts         # Policy version comparison
         safety-check.ts        # Pre-deployment safety validation
         high-risk.ts           # High-risk policy detection
         log-parser.ts          # Firewall log parsing for learning sessions
         audit-scheduler.ts     # Background job for expired audit sessions
+        tag-rule-engine.ts       # Auto-tagging evaluation engine
+        template-engine.ts       # Policy template instantiation
+        recommendation-engine.ts # Audit-to-policy recommendations
+        topology-to-policy.ts    # Visual topology → policy conversion
+        policy-test-analyzer.ts  # Policy test gap analysis
       lib/                     # Environment config
       index.ts                 # Express app entry point
   web/                         # React UI (Vite)
@@ -64,6 +87,12 @@ apps/
       components/              # App shell, auth gate, visualization
         HostPolicyVisualization.tsx  # Policy visualization diagram
       pages/                   # Dashboard/Inventory/Policies/...
+        PolicyTemplatesPage.tsx  # Policy template management
+        TopologyPage.tsx         # Visual topology designer
+        IntegrationsPage.tsx     # Integration management
+        PolicyTestPage.tsx       # On-device policy testing
+        KubernetesPage.tsx       # Kubernetes management
+        IoTPage.tsx              # OT/IoT asset management
       lib/                     # API client, auth helpers
 infra/
   app/Dockerfile               # App container (installs docker client + openssh-client)
@@ -77,6 +106,14 @@ packages/
       001_init.sql
       007_add_scheduled_deployments.sql
       008_add_firewall_audit_sessions.sql
+      009_add_tag_rules.sql
+      010_add_policy_templates.sql
+      011_add_visual_topologies.sql
+      012_add_policy_recommendations.sql
+      013_add_integrations.sql
+      014_add_policy_test_sessions.sql
+      015_add_kubernetes_clusters.sql
+      016_add_ot_iot.sql
     scripts/
       seed-roles.js
   shared/                      # shared TS types
@@ -276,6 +313,118 @@ Base URL: `http://localhost:8080/api`
 - `POST /ssh-credentials` — Create new SSH credential. Body: `{ name, username, privateKeyPem, passphrase?, scopeType, scopeId? }` (stores private key encrypted)
 - `PUT /ssh-credentials/:id` — Update SSH credential metadata. Body: `{ name?, username?, scopeType?, scopeId? }`
   - **Note**: The `PUT` endpoint does **not** update the private key or passphrase. SSH keys are immutable for security reasons. To rotate SSH keys, create a new credential via `POST` and delete the old one.
+
+### Tag Rules (Auto-Tagging) (Operator/Admin role required)
+
+- `GET /tag-rules` — List all tag rules with match counts
+- `GET /tag-rules/:id` — Get tag rule with matched hosts
+- `POST /tag-rules` — Create tag rule. Body: `{ name, tagId, enabled?, priority?, criteria: { conditions: [{field, operator, value}], logic: 'AND'|'OR' } }`
+- `PUT /tag-rules/:id` — Update tag rule
+- `DELETE /tag-rules/:id` — Delete tag rule and remove auto-assigned tags
+- `POST /tag-rules/:id/evaluate` — Evaluate single rule against all hosts
+- `POST /tag-rules/evaluate-all` — Evaluate all enabled rules
+- `POST /tag-rules/evaluate-host/:hostId` — Evaluate all rules for a specific host
+
+### Policy Templates (Operator/Admin role required)
+
+- `GET /policy-templates` — List templates with rule counts and instantiation counts
+- `GET /policy-templates/categories` — List distinct template categories
+- `GET /policy-templates/:id` — Get template with rules
+- `POST /policy-templates` — Create template. Body: `{ name, category?, targetTagId?, autoApply?, interfaceScopeType?, ... }`
+- `PUT /policy-templates/:id` — Update template
+- `DELETE /policy-templates/:id` — Delete template
+- `GET /policy-templates/:id/rules` — List template rules
+- `POST /policy-templates/:id/rules` — Add rule to template
+- `PUT /policy-templates/rules/:ruleId` — Update template rule
+- `DELETE /policy-templates/rules/:ruleId` — Delete template rule
+- `POST /policy-templates/:id/instantiate` — Create policy set + version + rules from template (DRAFT)
+- `POST /policy-templates/:id/preview` — Preview what instantiation would create
+
+### Visual Topology (Operator/Admin role required)
+
+- `GET /topology/views` — List topology views
+- `GET /topology/views/:id` — Get view with flows
+- `POST /topology/views` — Create topology view
+- `PUT /topology/views/:id` — Update view (layout, name)
+- `DELETE /topology/views/:id` — Delete view
+- `POST /topology/views/:id/flows` — Add flow connection
+- `DELETE /topology/flows/:flowId` — Remove flow
+- `POST /topology/views/:id/generate-policies` — Generate policy sets from topology flows (DRAFT)
+- `GET /topology/auto-discover` — Auto-discover topology from existing inventory and deployed policies
+
+### Policy Recommendations (Operator/Admin role required)
+
+- `GET /recommendations` — List recommendations (filter by status, hostId)
+- `GET /recommendations/:id` — Get recommendation details
+- `POST /recommendations/generate` — Generate from audit session. Body: `{ auditSessionId, hostId }`
+- `POST /recommendations/:id/accept` — Accept recommendation
+- `POST /recommendations/:id/reject` — Reject recommendation
+- `POST /recommendations/:id/apply` — Apply accepted recommendation as DRAFT policy version
+
+### Integrations (Admin role required for write, Viewer+ for read)
+
+- `GET /integrations` — List all integrations
+- `GET /integrations/:id` — Get integration with recent events
+- `POST /integrations` — Create integration. Body: `{ type: 'siem'|'soar'|'vulnerability_db'|'threat_intel', provider, name, config, ... }`
+- `PUT /integrations/:id` — Update integration
+- `DELETE /integrations/:id` — Delete integration
+- `POST /integrations/:id/test` — Test connectivity
+- `POST /integrations/:id/sync` — Trigger sync
+- `GET /integrations/:id/events` — Get integration events
+- `GET /integrations/vulnerabilities/by-host/:hostId` — Host vulnerabilities
+- `GET /integrations/threat-intel` — Active threat intelligence entries
+
+### Policy Testing (Operator/Admin role required)
+
+- `GET /policy-test/sessions` — List test sessions (filter by hostId, status)
+- `GET /policy-test/sessions/:id` — Get test session details with analysis results
+- `POST /policy-test/start` — Start policy test. Body: `{ policyVersionId, hostId, durationMinutes? }`
+- `POST /policy-test/sessions/:id/stop` — Stop running test session
+- `POST /policy-test/sessions/:id/analyze` — Analyze collected traffic against policy rules
+
+### Kubernetes (Admin for write, Viewer+ for read)
+
+- `GET /k8s/clusters` — List K8s clusters
+- `GET /k8s/clusters/:id` — Get cluster with workload summary
+- `POST /k8s/clusters` — Add cluster. Body: `{ name, apiServerUrl, authType, ... }`
+- `PUT /k8s/clusters/:id` — Update cluster
+- `DELETE /k8s/clusters/:id` — Delete cluster
+- `POST /k8s/clusters/:id/sync` — Sync workloads from cluster
+- `GET /k8s/clusters/:id/workloads` — List workloads (filter by namespace, kind)
+- `POST /k8s/workloads/:workloadId/map-tag` — Map workload to Segmentra tag
+- `GET /k8s/clusters/:id/network-policies` — List deployed network policies
+- `POST /k8s/clusters/:id/deploy-policy` — Deploy NetworkPolicy. Body: `{ policyVersionId, namespace, policyName }`
+
+### OT/IoT Assets (Operator/Admin role required)
+
+- `GET /iot-assets` — List IoT assets (filter by assetType, zone, vlanId)
+- `GET /iot-assets/:id` — Get asset with observed flows and tags
+- `POST /iot-assets` — Create asset. Body: `{ name, assetType, vendor?, ipAddress?, zone?, criticality, ... }`
+- `PUT /iot-assets/:id` — Update asset
+- `DELETE /iot-assets/:id` — Delete asset
+- `POST /iot-assets/bulk-import` — Bulk import assets
+- `POST /iot-assets/:id/tags` — Assign tag to asset
+- `DELETE /iot-assets/:id/tags/:tagId` — Remove tag from asset
+- `GET /iot-assets/:id/flows` — Get observed traffic flows
+- `POST /iot-assets/:id/baseline` — Capture current traffic as baseline
+
+### Flow Collectors (Admin role required)
+
+- `GET /flow-collectors` — List flow collectors
+- `GET /flow-collectors/:id` — Get collector with recent flows
+- `POST /flow-collectors` — Create collector. Body: `{ name, type, listenAddress, listenPort, ... }`
+- `PUT /flow-collectors/:id` — Update collector
+- `DELETE /flow-collectors/:id` — Delete collector
+
+### Enforcement Points (Admin role required)
+
+- `GET /enforcement-points` — List enforcement points
+- `GET /enforcement-points/:id` — Get enforcement point with ACLs
+- `POST /enforcement-points` — Create. Body: `{ name, type, vendor?, mgmtIp, sshCredentialId?, ... }`
+- `PUT /enforcement-points/:id` — Update
+- `DELETE /enforcement-points/:id` — Delete
+- `POST /enforcement-points/:id/deploy-acl` — Deploy ACL. Body: `{ policyVersionId, aclName, aclConfig }`
+- `GET /enforcement-points/:id/acls` — List deployed ACLs
 
 ---
 
@@ -553,6 +702,130 @@ Migrations live in `packages/db/migrations/`.
 - `value` (text)
 - `description` (text, nullable)
 - `updated_at` (timestamptz)
+
+### Auto-Tagging
+
+#### `tag_rules`
+- `id` (uuid, PK)
+- `tag_id` (uuid, FK → tags.id)
+- `name` (text)
+- `description` (text, nullable)
+- `enabled` (boolean, default true)
+- `priority` (integer, default 0)
+- `criteria` (jsonb) — `{ conditions: [{field, operator, value}], logic: 'AND'|'OR' }`
+- `created_by` (uuid, FK → users.id)
+- `created_at`, `updated_at` (timestamptz)
+
+#### `tag_rule_results`
+- `tag_rule_id` (uuid, FK → tag_rules.id)
+- `host_id` (uuid, FK → hosts.id)
+- `matched` (boolean)
+- `evaluated_at` (timestamptz)
+- Primary key: `(tag_rule_id, host_id)`
+
+**Note**: `host_tags` table extended with `source` ('manual'|'rule'|'integration') and `source_rule_id` columns.
+
+### Policy Templates
+
+#### `policy_templates`
+- `id` (uuid, PK)
+- `name`, `description`, `category` (text)
+- `target_tag_id` (uuid, FK → tags.id, nullable)
+- `auto_apply` (boolean, default false)
+- `interface_scope_type`, `interface_scope_roles[]`, `interface_scope_names[]`
+- `created_by`, `created_at`, `updated_at`
+
+#### `policy_template_rules`
+- Mirrors `policy_rules` schema (order_index, direction, action, protocol, ports, source_type, source_value, log_mode, comment, interface scope overrides)
+- `policy_template_id` (uuid, FK → policy_templates.id)
+
+**Note**: `policy_sets` and `policy_versions` extended with `source_template_id` column.
+
+### Visual Topology
+
+#### `topology_views`
+- `id` (uuid, PK), `name`, `description`
+- `layout_data` (jsonb) — Node positions and edge data
+- `created_by`, `created_at`, `updated_at`
+
+#### `topology_flows`
+- `id` (uuid, PK), `topology_view_id` (FK)
+- `source_type`, `source_value`, `target_type`, `target_value`
+- `direction`, `action`, `protocol`, `ports`, `comment`
+
+### Policy Recommendations
+
+#### `policy_recommendations`
+- `id` (uuid, PK)
+- `audit_session_id` (uuid, FK → firewall_audit_sessions.id)
+- `host_id` (uuid, FK → hosts.id)
+- `status` — `PENDING|ACCEPTED|REJECTED|APPLIED`
+- `recommended_rules` (jsonb) — Array of rules with confidence and flow count
+- `confidence_score` (numeric)
+- `reviewed_by`, `reviewed_at`, `applied_policy_version_id`
+
+### Integrations
+
+#### `integrations`
+- `id` (uuid, PK), `type` (siem/soar/vulnerability_db/threat_intel), `provider`, `name`
+- `enabled`, `config` (jsonb), `credentials_secret_id` (FK → secret_store)
+- `last_sync_at`, `last_sync_status`
+
+#### `integration_events`
+- `id`, `integration_id` (FK), `direction` (inbound/outbound), `event_type`, `payload` (jsonb), `status`
+
+#### `host_vulnerabilities`
+- `host_id` (FK), `integration_id` (FK), `cve_id`, `severity`, `status` (open/patched/mitigated)
+
+#### `threat_intel_entries`
+- `integration_id` (FK), `entry_type` (ip/cidr), `value`, `threat_type`, `confidence`, `expires_at`
+
+### Policy Test Sessions
+
+#### `policy_test_sessions`
+- `id` (uuid, PK)
+- `policy_version_id` (FK), `host_id` (FK)
+- `status` — `PENDING|DEPLOYING|RUNNING|COLLECTING|ANALYZING|COMPLETED|FAILED`
+- `duration_minutes`, `started_at`, `scheduled_end_at`, `completed_at`
+- `backup_path`, `log_file_path`, `raw_log_data` (jsonb)
+- `analysis_results` (jsonb) — matchedFlows, unmatchedFlows, unexpectedBlocks, unexpectedAllows, summary
+
+### Kubernetes
+
+#### `k8s_clusters`
+- `id`, `name`, `api_server_url`, `auth_type`, `credentials_secret_id`, `ca_cert_secret_id`
+- `default_namespace`, `last_sync_at`, `last_sync_status`, `enabled`
+
+#### `k8s_workloads`
+- `cluster_id` (FK), `namespace`, `kind`, `name`, `labels` (jsonb), `pod_ips[]`, `service_cluster_ip`, `service_ports` (jsonb)
+
+#### `k8s_workload_tags`
+- `workload_id` (FK), `tag_id` (FK), `source` (label_sync/manual)
+
+#### `k8s_network_policies`
+- `cluster_id` (FK), `policy_version_id` (FK), `namespace`, `policy_name`, `manifest` (jsonb), `status`, `deployed_hash`
+
+### OT/IoT
+
+#### `iot_assets`
+- `id`, `name`, `asset_type` (plc/hmi/sensor/camera/printer/hvac/medical/other)
+- `vendor`, `model`, `firmware_version`, `mac_address`, `ip_address`
+- `vlan_id` (FK), `zone` (Purdue level text), `criticality`, `fingerprint` (jsonb)
+
+#### `iot_asset_tags`
+- `asset_id` (FK), `tag_id` (FK)
+
+#### `flow_collectors`
+- `id`, `name`, `type` (netflow_v5/v9/sflow/ipfix/span_analyzer), `listen_address`, `listen_port`, `config` (jsonb), `enabled`
+
+#### `iot_observed_flows`
+- `collector_id` (FK), `source_ip`, `source_port`, `dest_ip`, `dest_port`, `protocol`, `bytes_total`, `packets_total`, `first_seen_at`, `last_seen_at`
+
+#### `enforcement_points`
+- `id`, `name`, `type` (switch_acl/gateway_firewall), `vendor`, `mgmt_ip`, `ssh_credential_id` (FK)
+
+#### `enforcement_acls`
+- `enforcement_point_id` (FK), `policy_version_id` (FK), `acl_name`, `acl_config`, `status`, `deployed_hash`
 
 ---
 
@@ -1075,6 +1348,149 @@ The diagram uses a circular layout algorithm:
 - **Visual Debugging**: Identify connectivity issues visually
 - **Policy Review**: Understand what policies are actually applied
 - **Documentation**: Visual representation of network security posture
+
+### Auto-Tagging Rule Engine
+
+The auto-tagging engine automatically assigns tags to hosts based on configurable criteria, replacing manual-only tag management.
+
+#### How It Works
+
+1. **Define Rules**: Create tag rules with conditions (hostname matches regex, IP in CIDR range, VLAN membership, OS family, etc.)
+2. **Evaluation**: Rules evaluate against all hosts, supporting AND/OR logic across conditions
+3. **Auto-Assignment**: Matching hosts automatically receive the target tag with `source='rule'`
+4. **Source Tracking**: Tags track their origin (manual, rule, or integration) — rule engine never overwrites manual tags
+5. **Background Job**: Rules auto-evaluate every 5 minutes; on-demand evaluation also available
+
+#### Supported Criteria
+
+| Field | Operators |
+|-------|----------|
+| hostname | equals, not_equals, matches (regex), contains |
+| mgmt_ip | equals, in_cidr |
+| vlan_id, vlan_tag | equals, not_equals |
+| os_family, environment | equals, not_equals, matches, contains |
+| firewall_backend | equals, not_equals |
+| tag | has_tag |
+
+### Policy Templates
+
+Reusable policy blueprints that accelerate policy creation.
+
+- **Template Rules**: Mirror policy_rules schema exactly — same fields, same validation
+- **Instantiation**: Creates real policy_set + policy_version + policy_rules in DRAFT status
+- **Auto-Apply**: When enabled, automatically creates DRAFT policies when hosts gain the template's target tag
+- **Compiler Unchanged**: Templates produce standard policy objects, so the compiler needs zero changes
+
+### Visual Topology Design
+
+A network topology canvas for designing policies visually.
+
+- **Nodes**: Represent tags, VLANs, or CIDR groups
+- **Edges**: Represent allowed or denied flows (protocol, ports, direction)
+- **Auto-Discovery**: Builds initial topology from existing inventory (tags with hosts, VLANs with hosts) and deployed policies
+- **Policy Generation**: Decomposes visual flows into policy sets with bidirectional rules — a connection between TAG-A and TAG-B on port 443 produces OUT rules on TAG-A and IN rules on TAG-B
+
+### Policy Auto-Recommendations
+
+After a firewall audit/learning session completes, the recommendation engine analyzes traffic flows and suggests policy rules.
+
+#### Pipeline
+
+1. **Input**: `CommunicationFlow[]` from the audit session's parsed log data
+2. **IP Resolution**: Look up each IP → host → tags/VLAN; prefer TAG-based rules over raw CIDRs
+3. **Flow Grouping**: Consolidate flows by destination port; merge sources sharing the same tag
+4. **Confidence Scoring**: Based on flow frequency, known service ports (80/443/22/53/3306/5432), and whether both endpoints are in inventory
+5. **Deduplication**: Skip rules that already exist in deployed policies for the host
+6. **Output**: Ranked list of recommended ALLOW rules with confidence scores
+
+#### Workflow
+
+- Generate recommendations from a completed audit session
+- Review each recommendation (accept/reject)
+- Apply accepted recommendations → creates DRAFT policy version through normal approval workflow
+
+### Integrations Framework
+
+Adapter-based integration system for external security tools.
+
+| Type | Purpose |
+|------|---------|
+| SIEM | Forward audit events via syslog/webhook |
+| SOAR | Expose actions (isolate host, apply emergency policy) via webhooks |
+| Vulnerability DB | Poll scanner API, populate host vulnerabilities, trigger auto-tagging for critical CVEs |
+| Threat Intelligence | Poll threat feeds, maintain IP/CIDR blocklists with confidence and expiry |
+
+- **Credentials**: Stored in existing `secret_store` with AES-256-GCM encryption
+- **Event Trail**: All sync/webhook operations logged in `integration_events`
+- **Auto-Block**: Threat intel auto-block is opt-in (admin configures confidence threshold)
+
+### On-Device Policy Testing
+
+Structured pre-enforcement testing that validates a policy against real traffic before enforcement.
+
+#### How It Works (vs. Firewall Learning)
+
+| | Firewall Learning | Policy Testing |
+|---|---|---|
+| **Purpose** | Discover unknown traffic | Validate known policy |
+| **Input** | No policy (observe everything) | Specific policy version |
+| **Output** | Communication flows | Gap analysis report |
+| **Result** | "What traffic exists?" | "Does my policy cover all traffic?" |
+
+#### Analysis Categories
+
+- **Matched Flows** (green): Traffic that matches an ALLOW rule — expected behavior
+- **Unexpected Blocks** (red): Traffic that matches a DENY rule — would break active connections
+- **Unmatched Flows** (yellow): Traffic with no matching rule — default-deny would block it
+- **Coverage %**: Percentage of observed flows covered by ALLOW rules
+
+#### Technical Reuse
+
+- Compiler: `compileHostPolicy()` with `logOnlyMode: true`
+- Executor: `deployLogOnlyPolicy()`, `restoreAuditSession()`, `retrieveAuditLogs()` from audit-ssh.ts
+- Log Parser: `parseFirewallLogs()`, `groupCommunicationFlows()`
+- Background Job: Expired test sessions auto-stopped every 1 minute
+
+### Kubernetes Microsegmentation
+
+Agentless Kubernetes NetworkPolicy management via K8s API.
+
+- **No Agent Required**: Connects to K8s API server directly — no sidecar, no service mesh dependency
+- **Separate Package**: K8s logic is separate from SSH-focused `packages/executor`
+- **Label Sync**: K8s labels synced to Segmentra tags for unified policy management across hosts and containers
+- **NetworkPolicy Generation**: Translates Segmentra rules into K8s NetworkPolicy manifests (label selectors, not IP sets)
+- **Credentials**: Supports kubeconfig, service account, and bearer token authentication — stored in `secret_store`
+
+### OT/IoT Microsegmentation
+
+Passive traffic discovery and upstream enforcement for devices that cannot run agents.
+
+#### Architecture
+
+```
+┌─────────────────┐     NetFlow/sFlow     ┌──────────────────┐
+│ Network Switches │ ──────────────────► │ Flow Collectors  │
+│ (SPAN/Mirror)    │                      │ (Segmentra)      │
+└─────────────────┘                      └────────┬─────────┘
+                                                   │ Observed Flows
+                                                   ▼
+                                         ┌──────────────────┐
+                                         │ IoT Asset        │
+                                         │ Inventory        │
+                                         │ + Fingerprinting │
+                                         └────────┬─────────┘
+                                                   │ Policy Rules
+                                                   ▼
+┌─────────────────┐     SSH (ACLs)       ┌──────────────────┐
+│ IoT/OT Devices  │ ◄────────────────── │ Enforcement      │
+│ (PLC, HMI, etc) │  (via switch/gw)    │ Points           │
+└─────────────────┘                      └──────────────────┘
+```
+
+- **Separate from Hosts**: `iot_assets` table is distinct from `hosts` — fundamentally different devices
+- **Zone Model**: Text field for Purdue levels, flexible for non-standard OT network layouts
+- **Enforcement**: Via existing SSH credential infrastructure to managed switches/gateways
+- **Baseline**: Snapshot current traffic as "allowed" for anomaly detection
 
 ---
 

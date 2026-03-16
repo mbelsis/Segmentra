@@ -15,6 +15,12 @@ import { DeploymentDetailPage } from './pages/DeploymentDetailPage'
 import { AuditPage } from './pages/AuditPage'
 import { AdminPage } from './pages/AdminPage'
 import { TroubleshootPage } from './pages/TroubleshootPage'
+import { PolicyTemplatesPage } from './pages/PolicyTemplatesPage'
+import { TopologyPage } from './pages/TopologyPage'
+import { IntegrationsPage } from './pages/IntegrationsPage'
+import { PolicyTestPage } from './pages/PolicyTestPage'
+import { KubernetesPage } from './pages/KubernetesPage'
+import { IoTPage } from './pages/IoTPage'
 
 function App() {
   return (
@@ -34,12 +40,18 @@ function App() {
           <Route path="policies" element={<PolicySetsPage />} />
           <Route path="policy-set/:policySetId" element={<PolicySetDetailPage />} />
           <Route path="policy-version/:versionId" element={<PolicyVersionPage />} />
+          <Route path="policy-templates" element={<PolicyTemplatesPage />} />
+          <Route path="topology" element={<TopologyPage />} />
           <Route path="approvals" element={<ApprovalsPage />} />
           <Route path="deployments" element={<DeploymentsPage />} />
           <Route path="deployment/:deploymentId" element={<DeploymentDetailPage />} />
+          <Route path="policy-testing" element={<PolicyTestPage />} />
+          <Route path="troubleshoot" element={<TroubleshootPage />} />
+          <Route path="integrations" element={<IntegrationsPage />} />
+          <Route path="kubernetes" element={<KubernetesPage />} />
+          <Route path="iot" element={<IoTPage />} />
           <Route path="audit" element={<AuditPage />} />
           <Route path="admin" element={<AdminPage />} />
-          <Route path="troubleshoot" element={<TroubleshootPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
