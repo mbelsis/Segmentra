@@ -24,7 +24,9 @@ export function AppShell() {
         <NavLink to="/integrations">Integrations</NavLink>
         <NavLink to="/kubernetes">Kubernetes</NavLink>
         <NavLink to="/iot">OT/IoT</NavLink>
-        <NavLink to="/audit">Audit</NavLink>
+        <NavLink to="/security-audit">Security Audit</NavLink>
+        <NavLink to="/notifications">Notifications</NavLink>
+        <NavLink to="/audit">Audit Log</NavLink>
         <NavLink to="/admin">Admin</NavLink>
         <div style={{ 
           marginTop: 'auto', 

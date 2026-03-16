@@ -239,6 +239,8 @@ This will apply migrations 009 through 016:
 - `014_add_policy_test_sessions` — On-device policy testing
 - `015_add_kubernetes_clusters` — Kubernetes microsegmentation
 - `016_add_ot_iot` — OT/IoT asset management and flow collection
+- `017_add_policy_expiry` — Time-limited deployments with optional expiry
+- `018_add_notifications` — Notification channels, rules, and delivery log
 
 All migrations are additive (new tables and columns only) — no existing data is modified.
 
@@ -251,6 +253,8 @@ After upgrading, the sidebar will show 6 new pages:
 - **Integrations** — External tool connections
 - **Kubernetes** — K8s cluster and NetworkPolicy management
 - **OT/IoT** — IoT asset inventory and enforcement
+- **Security Audit** — Excessive rules detection and compliance risk scanning
+- **Notifications** — Alert channel management and event subscriptions
 
 ## Kubernetes Setup (Optional)
 

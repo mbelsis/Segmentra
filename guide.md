@@ -25,7 +25,10 @@ This guide walks through every step of using Segmentra — from initial setup to
 17. [Integrations](#17-integrations)
 18. [Kubernetes Microsegmentation](#18-kubernetes-microsegmentation)
 19. [OT/IoT Microsegmentation](#19-otiot-microsegmentation)
-20. [Background Jobs](#20-background-jobs)
+20. [Policy Expiry](#20-policy-expiry-time-limited-deployments)
+21. [Notifications](#21-notifications)
+22. [Security Posture Audit](#22-security-posture-audit)
+23. [Background Jobs](#23-background-jobs)
 
 ---
 
@@ -806,7 +809,83 @@ Select an asset and click **Baseline** to snapshot its current traffic pattern. 
 
 ---
 
-## 20. Background Jobs
+## 20. Policy Expiry (Time-Limited Deployments)
+
+### When to Use
+
+- Temporary vendor access (e.g., "allow vendor SSH for 30 days")
+- Maintenance window policies (e.g., "open port 8080 during maintenance, auto-remove after")
+- Compliance-driven review cycles (e.g., "expire every 90 days to force re-review")
+
+### How to Set It
+
+1. Go to **Deployments** → **+ Create Deployment**
+2. Fill in policy version, targets, mode as usual
+3. Set **Policy Expires At** to the desired expiry date/time
+4. Choose **On Expiry**:
+   - **Notify Only** — sends alert, rules stay active (default)
+   - **Remove** — auto-rollback firewall rules on all hosts
+   - **Revert** — re-deploy the previous policy version
+
+### What Happens Automatically
+
+- **24 hours before expiry**: A `POLICY_EXPIRING_SOON` notification is sent to subscribed channels
+- **At expiry**: The deployment is marked expired, `POLICY_EXPIRED` notification sent, and the chosen action is executed
+- **Audit trail**: Both the warning and expiry are logged in audit events
+
+---
+
+## 21. Notifications
+
+### Setting Up
+
+1. Go to **Notifications** in the sidebar
+2. Click **+ New Channel** and choose:
+   - **Slack** — provide a webhook URL
+   - **Webhook** — provide an endpoint URL and optional auth header
+   - **Email** — provide SMTP settings and recipient
+3. Click **Send Test** to verify connectivity
+4. Add **Event Subscriptions** — choose which events trigger notifications on this channel
+
+### Example Configuration
+
+**Slack channel for operations:**
+- Subscribe to: DEPLOYMENT_STARTED, DEPLOYMENT_COMPLETED, DEPLOYMENT_FAILED
+
+**Webhook to SIEM:**
+- Subscribe to: POLICY_APPROVED, POLICY_EXPIRED, EXCESSIVE_RULES_DETECTED
+
+**Email to security team:**
+- Subscribe to: POLICY_EXPIRING_SOON, COMPLIANCE_DRIFT, EXCESSIVE_RULES_DETECTED
+
+---
+
+## 22. Security Posture Audit
+
+### Running a Scan
+
+1. Go to **Security Audit** in the sidebar
+2. Click **Run Security Scan**
+3. Review findings grouped by severity (critical → high → medium → low)
+4. Click severity cards to filter
+5. Each finding shows the affected policy, rule details, and remediation guidance
+
+### What It Checks
+
+| Finding | Severity | Example |
+|---------|----------|---------|
+| SSH open to 0.0.0.0/0 | Critical | Port 22 ALLOW from any source |
+| All ports open to any | Critical | Protocol=any, ports=* from 0.0.0.0/0 |
+| Broad CIDR source | High | ALLOW from 10.0.0.0/8 (16M IPs) |
+| Any-protocol rule | High | Protocol=any with no port restriction |
+| ALL_INTERFACES + broad | High | Every interface exposed with wide-open rules |
+| Unmanaged hosts | Medium | Hosts with no policy ever deployed |
+| Stale policies | Medium | Last deployment > 90 days ago |
+| Duplicate rules | Low | Same rule in multiple policy sets |
+
+---
+
+## 23. Background Jobs
 
 Segmentra runs several background jobs automatically:
 
@@ -817,6 +896,7 @@ Segmentra runs several background jobs automatically:
 | **Expired audit sessions** | 1 min | Auto-restores firewall rules when learning sessions expire |
 | **Tag rule evaluation** | 5 min | Re-evaluates all enabled auto-tagging rules against hosts |
 | **Policy test expiry** | 1 min | Auto-stops test sessions past their scheduled end time |
+| **Deployment expiry** | 1 min | Processes expired deployments, sends 24h expiry warnings |
 
 These jobs run as `setInterval` callbacks in the API process — no external scheduler needed.
 

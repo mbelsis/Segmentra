@@ -28,6 +28,9 @@ This document provides detailed technical information about Segmentra's architec
    - [On-Device Policy Testing](#on-device-policy-testing)
    - [Kubernetes Microsegmentation](#kubernetes-microsegmentation)
    - [OT/IoT Microsegmentation](#otiot-microsegmentation)
+   - [Policy Expiry](#policy-expiry)
+   - [Notification System](#notification-system)
+   - [Security Posture Audit](#security-posture-audit)
 7. [Troubleshooting](#troubleshooting)
 8. [Configuration Details](#configuration-details)
    - [Environment Variables](#environment-variables)
@@ -69,6 +72,8 @@ apps/
         iot-assets.ts            # IoT/OT asset management
         flow-collectors.ts       # NetFlow/sFlow collectors
         enforcement-points.ts    # Switch/gateway enforcement
+        notifications.ts         # Notification channel management
+        security-audit.ts        # Security posture scanning
       services/                # LDAP, secrets crypto, JWT, audit, ...
         policy-diff.ts         # Policy version comparison
         safety-check.ts        # Pre-deployment safety validation
@@ -80,6 +85,8 @@ apps/
         recommendation-engine.ts # Audit-to-policy recommendations
         topology-to-policy.ts    # Visual topology → policy conversion
         policy-test-analyzer.ts  # Policy test gap analysis
+        notifications.ts         # Multi-channel notification delivery
+        excessive-rules-audit.ts # Security posture scanning engine
       lib/                     # Environment config
       index.ts                 # Express app entry point
   web/                         # React UI (Vite)
@@ -93,6 +100,8 @@ apps/
         PolicyTestPage.tsx       # On-device policy testing
         KubernetesPage.tsx       # Kubernetes management
         IoTPage.tsx              # OT/IoT asset management
+        SecurityAuditPage.tsx    # Security posture audit
+        NotificationsPage.tsx    # Notification management
       lib/                     # API client, auth helpers
 infra/
   app/Dockerfile               # App container (installs docker client + openssh-client)
@@ -114,6 +123,8 @@ packages/
       014_add_policy_test_sessions.sql
       015_add_kubernetes_clusters.sql
       016_add_ot_iot.sql
+      017_add_policy_expiry.sql
+      018_add_notifications.sql
     scripts/
       seed-roles.js
   shared/                      # shared TS types
@@ -426,6 +437,23 @@ Base URL: `http://localhost:8080/api`
 - `POST /enforcement-points/:id/deploy-acl` — Deploy ACL. Body: `{ policyVersionId, aclName, aclConfig }`
 - `GET /enforcement-points/:id/acls` — List deployed ACLs
 
+### Notifications (Admin role required)
+
+- `GET /notifications/channels` — List notification channels with rule counts and failure stats
+- `GET /notifications/channels/:id` — Get channel with rules and recent log
+- `POST /notifications/channels` — Create channel. Body: `{ name, type: 'slack'|'webhook'|'email', config: {}, enabled? }`
+- `PUT /notifications/channels/:id` — Update channel
+- `DELETE /notifications/channels/:id` — Delete channel and rules
+- `POST /notifications/channels/:id/test` — Send test notification
+- `POST /notifications/channels/:id/rules` — Subscribe to event. Body: `{ eventType, enabled? }`
+- `DELETE /notifications/rules/:ruleId` — Unsubscribe from event
+- `GET /notifications/log` — View notification history (filter by status, limit)
+
+### Security Posture Audit (All roles)
+
+- `GET /security-audit/scan` — Run full audit scan, returns findings with severity
+- `GET /security-audit/summary` — Get finding counts only (lighter)
+
 ---
 
 ## Database Schema
@@ -702,6 +730,26 @@ Migrations live in `packages/db/migrations/`.
 - `value` (text)
 - `description` (text, nullable)
 - `updated_at` (timestamptz)
+
+### Policy Expiry
+
+Added to existing `deployments` table:
+- `expires_at` (timestamptz, nullable) — When the deployment expires
+- `expiry_action` (text, default 'NOTIFY_ONLY') — What to do on expiry: NOTIFY_ONLY, REMOVE, REVERT
+- `expired` (boolean, default false) — Whether the deployment has been processed as expired
+
+### Notifications
+
+#### `notification_channels`
+- `id` (uuid, PK), `name`, `type` (slack/webhook/email), `config` (jsonb), `enabled`
+- `created_by`, `created_at`, `updated_at`
+
+#### `notification_rules`
+- `id` (uuid, PK), `channel_id` (FK), `event_type`, `enabled`, `filter` (jsonb, optional)
+
+#### `notification_log`
+- `id` (uuid, PK), `channel_id` (FK), `event_type`, `subject`, `payload` (jsonb)
+- `status` (PENDING/SENT/FAILED), `error_message`, `sent_at`, `created_at`
 
 ### Auto-Tagging
 
@@ -1491,6 +1539,89 @@ Passive traffic discovery and upstream enforcement for devices that cannot run a
 - **Zone Model**: Text field for Purdue levels, flexible for non-standard OT network layouts
 - **Enforcement**: Via existing SSH credential infrastructure to managed switches/gateways
 - **Baseline**: Snapshot current traffic as "allowed" for anomaly detection
+
+### Policy Expiry
+
+Optional time-limited deployments that automatically expire after a specified date.
+
+#### How It Works
+
+1. When creating a deployment, optionally set **Expires At** and **On Expiry** action
+2. A background job checks every minute for expired deployments
+3. On expiry, the system:
+   - Marks the deployment as `expired = true`
+   - Sends a `POLICY_EXPIRED` notification
+   - Logs an audit event
+   - Executes the chosen action (notify only, remove rules, or revert to previous)
+4. A 24-hour warning notification is sent before expiry (deduped to avoid spam)
+
+#### Expiry Actions
+
+| Action | Behavior |
+|--------|----------|
+| **Notify Only** | Alert is sent, but firewall rules remain active on hosts. Manual removal required. |
+| **Remove** | Firewall rules are rolled back on all deployed hosts (restore from backup). |
+| **Revert** | The previous policy version is automatically re-deployed to all affected hosts. |
+
+#### Use Cases
+
+- Temporary vendor access (30-day window)
+- Maintenance window policies (remove restrictive rules after maintenance)
+- Compliance-driven reviews (force policy expiry to ensure periodic review)
+
+### Notification System
+
+Multi-channel alerting for security events and operational changes.
+
+#### Supported Channels
+
+| Channel Type | Configuration | Example |
+|-------------|---------------|---------|
+| **Slack** | `{ "webhookUrl": "https://hooks.slack.com/services/..." }` | Posts formatted messages with color-coded severity |
+| **Webhook** | `{ "url": "https://...", "authHeader": "Bearer ..." }` | POSTs JSON payload to any HTTP endpoint |
+| **Email** | `{ "to": "admin@company.com", "smtpHost": "..." }` | Sends email notifications (requires SMTP) |
+
+#### Event Types
+
+| Event | Triggered When |
+|-------|---------------|
+| `POLICY_SUBMITTED` | Policy version submitted for approval |
+| `POLICY_APPROVED` | Policy version approved |
+| `POLICY_REJECTED` | Policy version rejected |
+| `DEPLOYMENT_STARTED` | Deployment execution begins |
+| `DEPLOYMENT_COMPLETED` | Deployment finishes successfully |
+| `DEPLOYMENT_FAILED` | Deployment fails |
+| `COMPLIANCE_DRIFT` | Host firewall rules don't match deployed policy |
+| `POLICY_EXPIRING_SOON` | Deployment within 24 hours of expiry |
+| `POLICY_EXPIRED` | Deployment has expired |
+| `EXCESSIVE_RULES_DETECTED` | Security audit found critical/high findings |
+
+#### Design
+
+- **Fire-and-forget**: Notification failures never block core operations (logged but not thrown)
+- **Deduplication**: Expiry warnings are sent once per 24-hour period per deployment
+- **Full log**: Every notification attempt is recorded in `notification_log` with status tracking
+
+### Security Posture Audit
+
+On-demand scanning of all deployed policies for excessive permissions and compliance risks.
+
+#### What It Checks
+
+| Category | Severity | What It Detects |
+|----------|----------|----------------|
+| Wide Open Sensitive Port | Critical | SSH, RDP, database ports open to 0.0.0.0/0 |
+| Wide Open All Ports | Critical | All ports open to any source |
+| Very Broad Source CIDR | High | Source ranges /0 to /8 (millions of IPs) |
+| Any Protocol / Any Port | High | protocol=any with no port restriction |
+| ALL_INTERFACES + Broad Source | High | Every interface exposed with wide-open rules |
+| Duplicate Rules | Low | Same rule in multiple policy sets |
+| Unmanaged Hosts | Medium | Enabled hosts with no successful deployment |
+| Stale Policies | Medium | Deployments older than 90 days without update |
+
+#### Auto-Notification
+
+When the scan finds critical or high severity findings, it automatically sends an `EXCESSIVE_RULES_DETECTED` notification to all subscribed channels.
 
 ---
 

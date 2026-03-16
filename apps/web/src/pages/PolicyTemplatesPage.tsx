@@ -104,6 +104,11 @@ export function PolicyTemplatesPage() {
   return (
     <div>
       <h2>Policy Templates</h2>
+      <p style={{ color: '#78644e', fontSize: '13.5px', marginTop: -4, marginBottom: 16, lineHeight: 1.6 }}>
+        Reusable policy blueprints for common server roles. Create a template (e.g., "Web Server" = allow 80/443 in, allow 53 out),
+        then <strong>instantiate</strong> it to generate a real policy set with rules in DRAFT status — ready for the normal approval workflow.
+        Enable <strong>auto-apply</strong> on a template to automatically create DRAFT policies whenever a host gains the template's target tag.
+      </p>
       {error && <div style={{ color: 'red', marginBottom: 8 }}>{error} <button onClick={() => setError('')}>dismiss</button></div>}
 
       <div style={{ display: 'flex', gap: 16, marginBottom: 16 }}>

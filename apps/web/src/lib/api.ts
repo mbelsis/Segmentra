@@ -511,6 +511,31 @@ export const api = {
     deployAcl: (epId: string, b: any) => request<{ acl: any }>(`/enforcement-points/${epId}/deploy-acl`, { method: 'POST', body: JSON.stringify(b) }),
     listAcls: (epId: string) => request<{ acls: any[] }>(`/enforcement-points/${epId}/acls`),
   },
+
+  // === Notifications ===
+  notifications: {
+    channels: () => request<{ channels: any[] }>('/notifications/channels'),
+    channel: (id: string) => request<{ channel: any; rules: any[]; recentLog: any[] }>(`/notifications/channels/${id}`),
+    createChannel: (b: any) => request<{ channel: any }>('/notifications/channels', { method: 'POST', body: JSON.stringify(b) }),
+    updateChannel: (id: string, b: any) => request<{ channel: any }>(`/notifications/channels/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
+    deleteChannel: (id: string) => request<{ ok: boolean }>(`/notifications/channels/${id}`, { method: 'DELETE' }),
+    testChannel: (id: string) => request<{ success: boolean; message: string }>(`/notifications/channels/${id}/test`, { method: 'POST' }),
+    addRule: (channelId: string, b: any) => request<{ rule: any }>(`/notifications/channels/${channelId}/rules`, { method: 'POST', body: JSON.stringify(b) }),
+    deleteRule: (ruleId: string) => request<{ ok: boolean }>(`/notifications/rules/${ruleId}`, { method: 'DELETE' }),
+    log: (params?: { limit?: number; status?: string }) => {
+      const q = new URLSearchParams();
+      if (params?.limit) q.append('limit', String(params.limit));
+      if (params?.status) q.append('status', params.status);
+      const qs = q.toString();
+      return request<{ log: any[] }>(`/notifications/log${qs ? `?${qs}` : ''}`);
+    },
+  },
+
+  // === Security Audit ===
+  securityAudit: {
+    scan: () => request<{ findings: any[]; summary: any }>('/security-audit/scan'),
+    summary: () => request<{ summary: any }>('/security-audit/summary'),
+  },
 };
 
 

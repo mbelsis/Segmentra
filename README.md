@@ -196,6 +196,25 @@ Additional troubleshooting capabilities include:
 - **Enforcement Points**: Manage upstream switches and gateway firewalls that enforce policies on behalf of unmanaged devices
 - **Traffic Baseline**: Snapshot current traffic patterns as an allowed baseline for anomaly detection
 
+### Policy Expiry (Time-Limited Deployments)
+- **Optional Expiry Date**: Set when a deployment should expire (e.g., "vendor access until March 30")
+- **Three Expiry Actions**: Notify Only (alert but keep rules), Remove (auto-rollback on all hosts), Revert (re-deploy previous version)
+- **24-Hour Warnings**: Automatic notification when a deployment is approaching expiry
+- **Background Processing**: Expired deployments are detected and processed every minute
+
+### Notification System
+- **Channel Types**: Slack (webhook), generic HTTP webhook, email (SMTP)
+- **10 Event Types**: POLICY_SUBMITTED, POLICY_APPROVED, POLICY_REJECTED, DEPLOYMENT_STARTED, DEPLOYMENT_COMPLETED, DEPLOYMENT_FAILED, COMPLIANCE_DRIFT, POLICY_EXPIRING_SOON, POLICY_EXPIRED, EXCESSIVE_RULES_DETECTED
+- **Fire-and-Forget**: Notification failures never block core operations
+- **Full Audit Trail**: Every notification attempt logged with status and error details
+
+### Security Posture Audit
+- **On-Demand Scanning**: Analyze all deployed and approved policies for security risks
+- **Critical Findings**: Sensitive ports (SSH, RDP, databases) open to 0.0.0.0/0, all ports open to any source
+- **High Findings**: Very broad CIDRs (/0-/8), any-protocol/any-port rules, ALL_INTERFACES with broad sources
+- **Medium Findings**: Unmanaged hosts (no policy deployed), stale policies (>90 days without review)
+- **Low Findings**: Duplicate rules across policy sets
+- **Auto-Notification**: Sends alerts when critical or high findings are detected
 
 
 ---
@@ -473,6 +492,21 @@ Segmentra now includes several advanced features for production-ready firewall m
 ### Extended Enforcement Domains
 - **Kubernetes NetworkPolicy**: Agentless management of K8s NetworkPolicy resources across multiple clusters
 - **OT/IoT Microsegmentation**: Passive discovery, flow collection, and upstream enforcement for unmanaged devices
+
+### Policy Expiry
+- **Time-Limited Deployments**: Optionally set an expiry date when creating deployments (e.g., temporary vendor access for 30 days)
+- **Expiry Actions**: Choose what happens when the policy expires — Notify Only, Remove (rollback rules), or Revert (restore previous version)
+- **Automatic Alerts**: 24-hour advance warnings and expiry notifications via configured channels
+
+### Notification System
+- **Multi-Channel Alerts**: Send notifications via Slack webhooks, generic webhooks, or email
+- **Event Subscriptions**: Subscribe channels to specific events — policy approvals, deployment failures, compliance drift, policy expiry, security audit findings
+- **Notification Log**: Full history of all sent notifications with delivery status tracking
+
+### Security Posture Audit
+- **Excessive Rules Detection**: Scan all deployed policies for overly permissive rules and compliance risks
+- **8 Audit Categories**: Sensitive ports open to any source, broad CIDRs, any-protocol rules, ALL_INTERFACES with broad sources, duplicate rules, unmanaged hosts, stale deployments
+- **Severity Scoring**: Findings categorized as critical, high, medium, or low with drill-down details
 
 ---
 

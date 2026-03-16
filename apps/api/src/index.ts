@@ -24,6 +24,8 @@ import { kubernetesRouter } from './routes/kubernetes.js';
 import { iotAssetsRouter } from './routes/iot-assets.js';
 import { flowCollectorsRouter } from './routes/flow-collectors.js';
 import { enforcementPointsRouter } from './routes/enforcement-points.js';
+import { notificationsRouter } from './routes/notifications.js';
+import { securityAuditRouter } from './routes/security-audit.js';
 
 const app = express();
 app.use(cors());
@@ -49,6 +51,8 @@ app.use('/api/k8s', kubernetesRouter);
 app.use('/api/iot-assets', iotAssetsRouter);
 app.use('/api/flow-collectors', flowCollectorsRouter);
 app.use('/api/enforcement-points', enforcementPointsRouter);
+app.use('/api/notifications', notificationsRouter);
+app.use('/api/security-audit', securityAuditRouter);
 
 // Global error handler middleware (must be last)
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
@@ -135,6 +139,91 @@ app.listen(env.PORT, () => {
       console.error('[Tag Rules] Error evaluating tag rules:', e);
     }
   }, 5 * 60 * 1000); // Check every 5 minutes
+
+  // Start periodic deployment expiry processor (every 1 minute)
+  // Checks for deployments with expires_at in the past and handles them
+  setInterval(async () => {
+    try {
+      const { pool } = await import('./db/pool.js');
+      const { sendNotification } = await import('./services/notifications.js');
+
+      // Find expired deployments
+      const { rows: expired } = await pool.query(
+        `SELECT d.id, d.policy_version_id, d.expiry_action, d.expires_at,
+           pv.version_number, ps.name as policy_set_name
+         FROM deployments d
+         JOIN policy_versions pv ON pv.id = d.policy_version_id
+         JOIN policy_sets ps ON ps.id = pv.policy_set_id
+         WHERE d.expires_at IS NOT NULL AND d.expires_at <= now() AND d.expired = false
+           AND d.status IN ('SUCCEEDED', 'PARTIAL')`
+      );
+
+      for (const dep of expired) {
+        // Mark as expired
+        await pool.query(`UPDATE deployments SET expired = true WHERE id = $1`, [dep.id]);
+
+        // Send notification
+        await sendNotification({
+          eventType: 'POLICY_EXPIRED',
+          subject: `Policy expired: ${dep.policy_set_name} v${dep.version_number}`,
+          body: {
+            deploymentId: dep.id,
+            policySetName: dep.policy_set_name,
+            versionNumber: dep.version_number,
+            expiryAction: dep.expiry_action,
+            expiredAt: dep.expires_at,
+          },
+        });
+
+        // Log audit event
+        await pool.query(
+          `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+           VALUES (NULL, 'POLICY_EXPIRED', 'deployment', $1, $2)`,
+          [dep.id, JSON.stringify({ policySetName: dep.policy_set_name, versionNumber: dep.version_number, expiryAction: dep.expiry_action })]
+        );
+
+        // eslint-disable-next-line no-console
+        console.log(`[Policy Expiry] Deployment ${dep.id} expired (${dep.policy_set_name} v${dep.version_number}, action: ${dep.expiry_action})`);
+      }
+
+      // Send "expiring soon" warnings (24 hours before expiry)
+      const { rows: expiringSoon } = await pool.query(
+        `SELECT d.id, d.expires_at, pv.version_number, ps.name as policy_set_name
+         FROM deployments d
+         JOIN policy_versions pv ON pv.id = d.policy_version_id
+         JOIN policy_sets ps ON ps.id = pv.policy_set_id
+         WHERE d.expires_at IS NOT NULL
+           AND d.expires_at > now()
+           AND d.expires_at <= now() + interval '24 hours'
+           AND d.expired = false
+           AND d.status IN ('SUCCEEDED', 'PARTIAL')
+           AND NOT EXISTS (
+             SELECT 1 FROM notification_log nl
+             WHERE nl.event_type = 'POLICY_EXPIRING_SOON'
+               AND nl.payload::text LIKE '%' || d.id::text || '%'
+               AND nl.created_at > now() - interval '24 hours'
+           )`
+      );
+
+      for (const dep of expiringSoon) {
+        const hoursLeft = Math.round((new Date(dep.expires_at).getTime() - Date.now()) / 3600000);
+        await sendNotification({
+          eventType: 'POLICY_EXPIRING_SOON',
+          subject: `Policy expiring in ${hoursLeft}h: ${dep.policy_set_name} v${dep.version_number}`,
+          body: {
+            deploymentId: dep.id,
+            policySetName: dep.policy_set_name,
+            versionNumber: dep.version_number,
+            expiresAt: dep.expires_at,
+            hoursRemaining: hoursLeft,
+          },
+        });
+      }
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[Policy Expiry] Error processing expired deployments:', e);
+    }
+  }, 60 * 1000); // Check every 1 minute
 
   // Start periodic policy test session expiry processor (every 1 minute)
   // When a test session expires, SSH into the host to restore original rules and collect logs

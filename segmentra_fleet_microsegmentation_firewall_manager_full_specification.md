@@ -613,6 +613,7 @@ In addition to the original pages (Section 12), v2 adds:
 | Expired audit sessions | 1 min | Auto-restore firewall rules after learning session expires |
 | Tag rule evaluation | 5 min | Re-evaluate all enabled auto-tagging rules |
 | Policy test session expiry | 1 min | Auto-stop test sessions past scheduled end time |
+| Deployment expiry | 1 min | Process expired deployments, send 24h warnings |
 
 ---
 
@@ -625,4 +626,35 @@ All new code follows existing patterns:
 - **Validation**: Zod schemas for all request bodies
 - **API client**: New methods in `apps/web/src/lib/api.ts`
 - **Background jobs**: `setInterval` in `apps/api/src/index.ts`
+
+---
+
+# 17) Policy Expiry
+
+Deployments can optionally have an expiry date and action:
+- `expires_at` — when the deployment should expire
+- `expiry_action` — NOTIFY_ONLY (send alert), REMOVE (rollback rules), REVERT (restore previous policy)
+
+A background job checks every minute and processes expired deployments. A 24-hour warning notification is sent in advance.
+
+**Tables modified**: `deployments` (added `expires_at`, `expiry_action`, `expired` columns)
+
+# 18) Notification System
+
+Configurable multi-channel notifications for security and operational events.
+
+**Tables**: `notification_channels` (Slack/webhook/email), `notification_rules` (event subscriptions), `notification_log` (delivery tracking)
+**API**: CRUD + test under `/api/notifications`
+**Events**: POLICY_SUBMITTED, POLICY_APPROVED, POLICY_REJECTED, DEPLOYMENT_STARTED, DEPLOYMENT_COMPLETED, DEPLOYMENT_FAILED, COMPLIANCE_DRIFT, POLICY_EXPIRING_SOON, POLICY_EXPIRED, EXCESSIVE_RULES_DETECTED
+
+# 19) Security Posture Audit
+
+On-demand scanning of all deployed policies for excessive permissions:
+- Sensitive ports (SSH/RDP/DB) open to 0.0.0.0/0 (critical)
+- Very broad CIDRs, any-protocol rules, ALL_INTERFACES exposure (high)
+- Unmanaged hosts, stale policies >90 days (medium)
+- Duplicate rules across policy sets (low)
+
+**API**: `GET /api/security-audit/scan` (full findings), `GET /api/security-audit/summary` (counts only)
+**Integration**: Auto-sends EXCESSIVE_RULES_DETECTED notification when critical/high findings detected
 

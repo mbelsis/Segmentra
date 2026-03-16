@@ -21,6 +21,8 @@ import { IntegrationsPage } from './pages/IntegrationsPage'
 import { PolicyTestPage } from './pages/PolicyTestPage'
 import { KubernetesPage } from './pages/KubernetesPage'
 import { IoTPage } from './pages/IoTPage'
+import { SecurityAuditPage } from './pages/SecurityAuditPage'
+import { NotificationsPage } from './pages/NotificationsPage'
 
 function App() {
   return (
@@ -50,6 +52,8 @@ function App() {
           <Route path="integrations" element={<IntegrationsPage />} />
           <Route path="kubernetes" element={<KubernetesPage />} />
           <Route path="iot" element={<IoTPage />} />
+          <Route path="security-audit" element={<SecurityAuditPage />} />
+          <Route path="notifications" element={<NotificationsPage />} />
           <Route path="audit" element={<AuditPage />} />
           <Route path="admin" element={<AdminPage />} />
         </Route>

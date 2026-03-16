@@ -35,6 +35,8 @@ export function DeploymentsPage() {
   const [formCanarySize, setFormCanarySize] = useState(1);
   const [formBatchSize, setFormBatchSize] = useState(5);
   const [formScheduledAt, setFormScheduledAt] = useState('');
+  const [formExpiresAt, setFormExpiresAt] = useState('');
+  const [formExpiryAction, setFormExpiryAction] = useState<'NOTIFY_ONLY' | 'REMOVE' | 'REVERT'>('NOTIFY_ONLY');
   const [safetyCheck, setSafetyCheck] = useState<any>(null);
 
   useEffect(() => {
@@ -94,6 +96,8 @@ export function DeploymentsPage() {
     setFormCanarySize(1);
     setFormBatchSize(5);
     setFormScheduledAt('');
+    setFormExpiresAt('');
+    setFormExpiryAction('NOTIFY_ONLY');
     setSafetyCheck(null);
     setShowCreate(false);
     setError('');
@@ -146,6 +150,11 @@ export function DeploymentsPage() {
 
       if (formScheduledAt) {
         payload.scheduledAt = formScheduledAt;
+      }
+
+      if (formExpiresAt) {
+        payload.expiresAt = formExpiresAt;
+        payload.expiryAction = formExpiryAction;
       }
 
       await api.createDeployment(payload);
@@ -435,6 +444,38 @@ export function DeploymentsPage() {
                 Leave empty to deploy immediately. Scheduled deployments will start automatically at the specified time.
               </small>
             </div>
+
+            {/* Policy Expiry */}
+            <div className="form-group">
+              <label>Policy Expires At (Optional)</label>
+              <input
+                type="datetime-local"
+                value={formExpiresAt}
+                onChange={(e) => setFormExpiresAt(e.target.value)}
+              />
+              <small style={{ color: '#666', fontSize: '0.85em' }}>
+                Leave empty for no expiry. Set a date to create a time-limited deployment (e.g., temporary vendor access, maintenance window).
+              </small>
+            </div>
+
+            {formExpiresAt && (
+              <div className="form-group">
+                <label>On Expiry</label>
+                <select
+                  value={formExpiryAction}
+                  onChange={(e) => setFormExpiryAction(e.target.value as any)}
+                >
+                  <option value="NOTIFY_ONLY">Notify Only (send alert, keep rules active)</option>
+                  <option value="REMOVE">Remove (roll back firewall rules on hosts)</option>
+                  <option value="REVERT">Revert (restore previous policy version)</option>
+                </select>
+                <small style={{ color: '#666', fontSize: '0.85em' }}>
+                  {formExpiryAction === 'NOTIFY_ONLY' && 'A notification will be sent when the policy expires. Rules remain active until manually removed.'}
+                  {formExpiryAction === 'REMOVE' && 'Firewall rules will be automatically rolled back on all deployed hosts when the policy expires.'}
+                  {formExpiryAction === 'REVERT' && 'The previous policy version will be automatically re-deployed when this policy expires.'}
+                </small>
+              </div>
+            )}
 
             {/* Safety Check Warnings */}
             {safetyCheck && (

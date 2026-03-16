@@ -180,7 +180,9 @@ const createDeploymentSchema = z.object({
   }),
   canarySize: z.number().int().min(1).optional(),
   batchSize: z.number().int().min(1).optional(),
-  scheduledAt: z.string().datetime().optional() // ISO 8601 datetime string
+  scheduledAt: z.string().datetime().optional(), // ISO 8601 datetime string
+  expiresAt: z.string().datetime().optional(), // ISO 8601 datetime string — when the deployment should expire
+  expiryAction: z.enum(['NOTIFY_ONLY', 'REMOVE', 'REVERT']).optional().default('NOTIFY_ONLY'), // What to do on expiry
 });
 
 async function getManagementVlanCidrs(): Promise<string[]> {
@@ -330,13 +332,15 @@ deploymentsRouter.post('/deployments', async (req, res) => {
   const targetType = targetTypes.join(', ') || 'Unknown';
 
   const scheduledAt = b.scheduledAt ? new Date(b.scheduledAt) : null;
+  const expiresAt = b.expiresAt ? new Date(b.expiresAt) : null;
+  const expiryAction = b.expiryAction ?? 'NOTIFY_ONLY';
   const status = scheduledAt && scheduledAt > new Date() ? 'QUEUED' : 'QUEUED';
 
   const { rows } = await pool.query(
-    `INSERT INTO deployments (policy_version_id, mode, target_query, target_count, created_by, canary_size, batch_size, scheduled_at, status)
-     VALUES ($1,$2,$3,$4,(SELECT id FROM users WHERE username=$5 LIMIT 1),$6,$7,$8,$9)
+    `INSERT INTO deployments (policy_version_id, mode, target_query, target_count, created_by, canary_size, batch_size, scheduled_at, status, expires_at, expiry_action)
+     VALUES ($1,$2,$3,$4,(SELECT id FROM users WHERE username=$5 LIMIT 1),$6,$7,$8,$9,$10,$11)
      RETURNING *`,
-    [b.policyVersionId, b.mode, b.targetQuery, targetIds.length, req.auth!.username, b.canarySize ?? null, b.batchSize ?? null, scheduledAt, status]
+    [b.policyVersionId, b.mode, b.targetQuery, targetIds.length, req.auth!.username, b.canarySize ?? null, b.batchSize ?? null, scheduledAt, status, expiresAt, expiryAction]
   );
   const deployment = rows[0];
 
