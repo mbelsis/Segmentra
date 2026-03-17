@@ -28,13 +28,16 @@ const HOST_DEPLOYMENT_TIMEOUT_MS = 10 * 60 * 1000;
  * This function is exported so it can be called from the main index.ts for periodic checks
  */
 export async function checkAndTimeoutStaleHosts() {
+  const client = await pool.connect();
+  try {
+  await client.query('BEGIN');
   const timeoutThreshold = new Date(Date.now() - HOST_DEPLOYMENT_TIMEOUT_MS);
-  
-  // Find hosts that have been RUNNING for longer than the timeout
-  const staleHosts = await pool.query(
+
+  // Find hosts that have been RUNNING for longer than the timeout (with row lock)
+  const staleHosts = await client.query(
     `UPDATE deployment_hosts
      SET status='FAILED', finished_at=now(), message='Deployment timeout: Host did not respond within 10 minutes'
-     WHERE status='RUNNING' 
+     WHERE status='RUNNING'
      AND started_at < $1
      RETURNING deployment_id, host_id`,
     [timeoutThreshold]
@@ -46,14 +49,14 @@ export async function checkAndTimeoutStaleHosts() {
     
     for (const deploymentId of deploymentIds) {
       // Check deployment status
-      const depRes = await pool.query(
+      const depRes = await client.query(
         `SELECT status FROM deployments WHERE id=$1`,
         [deploymentId]
       );
-      
+
       if (depRes.rows[0]?.status === 'RUNNING') {
         // Check if all hosts are done (SUCCEEDED, FAILED, or SKIPPED)
-        const hostStatusRes = await pool.query(
+        const hostStatusRes = await client.query(
           `SELECT status, COUNT(*) as count
            FROM deployment_hosts
            WHERE deployment_id=$1
@@ -80,26 +83,26 @@ export async function checkAndTimeoutStaleHosts() {
           let finalStatus: string;
           if (failedCount > 0 && succeededCount > 0) {
             finalStatus = 'PARTIAL';
-            await pool.query(
+            await client.query(
               `UPDATE deployments SET status='PARTIAL', finished_at=now() WHERE id=$1`,
               [deploymentId]
             );
           } else if (failedCount === total) {
             finalStatus = 'FAILED';
-            await pool.query(
+            await client.query(
               `UPDATE deployments SET status='FAILED', finished_at=now() WHERE id=$1`,
               [deploymentId]
             );
           } else {
             finalStatus = 'SUCCEEDED';
-            await pool.query(
+            await client.query(
               `UPDATE deployments SET status='SUCCEEDED', finished_at=now() WHERE id=$1`,
               [deploymentId]
             );
           }
 
           // Create audit event for deployment completion (via timeout)
-          const depRes = await pool.query(
+          const depRes = await client.query(
             `SELECT d.*, ps.name as policy_set_name, pv.version_number, u.id as user_id
              FROM deployments d
              LEFT JOIN policy_versions pv ON d.policy_version_id = pv.id
@@ -115,17 +118,17 @@ export async function checkAndTimeoutStaleHosts() {
             const targetNames: { tags: string[]; vlans: string[]; hosts: string[] } = { tags: [], vlans: [], hosts: [] };
             
             if (targetQuery.tags && Array.isArray(targetQuery.tags) && targetQuery.tags.length > 0) {
-              const tagRes = await pool.query(`SELECT name FROM tags WHERE id = ANY($1::uuid[])`, [targetQuery.tags]);
+              const tagRes = await client.query(`SELECT name FROM tags WHERE id = ANY($1::uuid[])`, [targetQuery.tags]);
               targetNames.tags = tagRes.rows.map((r: any) => r.name);
             }
             
             if (targetQuery.vlans && Array.isArray(targetQuery.vlans) && targetQuery.vlans.length > 0) {
-              const vlanRes = await pool.query(`SELECT name FROM vlans WHERE id = ANY($1::uuid[])`, [targetQuery.vlans]);
+              const vlanRes = await client.query(`SELECT name FROM vlans WHERE id = ANY($1::uuid[])`, [targetQuery.vlans]);
               targetNames.vlans = vlanRes.rows.map((r: any) => r.name);
             }
             
             if (targetQuery.hosts && Array.isArray(targetQuery.hosts) && targetQuery.hosts.length > 0) {
-              const hostRes = await pool.query(`SELECT hostname FROM hosts WHERE id = ANY($1::uuid[])`, [targetQuery.hosts]);
+              const hostRes = await client.query(`SELECT hostname FROM hosts WHERE id = ANY($1::uuid[])`, [targetQuery.hosts]);
               targetNames.hosts = hostRes.rows.map((r: any) => r.hostname);
             }
 
@@ -167,7 +170,14 @@ export async function checkAndTimeoutStaleHosts() {
     }
   }
   
+  await client.query('COMMIT');
   return staleHosts.rows.length;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 const createDeploymentSchema = z.object({
@@ -334,7 +344,7 @@ deploymentsRouter.post('/deployments', requireRole('operator', 'admin'), async (
   const scheduledAt = b.scheduledAt ? new Date(b.scheduledAt) : null;
   const expiresAt = b.expiresAt ? new Date(b.expiresAt) : null;
   const expiryAction = b.expiryAction ?? 'NOTIFY_ONLY';
-  const status = scheduledAt && scheduledAt > new Date() ? 'QUEUED' : 'QUEUED';
+  const status = scheduledAt && scheduledAt > new Date() ? 'SCHEDULED' : 'QUEUED';
 
   const { rows } = await pool.query(
     `INSERT INTO deployments (policy_version_id, mode, target_query, target_count, created_by, canary_size, batch_size, scheduled_at, status, expires_at, expiry_action)

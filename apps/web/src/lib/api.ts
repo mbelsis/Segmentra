@@ -12,15 +12,19 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (!resp.ok) {
     let errorMessage = `${resp.status} ${resp.statusText}`;
     try {
-      const json = await resp.json();
-      if (json.error) {
-        errorMessage = json.message || json.error;
-      } else if (json.message) {
-        errorMessage = json.message;
+      const text = await resp.text();
+      try {
+        const json = JSON.parse(text);
+        if (json.error) {
+          errorMessage = json.message || json.error;
+        } else if (json.message) {
+          errorMessage = json.message;
+        }
+      } catch {
+        if (text) errorMessage = `${errorMessage}: ${text}`;
       }
     } catch {
-      const text = await resp.text().catch(() => '');
-      if (text) errorMessage = `${errorMessage}: ${text}`;
+      // Could not read response body
     }
     throw new Error(errorMessage);
   }
