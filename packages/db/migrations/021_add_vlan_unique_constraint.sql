@@ -14,4 +14,10 @@ BEGIN
   END LOOP;
 END $$;
 
-ALTER TABLE vlans ADD CONSTRAINT IF NOT EXISTS vlans_vlan_tag_unique UNIQUE (vlan_tag);
+-- Add unique constraint (skip if already exists)
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'vlans_vlan_tag_unique') THEN
+    ALTER TABLE vlans ADD CONSTRAINT vlans_vlan_tag_unique UNIQUE (vlan_tag);
+  END IF;
+END $$;
