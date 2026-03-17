@@ -5,13 +5,31 @@ import { requireAuth, requireRole } from '../middleware/auth.js';
 export const integrationsRouter = Router();
 integrationsRouter.use(requireAuth);
 // List integrations
-integrationsRouter.get('/', requireRole('viewer', 'operator', 'admin'), async (_req, res) => {
+integrationsRouter.get('/', requireRole('admin'), async (_req, res) => {
     const { rows } = await pool.query(`SELECT id, type, provider, name, description, enabled, config, last_sync_at, last_sync_status, created_at
      FROM integrations ORDER BY type ASC, name ASC`);
     res.json({ integrations: rows });
 });
+// Host vulnerabilities
+integrationsRouter.get('/vulnerabilities/by-host/:hostId', requireRole('admin'), async (req, res) => {
+    const { rows } = await pool.query(`SELECT hv.*, i.name as integration_name, i.provider as integration_provider
+     FROM host_vulnerabilities hv
+     JOIN integrations i ON i.id = hv.integration_id
+     WHERE hv.host_id = $1
+     ORDER BY CASE hv.severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END, hv.last_seen_at DESC`, [req.params.hostId]);
+    res.json({ vulnerabilities: rows });
+});
+// Threat intel entries
+integrationsRouter.get('/threat-intel', requireRole('admin'), async (_req, res) => {
+    const { rows } = await pool.query(`SELECT tie.*, i.name as integration_name
+     FROM threat_intel_entries tie
+     JOIN integrations i ON i.id = tie.integration_id
+     WHERE tie.expires_at IS NULL OR tie.expires_at > now()
+     ORDER BY tie.confidence DESC`);
+    res.json({ entries: rows });
+});
 // Get single integration
-integrationsRouter.get('/:id', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+integrationsRouter.get('/:id', requireRole('admin'), async (req, res) => {
     const { rows } = await pool.query(`SELECT id, type, provider, name, description, enabled, config, last_sync_at, last_sync_status, created_at
      FROM integrations WHERE id = $1`, [req.params.id]);
     if (!rows[0])
@@ -102,26 +120,8 @@ integrationsRouter.post('/:id/sync', requireRole('admin'), async (req, res) => {
     res.json({ success: true, message: 'Integration sync completed' });
 });
 // Get integration events
-integrationsRouter.get('/:id/events', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+integrationsRouter.get('/:id/events', requireRole('admin'), async (req, res) => {
     const limit = parseInt(String(req.query.limit ?? '50'), 10);
     const { rows } = await pool.query(`SELECT * FROM integration_events WHERE integration_id = $1 ORDER BY created_at DESC LIMIT $2`, [req.params.id, limit]);
     res.json({ events: rows });
-});
-// Host vulnerabilities
-integrationsRouter.get('/vulnerabilities/by-host/:hostId', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
-    const { rows } = await pool.query(`SELECT hv.*, i.name as integration_name, i.provider as integration_provider
-     FROM host_vulnerabilities hv
-     JOIN integrations i ON i.id = hv.integration_id
-     WHERE hv.host_id = $1
-     ORDER BY CASE hv.severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END, hv.last_seen_at DESC`, [req.params.hostId]);
-    res.json({ vulnerabilities: rows });
-});
-// Threat intel entries
-integrationsRouter.get('/threat-intel', requireRole('viewer', 'operator', 'admin'), async (_req, res) => {
-    const { rows } = await pool.query(`SELECT tie.*, i.name as integration_name
-     FROM threat_intel_entries tie
-     JOIN integrations i ON i.id = tie.integration_id
-     WHERE tie.expires_at IS NULL OR tie.expires_at > now()
-     ORDER BY tie.confidence DESC`);
-    res.json({ entries: rows });
 });

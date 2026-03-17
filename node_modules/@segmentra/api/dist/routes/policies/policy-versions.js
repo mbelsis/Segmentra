@@ -242,6 +242,35 @@ policyVersionsRouter.get('/policy-versions/:versionId/diff', async (req, res) =>
         rulesTo: bRules.rows
     });
 });
+// Delete a DRAFT or REJECTED policy version
+policyVersionsRouter.delete('/policy-versions/:versionId', requireRole('operator', 'admin'), async (req, res) => {
+    const { rows } = await pool.query(`SELECT status, policy_set_id FROM policy_versions WHERE id=$1`, [req.params.versionId]);
+    if (!rows[0])
+        return res.status(404).json({ error: 'not_found' });
+    if (rows[0].status !== 'DRAFT' && rows[0].status !== 'REJECTED') {
+        return res.status(400).json({
+            error: 'cannot_delete',
+            message: `Only DRAFT or REJECTED versions can be deleted. This version is ${rows[0].status}. Use archive instead.`
+        });
+    }
+    // Delete rules first, then version
+    await pool.query(`DELETE FROM policy_rules WHERE policy_version_id = $1`, [req.params.versionId]);
+    await pool.query(`DELETE FROM policy_versions WHERE id = $1`, [req.params.versionId]);
+    await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), 'POLICY_VERSION_DELETE', 'policy_version', $2, $3)`, [req.auth.username, req.params.versionId, JSON.stringify({ status: rows[0].status })]);
+    res.json({ ok: true });
+});
+// Archive a policy version (APPROVED, DEPLOYED, or PENDING_APPROVAL)
+policyVersionsRouter.post('/policy-versions/:versionId/archive', requireRole('operator', 'admin'), async (req, res) => {
+    const { rows } = await pool.query(`UPDATE policy_versions SET status = 'ARCHIVED'
+     WHERE id = $1 AND status IN ('APPROVED', 'DEPLOYED', 'PENDING_APPROVAL')
+     RETURNING *`, [req.params.versionId]);
+    if (!rows[0])
+        return res.status(404).json({ error: 'not_found_or_not_archivable', message: 'Only APPROVED, DEPLOYED, or PENDING_APPROVAL versions can be archived.' });
+    await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), 'POLICY_VERSION_ARCHIVE', 'policy_version', $2, $3)`, [req.auth.username, req.params.versionId, JSON.stringify({ previousStatus: rows[0].status })]);
+    res.json({ version: rows[0] });
+});
 /**
  * Get semantic diff between two policy versions for sample hosts
  * POST /policy-versions/:candidateVersionId/impact-diff

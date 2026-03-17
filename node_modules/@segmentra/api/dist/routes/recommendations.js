@@ -6,7 +6,7 @@ import { generateRecommendations, applyRecommendation } from '../services/recomm
 export const recommendationsRouter = Router();
 recommendationsRouter.use(requireAuth);
 // List recommendations
-recommendationsRouter.get('/', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+recommendationsRouter.get('/', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
     const status = req.query.status ? String(req.query.status) : null;
     const hostId = req.query.hostId ? String(req.query.hostId) : null;
     let query = `SELECT pr.*, h.hostname, h.mgmt_ip,
@@ -30,7 +30,7 @@ recommendationsRouter.get('/', requireRole('viewer', 'operator', 'admin'), async
     res.json({ recommendations: rows });
 });
 // Get single recommendation
-recommendationsRouter.get('/:id', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+recommendationsRouter.get('/:id', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
     const { rows } = await pool.query(`SELECT pr.*, h.hostname, h.mgmt_ip FROM policy_recommendations pr
      JOIN hosts h ON h.id = pr.host_id WHERE pr.id = $1`, [req.params.id]);
     if (!rows[0])

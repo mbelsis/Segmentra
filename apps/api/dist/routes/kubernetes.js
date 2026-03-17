@@ -5,13 +5,13 @@ import { requireAuth, requireRole } from '../middleware/auth.js';
 export const kubernetesRouter = Router();
 kubernetesRouter.use(requireAuth);
 // List clusters
-kubernetesRouter.get('/clusters', requireRole('viewer', 'operator', 'admin'), async (_req, res) => {
+kubernetesRouter.get('/clusters', requireRole('viewer', 'operator', 'approver', 'admin'), async (_req, res) => {
     const { rows } = await pool.query(`SELECT id, name, description, api_server_url, auth_type, default_namespace, last_sync_at, last_sync_status, enabled, created_at
      FROM k8s_clusters ORDER BY name ASC`);
     res.json({ clusters: rows });
 });
 // Get single cluster with workload summary
-kubernetesRouter.get('/clusters/:id', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+kubernetesRouter.get('/clusters/:id', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
     const { rows } = await pool.query(`SELECT id, name, description, api_server_url, auth_type, default_namespace, last_sync_at, last_sync_status, enabled, created_at
      FROM k8s_clusters WHERE id = $1`, [req.params.id]);
     if (!rows[0])
@@ -91,7 +91,7 @@ kubernetesRouter.post('/clusters/:id/sync', requireRole('operator', 'admin'), as
     res.json({ success: true, message: 'Cluster sync initiated' });
 });
 // List workloads
-kubernetesRouter.get('/clusters/:id/workloads', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+kubernetesRouter.get('/clusters/:id/workloads', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
     const namespace = req.query.namespace ? String(req.query.namespace) : null;
     const kind = req.query.kind ? String(req.query.kind) : null;
     let query = `SELECT w.*,
@@ -122,7 +122,7 @@ kubernetesRouter.post('/workloads/:workloadId/map-tag', requireRole('operator', 
     res.json({ ok: true });
 });
 // List network policies for cluster
-kubernetesRouter.get('/clusters/:id/network-policies', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+kubernetesRouter.get('/clusters/:id/network-policies', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
     const { rows } = await pool.query(`SELECT np.*, pv.version_number, ps.name as policy_set_name
      FROM k8s_network_policies np
      LEFT JOIN policy_versions pv ON pv.id = np.policy_version_id

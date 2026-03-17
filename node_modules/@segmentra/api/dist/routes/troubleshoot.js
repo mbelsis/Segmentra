@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 export const troubleshootRouter = Router();
-troubleshootRouter.use(requireAuth, requireRole('operator', 'admin', 'viewer'));
+troubleshootRouter.use(requireAuth, requireRole('viewer', 'operator', 'approver', 'admin'));
 // Helper function to check if an IP matches a CIDR
 function ipMatchesCidr(ip, cidr) {
     try {
@@ -273,7 +273,7 @@ function portMatches(port, portSpec) {
     return false;
 }
 // Simulate communication between two IPs
-troubleshootRouter.post('/simulate-communication', async (req, res) => {
+troubleshootRouter.post('/simulate-communication', requireRole('operator', 'admin'), async (req, res) => {
     const sourceIp = String(req.body.sourceIp ?? '').trim();
     const sourcePort = req.body.sourcePort ? parseInt(String(req.body.sourcePort), 10) : null;
     const destIp = String(req.body.destIp ?? '').trim();

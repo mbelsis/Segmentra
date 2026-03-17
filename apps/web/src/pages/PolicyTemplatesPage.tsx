@@ -83,9 +83,14 @@ export function PolicyTemplatesPage() {
   };
 
   const instantiate = async (templateId: string) => {
+    // Check if template has rules
+    const template = templates.find(t => t.id === templateId);
+    if (template && parseInt(template.rule_count) === 0) {
+      if (!confirm('This template has 0 rules. The instantiated policy will have no firewall rules (only baseline rules will apply at deploy time). Continue anyway?')) return;
+    }
     try {
       const result = await api.templates.instantiate(templateId);
-      alert(`Created policy set "${result.policySet.name}" with ${result.rulesCreated} rules`);
+      alert(`Created policy set "${result.policySet.name}" with ${result.rulesCreated} rules (DRAFT). Go to Policy Sets to review and add more rules.`);
       load();
     } catch (e: any) { setError(e.message); }
   };
@@ -166,6 +171,9 @@ export function PolicyTemplatesPage() {
         {selectedTemplate && (
           <div style={{ flex: 1, border: '1px solid #ccc', padding: 16, borderRadius: 4 }}>
             <h3>{selectedTemplate.name} — Rules</h3>
+            <div style={{ padding: '8px 12px', background: '#f7f4ef', borderRadius: 6, marginBottom: 12, fontSize: '12.5px', color: '#78644e', borderLeft: '3px solid #d4c9b8' }}>
+              <strong>Note:</strong> Baseline rules (loopback, established/related connections, management SSH access) are automatically added by the compiler when policies are deployed. You only need to define your application-specific rules here.
+            </div>
             <table style={{ width: '100%', fontSize: '0.9em' }}>
               <thead><tr><th>#</th><th>Dir</th><th>Action</th><th>Proto</th><th>Ports</th><th>Source</th><th>Comment</th><th></th></tr></thead>
               <tbody>
@@ -183,24 +191,34 @@ export function PolicyTemplatesPage() {
                 ))}
               </tbody>
             </table>
-            <h4 style={{ marginTop: 16 }}>Add Rule</h4>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 4, fontSize: '0.9em' }}>
-              <select value={ruleForm.direction} onChange={e => setRuleForm(f => ({ ...f, direction: e.target.value }))}>
-                <option value="IN">IN</option><option value="OUT">OUT</option><option value="BOTH">BOTH</option>
-              </select>
-              <select value={ruleForm.action} onChange={e => setRuleForm(f => ({ ...f, action: e.target.value }))}>
-                <option value="ALLOW">ALLOW</option><option value="DENY">DENY</option>
-              </select>
-              <select value={ruleForm.protocol} onChange={e => setRuleForm(f => ({ ...f, protocol: e.target.value }))}>
-                <option value="tcp">TCP</option><option value="udp">UDP</option><option value="icmp">ICMP</option><option value="any">Any</option>
-              </select>
-              <input placeholder="Ports" value={ruleForm.ports} onChange={e => setRuleForm(f => ({ ...f, ports: e.target.value }))} />
-              <select value={ruleForm.sourceType} onChange={e => setRuleForm(f => ({ ...f, sourceType: e.target.value }))}>
-                <option value="CIDR">CIDR</option><option value="TAG">TAG</option><option value="VLAN">VLAN</option>
-              </select>
-              <input placeholder="Source value" value={ruleForm.sourceValue} onChange={e => setRuleForm(f => ({ ...f, sourceValue: e.target.value }))} />
-              <input placeholder="Comment" value={ruleForm.comment} onChange={e => setRuleForm(f => ({ ...f, comment: e.target.value }))} />
-              <button onClick={addRule}>Add Rule</button>
+            <div style={{ marginTop: 16, padding: 12, background: '#f7f4ef', borderRadius: 8, border: '1px solid #e8e0d4' }}>
+              <h4 style={{ margin: '0 0 10px', color: '#5c4633', fontSize: '14px' }}>Add Rule</h4>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8, fontSize: '0.9em' }}>
+                <div><label style={{ fontSize: '11px', color: '#78644e', display: 'block', marginBottom: 2 }}>Direction</label>
+                <select value={ruleForm.direction} onChange={e => setRuleForm(f => ({ ...f, direction: e.target.value }))} style={{ width: '100%' }}>
+                  <option value="IN">IN</option><option value="OUT">OUT</option><option value="BOTH">BOTH</option>
+                </select></div>
+                <div><label style={{ fontSize: '11px', color: '#78644e', display: 'block', marginBottom: 2 }}>Action</label>
+                <select value={ruleForm.action} onChange={e => setRuleForm(f => ({ ...f, action: e.target.value }))} style={{ width: '100%' }}>
+                  <option value="ALLOW">ALLOW</option><option value="DENY">DENY</option>
+                </select></div>
+                <div><label style={{ fontSize: '11px', color: '#78644e', display: 'block', marginBottom: 2 }}>Protocol</label>
+                <select value={ruleForm.protocol} onChange={e => setRuleForm(f => ({ ...f, protocol: e.target.value }))} style={{ width: '100%' }}>
+                  <option value="tcp">TCP</option><option value="udp">UDP</option><option value="icmp">ICMP</option><option value="any">Any</option>
+                </select></div>
+                <div><label style={{ fontSize: '11px', color: '#78644e', display: 'block', marginBottom: 2 }}>Ports</label>
+                <input placeholder="e.g., 80,443" value={ruleForm.ports} onChange={e => setRuleForm(f => ({ ...f, ports: e.target.value }))} style={{ width: '100%' }} /></div>
+                <div><label style={{ fontSize: '11px', color: '#78644e', display: 'block', marginBottom: 2 }}>Source Type</label>
+                <select value={ruleForm.sourceType} onChange={e => setRuleForm(f => ({ ...f, sourceType: e.target.value }))} style={{ width: '100%' }}>
+                  <option value="CIDR">CIDR</option><option value="TAG">TAG</option><option value="VLAN">VLAN</option>
+                </select></div>
+                <div><label style={{ fontSize: '11px', color: '#78644e', display: 'block', marginBottom: 2 }}>Source Value</label>
+                <input placeholder="e.g., 0.0.0.0/0" value={ruleForm.sourceValue} onChange={e => setRuleForm(f => ({ ...f, sourceValue: e.target.value }))} style={{ width: '100%' }} /></div>
+                <div><label style={{ fontSize: '11px', color: '#78644e', display: 'block', marginBottom: 2 }}>Comment</label>
+                <input placeholder="Optional" value={ruleForm.comment} onChange={e => setRuleForm(f => ({ ...f, comment: e.target.value }))} style={{ width: '100%' }} /></div>
+                <div style={{ display: 'flex', alignItems: 'flex-end' }}>
+                <button onClick={addRule} className="btn-primary" style={{ width: '100%' }}>Add Rule</button></div>
+              </div>
             </div>
           </div>
         )}

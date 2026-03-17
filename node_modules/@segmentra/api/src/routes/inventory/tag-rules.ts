@@ -9,7 +9,7 @@ export const tagRulesRouter = Router();
 tagRulesRouter.use(requireAuth);
 
 // List all tag rules
-tagRulesRouter.get('/', requireRole('viewer', 'operator', 'admin'), async (_req, res) => {
+tagRulesRouter.get('/', requireRole('viewer', 'operator', 'approver', 'admin'), async (_req, res) => {
   const { rows } = await pool.query(
     `SELECT tr.*, t.name as tag_name,
        (SELECT COUNT(*) FROM tag_rule_results trr WHERE trr.tag_rule_id = tr.id AND trr.matched = true) as matched_count
@@ -21,7 +21,7 @@ tagRulesRouter.get('/', requireRole('viewer', 'operator', 'admin'), async (_req,
 });
 
 // Get single tag rule
-tagRulesRouter.get('/:id', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+tagRulesRouter.get('/:id', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const { rows } = await pool.query(
     `SELECT tr.*, t.name as tag_name FROM tag_rules tr LEFT JOIN tags t ON t.id = tr.tag_id WHERE tr.id = $1`,
     [req.params.id]

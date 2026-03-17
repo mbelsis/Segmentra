@@ -14,7 +14,7 @@ import { readSecretPlaintext } from '../services/secrets.js';
 import { checkDeploymentSafety } from '../services/safety-check.js';
 import { isPolicyVersionHighRisk } from '../services/high-risk.js';
 export const deploymentsRouter = Router();
-deploymentsRouter.use(requireAuth, requireRole('operator', 'admin'));
+deploymentsRouter.use(requireAuth);
 // Host deployment timeout: 10 minutes (600000 ms)
 const HOST_DEPLOYMENT_TIMEOUT_MS = 10 * 60 * 1000;
 /**
@@ -141,7 +141,9 @@ const createDeploymentSchema = z.object({
     }),
     canarySize: z.number().int().min(1).optional(),
     batchSize: z.number().int().min(1).optional(),
-    scheduledAt: z.string().datetime().optional() // ISO 8601 datetime string
+    scheduledAt: z.string().datetime().optional(), // ISO 8601 datetime string
+    expiresAt: z.string().datetime().optional(), // ISO 8601 datetime string — when the deployment should expire
+    expiryAction: z.enum(['NOTIFY_ONLY', 'REMOVE', 'REVERT']).optional().default('NOTIFY_ONLY'), // What to do on expiry
 });
 async function getManagementVlanCidrs() {
     const mgmtVlanRes = await pool.query(`SELECT value FROM system_settings WHERE key='management_vlan_id'`);
@@ -174,7 +176,7 @@ async function resolveTargets(q) {
     }
     return [...ids];
 }
-deploymentsRouter.post('/deployments', async (req, res) => {
+deploymentsRouter.post('/deployments', requireRole('operator', 'admin'), async (req, res) => {
     const parsed = createDeploymentSchema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: 'invalid_body' });
@@ -257,10 +259,12 @@ deploymentsRouter.post('/deployments', async (req, res) => {
         targetTypes.push('Hosts');
     const targetType = targetTypes.join(', ') || 'Unknown';
     const scheduledAt = b.scheduledAt ? new Date(b.scheduledAt) : null;
+    const expiresAt = b.expiresAt ? new Date(b.expiresAt) : null;
+    const expiryAction = b.expiryAction ?? 'NOTIFY_ONLY';
     const status = scheduledAt && scheduledAt > new Date() ? 'QUEUED' : 'QUEUED';
-    const { rows } = await pool.query(`INSERT INTO deployments (policy_version_id, mode, target_query, target_count, created_by, canary_size, batch_size, scheduled_at, status)
-     VALUES ($1,$2,$3,$4,(SELECT id FROM users WHERE username=$5 LIMIT 1),$6,$7,$8,$9)
-     RETURNING *`, [b.policyVersionId, b.mode, b.targetQuery, targetIds.length, req.auth.username, b.canarySize ?? null, b.batchSize ?? null, scheduledAt, status]);
+    const { rows } = await pool.query(`INSERT INTO deployments (policy_version_id, mode, target_query, target_count, created_by, canary_size, batch_size, scheduled_at, status, expires_at, expiry_action)
+     VALUES ($1,$2,$3,$4,(SELECT id FROM users WHERE username=$5 LIMIT 1),$6,$7,$8,$9,$10,$11)
+     RETURNING *`, [b.policyVersionId, b.mode, b.targetQuery, targetIds.length, req.auth.username, b.canarySize ?? null, b.batchSize ?? null, scheduledAt, status, expiresAt, expiryAction]);
     const deployment = rows[0];
     for (const hostId of targetIds) {
         await pool.query(`INSERT INTO deployment_hosts (deployment_id, host_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [
@@ -291,7 +295,7 @@ deploymentsRouter.post('/deployments', async (req, res) => {
     });
     res.status(201).json({ deployment });
 });
-deploymentsRouter.get('/deployments', async (req, res) => {
+deploymentsRouter.get('/deployments', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
     // Check for stale hosts before returning deployments
     await checkAndTimeoutStaleHosts();
     // Parse query parameters
@@ -391,13 +395,13 @@ deploymentsRouter.get('/deployments', async (req, res) => {
         }
     });
 });
-deploymentsRouter.get('/deployments/:deploymentId', async (req, res) => {
+deploymentsRouter.get('/deployments/:deploymentId', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
     const { rows } = await pool.query(`SELECT * FROM deployments WHERE id=$1`, [req.params.deploymentId]);
     if (!rows[0])
         return res.status(404).json({ error: 'not_found' });
     res.json({ deployment: rows[0] });
 });
-deploymentsRouter.get('/deployments/:deploymentId/hosts', async (req, res) => {
+deploymentsRouter.get('/deployments/:deploymentId/hosts', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
     // Check for stale hosts before returning host status
     await checkAndTimeoutStaleHosts();
     const { rows } = await pool.query(`SELECT dh.*, h.hostname, h.mgmt_ip
@@ -407,14 +411,14 @@ deploymentsRouter.get('/deployments/:deploymentId/hosts', async (req, res) => {
      ORDER BY h.hostname ASC`, [req.params.deploymentId]);
     res.json({ hosts: rows });
 });
-deploymentsRouter.get('/deployments/:deploymentId/artifacts', async (req, res) => {
+deploymentsRouter.get('/deployments/:deploymentId/artifacts', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
     const { rows } = await pool.query(`SELECT id, bundle_path, bundle_hash, manifest, created_at
      FROM deployment_artifacts
      WHERE deployment_id=$1
      ORDER BY created_at DESC`, [req.params.deploymentId]);
     res.json({ artifacts: rows });
 });
-deploymentsRouter.get('/executions/:executionId/logs', async (req, res) => {
+deploymentsRouter.get('/executions/:executionId/logs', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
     const { rows } = await pool.query(`SELECT stdout_path, stderr_path FROM execution_runs WHERE id=$1`, [req.params.executionId]);
     if (!rows[0])
         return res.status(404).json({ error: 'not_found' });
@@ -606,215 +610,228 @@ async function generateBundle(deploymentId) {
      VALUES ($1,$2,$3,$4)`, [deploymentId, bundleDir, bundleHash, manifest]);
     return { bundleDir, hostPolicyHashes };
 }
-deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
-    const deploymentId = req.params.deploymentId;
-    try {
-        // Check for and timeout stale hosts before starting
-        await checkAndTimeoutStaleHosts();
-        // Mark disabled hosts as SKIPPED before starting
-        await pool.query(`UPDATE deployment_hosts 
+/**
+ * Core deployment start logic, extracted so it can be called from both the
+ * POST /start route handler and the scheduled-deployment background job.
+ *
+ * Returns { ok, exitCode, executionId } on success.
+ * Throws on failure (caller is responsible for error handling).
+ *
+ * @param ipAddress - optional IP of the requesting user (for audit trail)
+ */
+export async function executeDeploymentStart(deploymentId, ipAddress) {
+    // Check for and timeout stale hosts before starting
+    await checkAndTimeoutStaleHosts();
+    // Mark disabled hosts as SKIPPED before starting
+    await pool.query(`UPDATE deployment_hosts
      SET status='SKIPPED', finished_at=now(), message='Host is disabled'
-     WHERE deployment_id=$1 
+     WHERE deployment_id=$1
      AND host_id IN (SELECT id FROM hosts WHERE enabled=false)
      AND status='PENDING'`, [deploymentId]);
-        await pool.query(`UPDATE deployments SET status='RUNNING', started_at=now() WHERE id=$1`, [deploymentId]);
-        // Only mark enabled hosts as RUNNING
-        await pool.query(`UPDATE deployment_hosts 
-     SET status='RUNNING', started_at=now() 
-     WHERE deployment_id=$1 
+    await pool.query(`UPDATE deployments SET status='RUNNING', started_at=now() WHERE id=$1`, [deploymentId]);
+    // Only mark enabled hosts as RUNNING
+    await pool.query(`UPDATE deployment_hosts
+     SET status='RUNNING', started_at=now()
+     WHERE deployment_id=$1
      AND host_id IN (SELECT id FROM hosts WHERE enabled=true)
      AND status='PENDING'`, [deploymentId]);
-        const { bundleDir, hostPolicyHashes } = await generateBundle(deploymentId);
-        // Get executor setting
-        const executorRes = await pool.query(`SELECT value FROM system_settings WHERE key='deployment_executor'`);
-        const executor = executorRes.rows[0]?.value ?? 'ansible';
-        const stdoutPath = path.join(bundleDir, executor === 'ssh' ? 'ssh.stdout.log' : 'ansible.stdout.log');
-        const stderrPath = path.join(bundleDir, executor === 'ssh' ? 'ssh.stderr.log' : 'ansible.stderr.log');
-        let ok = false;
-        let exitCode = 1;
-        let executionId;
-        if (executor === 'ssh') {
-            // SSH Direct executor
-            const executionIdRes = await pool.query(`INSERT INTO execution_runs (deployment_id, executor_type, command)
+    const { bundleDir, hostPolicyHashes } = await generateBundle(deploymentId);
+    // Get executor setting
+    const executorRes = await pool.query(`SELECT value FROM system_settings WHERE key='deployment_executor'`);
+    const executor = executorRes.rows[0]?.value ?? 'ansible';
+    const stdoutPath = path.join(bundleDir, executor === 'ssh' ? 'ssh.stdout.log' : 'ansible.stdout.log');
+    const stderrPath = path.join(bundleDir, executor === 'ssh' ? 'ssh.stderr.log' : 'ansible.stderr.log');
+    let ok = false;
+    let exitCode = 1;
+    let executionId;
+    if (executor === 'ssh') {
+        // SSH Direct executor
+        const executionIdRes = await pool.query(`INSERT INTO execution_runs (deployment_id, executor_type, command)
        VALUES ($1,'ssh_direct',$2)
        RETURNING id`, [deploymentId, 'ssh/scp direct execution']);
-            executionId = executionIdRes.rows[0].id;
-            // Get SSH credential
-            const credRes = await pool.query(`SELECT * FROM ssh_credentials WHERE scope_type='GLOBAL' ORDER BY created_at DESC LIMIT 1`);
-            const cred = credRes.rows[0];
-            if (!cred) {
-                await pool.query(`UPDATE execution_runs SET status='DONE', finished_at=now() WHERE id=$1`, [executionId]);
-                await pool.query(`UPDATE deployments SET status='FAILED', finished_at=now() WHERE id=$1`, [deploymentId]);
-                return res.status(400).json({ error: 'missing_ssh_credential' });
-            }
-            const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
-            const keyPath = path.join(bundleDir, 'ssh_key');
-            fs.writeFileSync(keyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
-            // Get hosts and policy files (only enabled hosts)
-            const hostRows = await pool.query(`SELECT h.id, h.hostname, h.mgmt_ip, h.ssh_port, h.firewall_backend
+        executionId = executionIdRes.rows[0].id;
+        // Get SSH credential
+        const credRes = await pool.query(`SELECT * FROM ssh_credentials WHERE scope_type='GLOBAL' ORDER BY created_at DESC LIMIT 1`);
+        const cred = credRes.rows[0];
+        if (!cred) {
+            await pool.query(`UPDATE execution_runs SET status='DONE', finished_at=now() WHERE id=$1`, [executionId]);
+            await pool.query(`UPDATE deployments SET status='FAILED', finished_at=now() WHERE id=$1`, [deploymentId]);
+            throw new Error('missing_ssh_credential');
+        }
+        const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
+        const keyPath = path.join(bundleDir, 'ssh_key');
+        fs.writeFileSync(keyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
+        // Get hosts and policy files (only enabled hosts)
+        const hostRows = await pool.query(`SELECT h.id, h.hostname, h.mgmt_ip, h.ssh_port, h.firewall_backend
        FROM deployment_hosts dh
        JOIN hosts h ON h.id = dh.host_id
        WHERE dh.deployment_id=$1 AND h.enabled=true`, [deploymentId]);
-            const sshHosts = [];
-            for (const h of hostRows.rows) {
-                const backend = h.firewall_backend === 'iptables' ? 'iptables' : 'nftables';
-                const ext = backend === 'nftables' ? 'nft' : 'iptables';
-                const policyFilePath = path.join(bundleDir, 'host_rules', `${h.hostname}.${ext}`);
-                if (fs.existsSync(policyFilePath)) {
-                    sshHosts.push({
-                        hostname: h.hostname,
-                        ip: String(h.mgmt_ip),
-                        port: h.ssh_port || 22,
-                        username: cred.username,
-                        privateKeyPath: keyPath,
-                        policyFilePath,
-                        backend
-                    });
-                }
+        const sshHosts = [];
+        for (const h of hostRows.rows) {
+            const backend = h.firewall_backend === 'iptables' ? 'iptables' : 'nftables';
+            const ext = backend === 'nftables' ? 'nft' : 'iptables';
+            const policyFilePath = path.join(bundleDir, 'host_rules', `${h.hostname}.${ext}`);
+            if (fs.existsSync(policyFilePath)) {
+                sshHosts.push({
+                    hostname: h.hostname,
+                    ip: String(h.mgmt_ip),
+                    port: h.ssh_port || 22,
+                    username: cred.username,
+                    privateKeyPath: keyPath,
+                    policyFilePath,
+                    backend
+                });
             }
-            const results = await runSshDeployment({
-                hosts: sshHosts,
-                stdoutPath,
-                stderrPath
-            });
-            // Update deployment_hosts based on results
-            const failedHosts = results.filter(r => !r.success);
-            ok = failedHosts.length === 0;
-            exitCode = ok ? 0 : 1;
-            for (const result of results) {
-                const host = hostRows.rows.find((h) => h.hostname === result.hostname);
-                if (host) {
-                    const policyHash = result.success ? hostPolicyHashes.get(host.id) || null : null;
-                    await pool.query(`UPDATE deployment_hosts
+        }
+        const results = await runSshDeployment({
+            hosts: sshHosts,
+            stdoutPath,
+            stderrPath
+        });
+        // Update deployment_hosts based on results
+        const failedHosts = results.filter(r => !r.success);
+        ok = failedHosts.length === 0;
+        exitCode = ok ? 0 : 1;
+        for (const result of results) {
+            const host = hostRows.rows.find((h) => h.hostname === result.hostname);
+            if (host) {
+                const policyHash = result.success ? hostPolicyHashes.get(host.id) || null : null;
+                await pool.query(`UPDATE deployment_hosts
            SET status=$2, finished_at=now(), message=$3, applied_hash=$5
            WHERE deployment_id=$1 AND host_id=$4`, [deploymentId, result.success ? 'SUCCEEDED' : 'FAILED', result.success ? 'ok' : 'ssh_failed', host.id, policyHash]);
-                }
             }
-            await pool.query(`UPDATE execution_runs
+        }
+        await pool.query(`UPDATE execution_runs
        SET exit_code=$2, stdout_path=$3, stderr_path=$4, finished_at=now(), status='DONE'
        WHERE id=$1`, [executionId, exitCode, stdoutPath, stderrPath]);
-        }
-        else {
-            // Ansible executor (default)
-            const executionIdRes = await pool.query(`INSERT INTO execution_runs (deployment_id, executor_type, command)
+    }
+    else {
+        // Ansible executor (default)
+        const executionIdRes = await pool.query(`INSERT INTO execution_runs (deployment_id, executor_type, command)
        VALUES ($1,'ansible_cli',$2)
        RETURNING id`, [deploymentId, 'docker exec ... ansible-playbook']);
-            executionId = executionIdRes.rows[0].id;
-            const result = await runAnsiblePlaybook({
-                runnerContainer: env.ANSIBLE_RUNNER_CONTAINER,
-                inventoryPath: `/bundles/${deploymentId}/inventory.ini`,
-                playbookPath: `/runner/playbooks/apply-firewall.yml`,
-                stdoutPath,
-                stderrPath
-            });
-            exitCode = result.exitCode;
-            ok = exitCode === 0;
-            await pool.query(`UPDATE execution_runs
+        executionId = executionIdRes.rows[0].id;
+        const result = await runAnsiblePlaybook({
+            runnerContainer: env.ANSIBLE_RUNNER_CONTAINER,
+            inventoryPath: `/bundles/${deploymentId}/inventory.ini`,
+            playbookPath: `/runner/playbooks/apply-firewall.yml`,
+            stdoutPath,
+            stderrPath
+        });
+        exitCode = result.exitCode;
+        ok = exitCode === 0;
+        await pool.query(`UPDATE execution_runs
        SET exit_code=$2, stdout_path=$3, stderr_path=$4, finished_at=now(), status='DONE'
        WHERE id=$1`, [executionId, exitCode, stdoutPath, stderrPath]);
-            // Only update enabled hosts that were RUNNING (disabled hosts are already SKIPPED)
-            // For Ansible, we need to update each host individually to set applied_hash
-            if (ok) {
-                const hostRows = await pool.query(`SELECT h.id FROM deployment_hosts dh
+        // Only update enabled hosts that were RUNNING (disabled hosts are already SKIPPED)
+        // For Ansible, we need to update each host individually to set applied_hash
+        if (ok) {
+            const hostRows = await pool.query(`SELECT h.id FROM deployment_hosts dh
          JOIN hosts h ON h.id = dh.host_id
          WHERE dh.deployment_id=$1 AND dh.status='RUNNING' AND h.enabled=true`, [deploymentId]);
-                for (const hostRow of hostRows.rows) {
-                    const policyHash = hostPolicyHashes.get(hostRow.id) || null;
-                    await pool.query(`UPDATE deployment_hosts
+            for (const hostRow of hostRows.rows) {
+                const policyHash = hostPolicyHashes.get(hostRow.id) || null;
+                await pool.query(`UPDATE deployment_hosts
            SET status='SUCCEEDED', finished_at=now(), message='ok', applied_hash=$3
            WHERE deployment_id=$1 AND host_id=$2`, [deploymentId, hostRow.id, policyHash]);
-                }
             }
-            else {
-                await pool.query(`UPDATE deployment_hosts
+        }
+        else {
+            await pool.query(`UPDATE deployment_hosts
          SET status='FAILED', finished_at=now(), message='ansible_failed'
          WHERE deployment_id=$1 AND status='RUNNING'`, [deploymentId]);
-            }
-            // Get final host status counts to determine deployment status
-            const hostStatusRes = await pool.query(`SELECT status, COUNT(*) as count
+        }
+        // Get final host status counts to determine deployment status
+        const hostStatusRes = await pool.query(`SELECT status, COUNT(*) as count
        FROM deployment_hosts
        WHERE deployment_id=$1
        GROUP BY status`, [deploymentId]);
-            const statusCounts = {};
-            for (const row of hostStatusRes.rows) {
-                statusCounts[row.status] = parseInt(row.count, 10);
-            }
-            const succeededCount = statusCounts['SUCCEEDED'] || 0;
-            const failedCount = statusCounts['FAILED'] || 0;
-            const skippedCount = statusCounts['SKIPPED'] || 0;
-            const total = succeededCount + failedCount + skippedCount;
-            // Determine final status
-            let finalStatus;
-            if (failedCount > 0 && succeededCount > 0) {
-                finalStatus = 'PARTIAL';
-            }
-            else if (failedCount === total || (failedCount > 0 && succeededCount === 0)) {
-                finalStatus = 'FAILED';
-            }
-            else {
-                finalStatus = 'SUCCEEDED';
-            }
-            await pool.query(`UPDATE deployments SET status=$2, finished_at=now() WHERE id=$1`, [deploymentId, finalStatus]);
-            // Get deployment info for audit
-            const depRes = await pool.query(`SELECT d.*, ps.name as policy_set_name, pv.version_number, u.id as user_id
+        const statusCounts = {};
+        for (const row of hostStatusRes.rows) {
+            statusCounts[row.status] = parseInt(row.count, 10);
+        }
+        const succeededCount = statusCounts['SUCCEEDED'] || 0;
+        const failedCount = statusCounts['FAILED'] || 0;
+        const skippedCount = statusCounts['SKIPPED'] || 0;
+        const total = succeededCount + failedCount + skippedCount;
+        // Determine final status
+        let finalStatus;
+        if (failedCount > 0 && succeededCount > 0) {
+            finalStatus = 'PARTIAL';
+        }
+        else if (failedCount === total || (failedCount > 0 && succeededCount === 0)) {
+            finalStatus = 'FAILED';
+        }
+        else {
+            finalStatus = 'SUCCEEDED';
+        }
+        await pool.query(`UPDATE deployments SET status=$2, finished_at=now() WHERE id=$1`, [deploymentId, finalStatus]);
+        // Get deployment info for audit
+        const depRes = await pool.query(`SELECT d.*, ps.name as policy_set_name, pv.version_number, u.id as user_id
        FROM deployments d
        LEFT JOIN policy_versions pv ON d.policy_version_id = pv.id
        LEFT JOIN policy_sets ps ON pv.policy_set_id = ps.id
        LEFT JOIN users u ON d.created_by = u.id
        WHERE d.id=$1`, [deploymentId]);
-            const dep = depRes.rows[0];
-            // Resolve target names for audit
-            const targetQuery = dep.target_query || {};
-            const targetNames = { tags: [], vlans: [], hosts: [] };
-            if (targetQuery.tags && Array.isArray(targetQuery.tags) && targetQuery.tags.length > 0) {
-                const tagRes = await pool.query(`SELECT name FROM tags WHERE id = ANY($1::uuid[])`, [targetQuery.tags]);
-                targetNames.tags = tagRes.rows.map((r) => r.name);
-            }
-            if (targetQuery.vlans && Array.isArray(targetQuery.vlans) && targetQuery.vlans.length > 0) {
-                const vlanRes = await pool.query(`SELECT name FROM vlans WHERE id = ANY($1::uuid[])`, [targetQuery.vlans]);
-                targetNames.vlans = vlanRes.rows.map((r) => r.name);
-            }
-            if (targetQuery.hosts && Array.isArray(targetQuery.hosts) && targetQuery.hosts.length > 0) {
-                const hostRes = await pool.query(`SELECT hostname FROM hosts WHERE id = ANY($1::uuid[])`, [targetQuery.hosts]);
-                targetNames.hosts = hostRes.rows.map((r) => r.hostname);
-            }
-            const targetTypes = [];
-            if (targetNames.tags.length > 0)
-                targetTypes.push('Tags');
-            if (targetNames.vlans.length > 0)
-                targetTypes.push('VLANs');
-            if (targetNames.hosts.length > 0)
-                targetTypes.push('Hosts');
-            const targetType = targetTypes.join(', ') || 'Unknown';
-            // Create audit event for deployment completion
-            await createAuditEvent({
-                actorUserId: dep.user_id || null,
-                action: 'DEPLOYMENT_FINISHED',
-                entityType: 'DEPLOYMENT',
-                entityId: deploymentId,
-                ipAddress: req.ip,
-                metadata: {
-                    policySetName: dep.policy_set_name || 'Unknown',
-                    policyVersionNumber: dep.version_number || null,
-                    deploymentMode: dep.mode,
-                    targetType: targetType,
-                    targetTags: targetNames.tags,
-                    targetVlans: targetNames.vlans,
-                    targetHosts: targetNames.hosts,
-                    result: finalStatus,
-                    createdAt: dep.created_at,
-                    startedAt: dep.started_at,
-                    finishedAt: new Date().toISOString(),
-                    hostCounts: {
-                        total: total,
-                        succeeded: succeededCount,
-                        failed: failedCount,
-                        skipped: skippedCount
-                    }
-                }
-            });
+        const dep = depRes.rows[0];
+        // Resolve target names for audit
+        const targetQuery = dep.target_query || {};
+        const targetNames = { tags: [], vlans: [], hosts: [] };
+        if (targetQuery.tags && Array.isArray(targetQuery.tags) && targetQuery.tags.length > 0) {
+            const tagRes = await pool.query(`SELECT name FROM tags WHERE id = ANY($1::uuid[])`, [targetQuery.tags]);
+            targetNames.tags = tagRes.rows.map((r) => r.name);
         }
-        res.json({ ok, exitCode, executionId });
+        if (targetQuery.vlans && Array.isArray(targetQuery.vlans) && targetQuery.vlans.length > 0) {
+            const vlanRes = await pool.query(`SELECT name FROM vlans WHERE id = ANY($1::uuid[])`, [targetQuery.vlans]);
+            targetNames.vlans = vlanRes.rows.map((r) => r.name);
+        }
+        if (targetQuery.hosts && Array.isArray(targetQuery.hosts) && targetQuery.hosts.length > 0) {
+            const hostRes = await pool.query(`SELECT hostname FROM hosts WHERE id = ANY($1::uuid[])`, [targetQuery.hosts]);
+            targetNames.hosts = hostRes.rows.map((r) => r.hostname);
+        }
+        const targetTypes = [];
+        if (targetNames.tags.length > 0)
+            targetTypes.push('Tags');
+        if (targetNames.vlans.length > 0)
+            targetTypes.push('VLANs');
+        if (targetNames.hosts.length > 0)
+            targetTypes.push('Hosts');
+        const targetType = targetTypes.join(', ') || 'Unknown';
+        // Create audit event for deployment completion
+        await createAuditEvent({
+            actorUserId: dep.user_id || null,
+            action: 'DEPLOYMENT_FINISHED',
+            entityType: 'DEPLOYMENT',
+            entityId: deploymentId,
+            ipAddress: ipAddress,
+            metadata: {
+                policySetName: dep.policy_set_name || 'Unknown',
+                policyVersionNumber: dep.version_number || null,
+                deploymentMode: dep.mode,
+                targetType: targetType,
+                targetTags: targetNames.tags,
+                targetVlans: targetNames.vlans,
+                targetHosts: targetNames.hosts,
+                result: finalStatus,
+                createdAt: dep.created_at,
+                startedAt: dep.started_at,
+                finishedAt: new Date().toISOString(),
+                hostCounts: {
+                    total: total,
+                    succeeded: succeededCount,
+                    failed: failedCount,
+                    skipped: skippedCount
+                }
+            }
+        });
+    }
+    return { ok, exitCode, executionId: executionId };
+}
+deploymentsRouter.post('/deployments/:deploymentId/start', requireRole('operator', 'admin'), async (req, res) => {
+    const deploymentId = req.params.deploymentId;
+    try {
+        const result = await executeDeploymentStart(deploymentId, req.ip);
+        res.json(result);
     }
     catch (error) {
         // eslint-disable-next-line no-console
@@ -836,7 +853,7 @@ deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
         });
     }
 });
-deploymentsRouter.post('/deployments/:deploymentId/pause', async (req, res) => {
+deploymentsRouter.post('/deployments/:deploymentId/pause', requireRole('operator', 'admin'), async (req, res) => {
     const deploymentId = req.params.deploymentId;
     // Check if deployment is running
     const depRes = await pool.query(`SELECT status FROM deployments WHERE id=$1`, [deploymentId]);
@@ -852,7 +869,7 @@ deploymentsRouter.post('/deployments/:deploymentId/pause', async (req, res) => {
     await pool.query(`UPDATE deployment_hosts SET status='PAUSED', finished_at=now(), message='Deployment paused by user' WHERE deployment_id=$1 AND status='RUNNING'`, [deploymentId]);
     res.json({ ok: true });
 });
-deploymentsRouter.post('/deployments/:deploymentId/resume', async (req, res) => {
+deploymentsRouter.post('/deployments/:deploymentId/resume', requireRole('operator', 'admin'), async (req, res) => {
     const deploymentId = req.params.deploymentId;
     // Check if deployment is paused
     const depRes = await pool.query(`SELECT status FROM deployments WHERE id=$1`, [deploymentId]);
@@ -868,7 +885,7 @@ deploymentsRouter.post('/deployments/:deploymentId/resume', async (req, res) => 
     await pool.query(`UPDATE deployment_hosts SET status='RUNNING', finished_at=null, message=null WHERE deployment_id=$1 AND status='PAUSED'`, [deploymentId]);
     res.json({ ok: true });
 });
-deploymentsRouter.post('/deployments/:deploymentId/stop', async (req, res) => {
+deploymentsRouter.post('/deployments/:deploymentId/stop', requireRole('operator', 'admin'), async (req, res) => {
     const deploymentId = req.params.deploymentId;
     // Check if deployment can be stopped
     const depRes = await pool.query(`SELECT status FROM deployments WHERE id=$1`, [deploymentId]);
@@ -885,7 +902,7 @@ deploymentsRouter.post('/deployments/:deploymentId/stop', async (req, res) => {
     await pool.query(`UPDATE deployment_hosts SET status='SKIPPED', finished_at=now(), message='Deployment stopped by user' WHERE deployment_id=$1 AND status IN ('PENDING', 'RUNNING', 'PAUSED')`, [deploymentId]);
     res.json({ ok: true });
 });
-deploymentsRouter.post('/deployments/:deploymentId/cancel', async (req, res) => {
+deploymentsRouter.post('/deployments/:deploymentId/cancel', requireRole('operator', 'admin'), async (req, res) => {
     // v1: best-effort cancellation (no process tracking yet)
     await pool.query(`UPDATE deployments SET status='CANCELLED', finished_at=now() WHERE id=$1 AND status='RUNNING'`, [
         req.params.deploymentId
@@ -895,7 +912,7 @@ deploymentsRouter.post('/deployments/:deploymentId/cancel', async (req, res) => 
     ]);
     res.json({ ok: true });
 });
-deploymentsRouter.post('/deployments/:deploymentId/retry-failed', async (req, res) => {
+deploymentsRouter.post('/deployments/:deploymentId/retry-failed', requireRole('operator', 'admin'), async (req, res) => {
     await pool.query(`UPDATE deployment_hosts SET status='PENDING', started_at=null, finished_at=null, message=null WHERE deployment_id=$1 AND status='FAILED'`, [
         req.params.deploymentId
     ]);
@@ -915,10 +932,21 @@ export async function processScheduledDeployments() {
      LIMIT 10`, [now]);
     let processedCount = 0;
     for (const row of scheduledRes.rows) {
-        // Update status to mark as ready (scheduled_at cleared)
-        // The actual deployment will be started by calling the /start endpoint
-        // For now, we just mark them as ready to start
+        // Clear scheduled_at so this deployment is not picked up again
         await pool.query(`UPDATE deployments SET scheduled_at=NULL WHERE id=$1`, [row.id]);
+        // Actually start the deployment using the shared execution logic
+        try {
+            const result = await executeDeploymentStart(row.id, undefined);
+            // eslint-disable-next-line no-console
+            console.log(`[Scheduled Deployments] Auto-started deployment ${row.id} — ok=${result.ok}, exitCode=${result.exitCode}`);
+        }
+        catch (error) {
+            // eslint-disable-next-line no-console
+            console.error(`[Scheduled Deployments] Failed to auto-start deployment ${row.id}:`, error.message);
+            // Mark the deployment as FAILED so it doesn't remain in a stuck state
+            await pool.query(`UPDATE deployments SET status='FAILED', finished_at=now() WHERE id=$1 AND status IN ('QUEUED', 'RUNNING')`, [row.id]);
+            await pool.query(`UPDATE deployment_hosts SET status='FAILED', finished_at=now(), message=$2 WHERE deployment_id=$1 AND status IN ('PENDING', 'RUNNING')`, [row.id, error.message || 'Scheduled deployment start failed']);
+        }
         processedCount++;
     }
     return processedCount;

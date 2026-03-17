@@ -273,6 +273,9 @@ export function PolicyVersionPage() {
             <span style={{ color: '#666', fontStyle: 'italic' }}>Rules cannot be edited for {version.status} versions</span>
           )}
         </div>
+        <div style={{ padding: '8px 12px', background: '#f7f4ef', borderRadius: 6, marginBottom: 12, fontSize: '12.5px', color: '#78644e', borderLeft: '3px solid #d4c9b8' }}>
+          <strong>Baseline rules applied automatically:</strong> Loopback allow, established/related connections, and management SSH access (from the configured management VLAN) are added by the compiler at deploy time. Define only your application-specific rules here.
+        </div>
 
         {showAddRule && (version.status === 'DRAFT' || version.status === 'REJECTED') && (
           <div className="rule-form">

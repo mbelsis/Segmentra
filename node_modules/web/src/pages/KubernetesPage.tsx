@@ -79,6 +79,11 @@ export function KubernetesPage() {
   return (
     <div>
       <h2>Kubernetes Microsegmentation</h2>
+      <p style={{ color: '#78644e', fontSize: '13.5px', marginTop: -4, marginBottom: 16, lineHeight: 1.6 }}>
+        Manage Kubernetes NetworkPolicy resources agentlessly via the K8s API — no sidecar or service mesh required.
+        Connect clusters, discover workloads and namespaces, map Kubernetes labels to Segmentra tags for unified policy management,
+        and deploy NetworkPolicy manifests directly from approved Segmentra policies.
+      </p>
       {error && <div style={{ color: 'red', marginBottom: 8 }}>{error} <button onClick={() => setError('')}>dismiss</button></div>}
 
       <div style={{ marginBottom: 16 }}>

@@ -35,6 +35,14 @@ export function AdminPage() {
   const [vlans, setVlans] = useState<any[]>([]);
   const [selectedManagementVlanId, setSelectedManagementVlanId] = useState<string>('');
 
+  // Local users state
+  const [users, setUsers] = useState<any[]>([]);
+  const [showUserForm, setShowUserForm] = useState(false);
+  const [editingUser, setEditingUser] = useState<any>(null);
+  const [userForm, setUserForm] = useState({ username: '', displayName: '', email: '', password: '', roles: ['viewer'] as string[], isActive: true });
+  const [resetPasswordUserId, setResetPasswordUserId] = useState<string | null>(null);
+  const [newPassword, setNewPassword] = useState('');
+
   useEffect(() => {
     loadData();
   }, []);
@@ -66,6 +74,12 @@ export function AdminPage() {
       setManagementVlan(mgmtVlanRes.managementVlan);
       setVlans(vlansRes.vlans || []);
       setSelectedManagementVlanId(mgmtVlanRes.managementVlan?.id || '');
+
+      // Load users
+      try {
+        const usersRes = await api.users.list();
+        setUsers(usersRes.users || []);
+      } catch { /* users endpoint may fail for non-admin */ }
     } catch (e: any) {
       setError(String(e?.message ?? e));
     }
@@ -107,6 +121,89 @@ export function AdminPage() {
     } finally {
       setLoading(false);
     }
+  }
+
+  async function createUser() {
+    if (!userForm.username.trim() || !userForm.displayName.trim() || !userForm.password.trim()) {
+      setError('Username, display name, and password are required');
+      return;
+    }
+    setLoading(true); setError(''); setSuccess('');
+    try {
+      await api.users.create({
+        username: userForm.username.trim(),
+        displayName: userForm.displayName.trim(),
+        email: userForm.email.trim() || undefined,
+        password: userForm.password,
+        roles: userForm.roles,
+        isActive: userForm.isActive,
+      });
+      setSuccess(`User "${userForm.username}" created successfully`);
+      setShowUserForm(false);
+      setUserForm({ username: '', displayName: '', email: '', password: '', roles: ['viewer'], isActive: true });
+      loadData();
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (e: any) { setError(String(e?.message ?? e)); }
+    finally { setLoading(false); }
+  }
+
+  async function updateUser() {
+    if (!editingUser) return;
+    setLoading(true); setError(''); setSuccess('');
+    try {
+      await api.users.update(editingUser.id, {
+        displayName: userForm.displayName.trim() || undefined,
+        email: userForm.email.trim() || undefined,
+        roles: userForm.roles,
+        isActive: userForm.isActive,
+      });
+      setSuccess(`User "${editingUser.username}" updated`);
+      setEditingUser(null);
+      setShowUserForm(false);
+      loadData();
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (e: any) { setError(String(e?.message ?? e)); }
+    finally { setLoading(false); }
+  }
+
+  async function resetUserPassword() {
+    if (!resetPasswordUserId || !newPassword.trim()) {
+      setError('Password must be at least 6 characters');
+      return;
+    }
+    setLoading(true); setError(''); setSuccess('');
+    try {
+      await api.users.resetPassword(resetPasswordUserId, newPassword);
+      setSuccess('Password reset successfully');
+      setResetPasswordUserId(null);
+      setNewPassword('');
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (e: any) { setError(String(e?.message ?? e)); }
+    finally { setLoading(false); }
+  }
+
+  async function deleteUser(id: string, username: string) {
+    if (!confirm(`Delete user "${username}"? This cannot be undone.`)) return;
+    setError(''); setSuccess('');
+    try {
+      await api.users.delete(id);
+      setSuccess(`User "${username}" deleted`);
+      loadData();
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (e: any) { setError(String(e?.message ?? e)); }
+  }
+
+  function startEditUser(u: any) {
+    setEditingUser(u);
+    setUserForm({
+      username: u.username,
+      displayName: u.display_name || '',
+      email: u.email || '',
+      password: '',
+      roles: u.roles || ['viewer'],
+      isActive: u.is_active,
+    });
+    setShowUserForm(true);
   }
 
   async function saveLdapSettings() {
@@ -233,6 +330,117 @@ export function AdminPage() {
           {success}
         </div>
       )}
+
+      {/* Local Users Management */}
+      <div className="card">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <h3 style={{ margin: 0 }}>Local Users</h3>
+          <button onClick={() => { setEditingUser(null); setUserForm({ username: '', displayName: '', email: '', password: '', roles: ['viewer'], isActive: true }); setShowUserForm(true); }} className="btn-primary">+ Create User</button>
+        </div>
+      </div>
+
+      {showUserForm && (
+        <div className="card" style={{ border: '2px solid #8b6914' }}>
+          <h3>{editingUser ? `Edit User: ${editingUser.username}` : 'Create Local User'}</h3>
+          <div className="form-grid">
+            {!editingUser && (
+              <div className="form-group">
+                <label>Username *</label>
+                <input value={userForm.username} onChange={e => setUserForm(f => ({ ...f, username: e.target.value }))} placeholder="e.g., john.doe" />
+              </div>
+            )}
+            <div className="form-group">
+              <label>Display Name *</label>
+              <input value={userForm.displayName} onChange={e => setUserForm(f => ({ ...f, displayName: e.target.value }))} placeholder="e.g., John Doe" />
+            </div>
+            <div className="form-group">
+              <label>Email</label>
+              <input type="email" value={userForm.email} onChange={e => setUserForm(f => ({ ...f, email: e.target.value }))} placeholder="e.g., john@company.com" />
+            </div>
+            {!editingUser && (
+              <div className="form-group">
+                <label>Password *</label>
+                <input type="password" value={userForm.password} onChange={e => setUserForm(f => ({ ...f, password: e.target.value }))} placeholder="Minimum 6 characters" />
+              </div>
+            )}
+          </div>
+          <div className="form-group" style={{ marginTop: 12 }}>
+            <label>Roles *</label>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginTop: 6 }}>
+              {['viewer', 'operator', 'approver', 'admin'].map(role => (
+                <label key={role} style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={userForm.roles.includes(role)}
+                    onChange={e => setUserForm(f => ({ ...f, roles: e.target.checked ? [...f.roles, role] : f.roles.filter(r => r !== role) }))} />
+                  <span style={{ textTransform: 'capitalize' }}>{role}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="form-group" style={{ marginTop: 8 }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <input type="checkbox" checked={userForm.isActive} onChange={e => setUserForm(f => ({ ...f, isActive: e.target.checked }))} />
+              Account Active
+            </label>
+          </div>
+          <div className="form-actions" style={{ marginTop: 16 }}>
+            <button onClick={editingUser ? updateUser : createUser} className="btn-primary" disabled={loading || (!editingUser && (!userForm.username.trim() || !userForm.password.trim())) || !userForm.displayName.trim() || userForm.roles.length === 0}>
+              {editingUser ? 'Update User' : 'Create User'}
+            </button>
+            <button onClick={() => { setShowUserForm(false); setEditingUser(null); }} className="btn-secondary">Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* Password Reset Modal */}
+      {resetPasswordUserId && (
+        <div className="card" style={{ border: '2px solid #c47a1a', background: '#fdf6ec' }}>
+          <h3>Reset Password</h3>
+          <div className="form-group">
+            <label>New Password *</label>
+            <input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="Minimum 6 characters" />
+          </div>
+          <div className="form-actions" style={{ marginTop: 12 }}>
+            <button onClick={resetUserPassword} className="btn-primary" disabled={loading || newPassword.length < 6}>Reset Password</button>
+            <button onClick={() => { setResetPasswordUserId(null); setNewPassword(''); }} className="btn-secondary">Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* Users Table */}
+      <div className="card">
+        <h3>All Users</h3>
+        {users.length > 0 ? (
+          <table className="data-table">
+            <thead>
+              <tr><th>Username</th><th>Display Name</th><th>Email</th><th>Roles</th><th>Type</th><th>Status</th><th>Last Login</th><th>Actions</th></tr>
+            </thead>
+            <tbody>
+              {users.map(u => (
+                <tr key={u.id}>
+                  <td><strong>{u.username}</strong></td>
+                  <td>{u.display_name || '-'}</td>
+                  <td style={{ fontSize: '12.5px' }}>{u.email || '-'}</td>
+                  <td>
+                    {(u.roles || []).map((r: string) => (
+                      <span key={r} style={{ display: 'inline-block', padding: '1px 8px', borderRadius: 4, fontSize: '11.5px', marginRight: 4, background: r === 'admin' ? '#fdf6ec' : '#f0ebe2', color: r === 'admin' ? '#8b6914' : '#5c4633', fontWeight: 500 }}>{r}</span>
+                    ))}
+                  </td>
+                  <td style={{ fontSize: '12.5px' }}>{u.auth_type === 'local' ? 'Local' : 'LDAP'}</td>
+                  <td><span style={{ color: u.is_active ? '#5a7a3a' : '#a63d2f', fontWeight: 600, fontSize: '12.5px' }}>{u.is_active ? 'Active' : 'Disabled'}</span></td>
+                  <td style={{ fontSize: '12px', color: '#97846c' }}>{u.last_login_at ? new Date(u.last_login_at).toLocaleDateString() : 'Never'}</td>
+                  <td>
+                    <button onClick={() => startEditUser(u)} className="btn-small btn-secondary" style={{ marginRight: 4 }}>Edit</button>
+                    <button onClick={() => setResetPasswordUserId(u.id)} className="btn-small btn-secondary" style={{ marginRight: 4 }}>Reset PW</button>
+                    <button onClick={() => deleteUser(u.id, u.username)} className="btn-small btn-danger">Delete</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p style={{ color: '#97846c', fontStyle: 'italic' }}>No users found. Click "+ Create User" above to add a local user.</p>
+        )}
+      </div>
 
       {/* Deployment Executor Setting */}
       <div className="card">

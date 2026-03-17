@@ -8,7 +8,7 @@ export const vlansRouter = Router();
 vlansRouter.use(requireAuth);
 
 // GET endpoints are read-only and accessible to viewers
-vlansRouter.get('/', requireRole('viewer', 'operator', 'admin'), async (_req, res) => {
+vlansRouter.get('/', requireRole('viewer', 'operator', 'approver', 'admin'), async (_req, res) => {
   const { rows } = await pool.query(`SELECT * FROM vlans ORDER BY vlan_tag ASC`);
   res.json({ vlans: rows });
 });

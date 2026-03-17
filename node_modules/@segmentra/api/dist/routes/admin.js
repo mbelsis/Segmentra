@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import bcrypt from 'bcrypt';
 import { env } from '../lib/env.js';
 import { pool } from '../db/pool.js';
 import { signJwt } from '../services/jwt.js';
@@ -176,4 +177,145 @@ adminRouter.put('/management-vlan-setting', requireAuth, requireRole('admin'), a
     else {
         res.json({ managementVlan: null });
     }
+});
+// === Local User Management ===
+// List all users with their roles
+adminRouter.get('/users', requireAuth, requireRole('admin'), async (_req, res) => {
+    const { rows } = await pool.query(`SELECT u.id, u.username, u.display_name, u.email, u.is_active, u.created_at, u.last_login_at,
+       (SELECT array_agg(r.name ORDER BY r.name) FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = u.id) as roles,
+       CASE WHEN u.password_hash IS NOT NULL THEN 'local' ELSE 'ldap' END as auth_type
+     FROM users u ORDER BY u.username ASC`);
+    res.json({ users: rows });
+});
+// Get single user
+adminRouter.get('/users/:id', requireAuth, requireRole('admin'), async (req, res) => {
+    const { rows } = await pool.query(`SELECT u.id, u.username, u.display_name, u.email, u.is_active, u.created_at, u.last_login_at,
+       (SELECT array_agg(r.name ORDER BY r.name) FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = u.id) as roles,
+       CASE WHEN u.password_hash IS NOT NULL THEN 'local' ELSE 'ldap' END as auth_type
+     FROM users u WHERE u.id = $1`, [req.params.id]);
+    if (!rows[0])
+        return res.status(404).json({ error: 'not_found' });
+    res.json({ user: rows[0] });
+});
+const createUserSchema = z.object({
+    username: z.string().min(1).max(100),
+    displayName: z.string().min(1).max(200),
+    email: z.string().email().optional().nullable(),
+    password: z.string().min(6),
+    roles: z.array(z.enum(['viewer', 'operator', 'approver', 'admin'])).min(1),
+    isActive: z.boolean().default(true),
+});
+// Create local user
+adminRouter.post('/users', requireAuth, requireRole('admin'), async (req, res) => {
+    const parsed = createUserSchema.safeParse(req.body);
+    if (!parsed.success)
+        return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
+    const b = parsed.data;
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        // Check username uniqueness
+        const existing = await client.query('SELECT id FROM users WHERE username = $1', [b.username]);
+        if (existing.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ error: 'username_taken', message: `Username "${b.username}" is already in use.` });
+        }
+        const passwordHash = await bcrypt.hash(b.password, 10);
+        const userRes = await client.query(`INSERT INTO users (username, display_name, email, password_hash, is_active)
+       VALUES ($1, $2, $3, $4, $5) RETURNING id, username, display_name, email, is_active, created_at`, [b.username, b.displayName, b.email ?? null, passwordHash, b.isActive]);
+        const userId = userRes.rows[0].id;
+        // Assign roles
+        for (const roleName of b.roles) {
+            const roleRes = await client.query('SELECT id FROM roles WHERE name = $1', [roleName]);
+            if (roleRes.rows[0]) {
+                await client.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [userId, roleRes.rows[0].id]);
+            }
+        }
+        await client.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+       VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), 'USER_CREATE', 'user', $2, $3)`, [req.auth.username, userId, JSON.stringify({ username: b.username, roles: b.roles })]);
+        await client.query('COMMIT');
+        res.status(201).json({ user: { ...userRes.rows[0], roles: b.roles } });
+    }
+    catch (e) {
+        await client.query('ROLLBACK');
+        res.status(500).json({ error: 'create_failed', message: e.message });
+    }
+    finally {
+        client.release();
+    }
+});
+const updateUserSchema = z.object({
+    displayName: z.string().min(1).max(200).optional(),
+    email: z.string().email().optional().nullable(),
+    isActive: z.boolean().optional(),
+    roles: z.array(z.enum(['viewer', 'operator', 'approver', 'admin'])).min(1).optional(),
+});
+// Update user
+adminRouter.put('/users/:id', requireAuth, requireRole('admin'), async (req, res) => {
+    const parsed = updateUserSchema.safeParse(req.body);
+    if (!parsed.success)
+        return res.status(400).json({ error: 'invalid_body' });
+    const b = parsed.data;
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        const { rows } = await client.query(`UPDATE users SET
+         display_name = COALESCE($2, display_name),
+         email = COALESCE($3, email),
+         is_active = COALESCE($4, is_active)
+       WHERE id = $1 RETURNING id, username, display_name, email, is_active`, [req.params.id, b.displayName ?? null, b.email !== undefined ? b.email : null, b.isActive ?? null]);
+        if (!rows[0]) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'not_found' });
+        }
+        // Update roles if provided
+        if (b.roles) {
+            await client.query('DELETE FROM user_roles WHERE user_id = $1', [req.params.id]);
+            for (const roleName of b.roles) {
+                const roleRes = await client.query('SELECT id FROM roles WHERE name = $1', [roleName]);
+                if (roleRes.rows[0]) {
+                    await client.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [req.params.id, roleRes.rows[0].id]);
+                }
+            }
+        }
+        await client.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+       VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), 'USER_UPDATE', 'user', $2, $3)`, [req.auth.username, req.params.id, JSON.stringify({ changes: b })]);
+        await client.query('COMMIT');
+        res.json({ user: rows[0] });
+    }
+    catch (e) {
+        await client.query('ROLLBACK');
+        res.status(500).json({ error: 'update_failed', message: e.message });
+    }
+    finally {
+        client.release();
+    }
+});
+// Reset password
+adminRouter.post('/users/:id/reset-password', requireAuth, requireRole('admin'), async (req, res) => {
+    const bodySchema = z.object({ newPassword: z.string().min(6) });
+    const parsed = bodySchema.safeParse(req.body);
+    if (!parsed.success)
+        return res.status(400).json({ error: 'invalid_body', message: 'Password must be at least 6 characters.' });
+    const passwordHash = await bcrypt.hash(parsed.data.newPassword, 10);
+    const { rowCount } = await pool.query('UPDATE users SET password_hash = $2 WHERE id = $1', [req.params.id, passwordHash]);
+    if (!rowCount)
+        return res.status(404).json({ error: 'not_found' });
+    await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), 'USER_PASSWORD_RESET', 'user', $2, $3)`, [req.auth.username, req.params.id, JSON.stringify({ resetBy: req.auth.username })]);
+    res.json({ ok: true, message: 'Password reset successfully.' });
+});
+// Delete user
+adminRouter.delete('/users/:id', requireAuth, requireRole('admin'), async (req, res) => {
+    // Prevent self-deletion
+    const userRes = await pool.query('SELECT username FROM users WHERE id = $1', [req.params.id]);
+    if (userRes.rows[0]?.username === req.auth.username) {
+        return res.status(400).json({ error: 'cannot_delete_self', message: 'You cannot delete your own account.' });
+    }
+    const { rowCount } = await pool.query('DELETE FROM users WHERE id = $1', [req.params.id]);
+    if (!rowCount)
+        return res.status(404).json({ error: 'not_found' });
+    await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), 'USER_DELETE', 'user', $2, $3)`, [req.auth.username, req.params.id, JSON.stringify({ deletedBy: req.auth.username })]);
+    res.json({ ok: true });
 });

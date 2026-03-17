@@ -199,13 +199,53 @@ export function PolicyTestPage() {
       )}
 
       {/* Workflow Steps Indicator */}
-      <div style={{ display: 'flex', gap: 4, marginBottom: 16, fontSize: '0.85em' }}>
-        {['1. Deploy log-only', '2. Capture traffic', '3. Restore & collect', '4. Analyze gaps'].map((step, i) => (
-          <div key={i} style={{ flex: 1, textAlign: 'center', padding: '6px 4px', background: '#f5f5f5', borderRadius: 4, border: '1px solid #ddd' }}>
-            {step}
+      {(() => {
+        const steps = [
+          { num: '1', label: 'Deploy log-only', icon: '>' },
+          { num: '2', label: 'Capture traffic', icon: '>' },
+          { num: '3', label: 'Restore & collect', icon: '>' },
+          { num: '4', label: 'Analyze gaps', icon: '' },
+        ];
+        // Determine active step from selected session
+        const activeStep = !selectedSession ? -1
+          : selectedSession.status === 'DEPLOYING' ? 0
+          : selectedSession.status === 'RUNNING' ? 1
+          : selectedSession.status === 'COLLECTING' ? 2
+          : selectedSession.status === 'COMPLETED' || selectedSession.status === 'ANALYZING' ? 3
+          : -1;
+        return (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 20, gap: 0 }}>
+            {steps.map((step, i) => (
+              <div key={i} style={{ display: 'contents' }}>
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '8px 18px',
+                  borderRadius: 20,
+                  fontSize: '13px',
+                  fontWeight: i === activeStep ? 600 : 400,
+                  background: i === activeStep ? '#8b6914' : i < activeStep ? '#f0ebe2' : '#f7f4ef',
+                  color: i === activeStep ? '#fdfcf9' : i < activeStep ? '#5c4633' : '#97846c',
+                  border: `1px solid ${i === activeStep ? '#8b6914' : i < activeStep ? '#d4c9b8' : '#e8e0d4'}`,
+                  whiteSpace: 'nowrap',
+                }}>
+                  <span style={{
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                    width: 20, height: 20, borderRadius: '50%', fontSize: '11px', fontWeight: 700,
+                    background: i === activeStep ? 'rgba(255,255,255,0.25)' : i < activeStep ? '#d4c9b8' : '#e8e0d4',
+                    color: i === activeStep ? '#fdfcf9' : i < activeStep ? '#5c4633' : '#97846c',
+                  }}>{step.num}</span>
+                  {step.label}
+                </div>
+                {step.icon && (
+                  <svg width="24" height="12" viewBox="0 0 24 12" style={{ flex: '0 0 24px', margin: '0 4px' }}>
+                    <path d="M4 6 L16 6 M13 2.5 L17 6 L13 9.5" fill="none" stroke={i < activeStep ? '#b8a890' : '#d4c9b8'} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
+        );
+      })()}
 
       <div style={{ display: 'flex', gap: 24 }}>
         {/* Sessions list */}

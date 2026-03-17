@@ -5,8 +5,10 @@ import { requireAuth, requireRole } from '../../middleware/auth.js';
 export const policySetsRouter = Router();
 policySetsRouter.use(requireAuth);
 // GET endpoints are read-only and accessible to viewers
-policySetsRouter.get('/', requireRole('viewer', 'operator', 'admin'), async (_req, res) => {
-    const { rows } = await pool.query(`SELECT * FROM policy_sets ORDER BY created_at DESC`);
+policySetsRouter.get('/', requireRole('viewer', 'operator', 'approver', 'admin'), async (_req, res) => {
+    const { rows } = await pool.query(`SELECT ps.*,
+       (SELECT COUNT(*)::int FROM policy_versions pv WHERE pv.policy_set_id = ps.id) as version_count
+     FROM policy_sets ps ORDER BY ps.created_at DESC`);
     res.json({ policySets: rows });
 });
 const createPolicySetSchema = z.object({
@@ -57,7 +59,7 @@ policySetsRouter.post('/', requireRole('operator', 'admin'), async (req, res) =>
         client.release();
     }
 });
-policySetsRouter.get('/:id', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+policySetsRouter.get('/:id', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
     const { rows } = await pool.query(`SELECT * FROM policy_sets WHERE id=$1`, [req.params.id]);
     if (!rows[0])
         return res.status(404).json({ error: 'not_found' });
@@ -83,7 +85,14 @@ policySetsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) 
     res.json({ policySet: rows[0] });
 });
 policySetsRouter.delete('/:id', requireRole('operator', 'admin'), async (req, res) => {
-    // soft delete not defined; hard delete for now
+    // Only allow deletion if no versions exist
+    const { rows: versionCheck } = await pool.query(`SELECT COUNT(*)::int as count FROM policy_versions WHERE policy_set_id = $1`, [req.params.id]);
+    if (versionCheck[0]?.count > 0) {
+        return res.status(400).json({
+            error: 'has_versions',
+            message: `Cannot delete this policy set — it has ${versionCheck[0].count} version(s). Delete all versions first.`
+        });
+    }
     const { rowCount } = await pool.query(`DELETE FROM policy_sets WHERE id=$1`, [req.params.id]);
     if (!rowCount)
         return res.status(404).json({ error: 'not_found' });

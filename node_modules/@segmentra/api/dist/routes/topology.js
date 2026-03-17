@@ -6,7 +6,7 @@ import { generatePoliciesFromTopology, autoDiscoverTopology } from '../services/
 export const topologyRouter = Router();
 topologyRouter.use(requireAuth);
 // List topology views
-topologyRouter.get('/views', requireRole('viewer', 'operator', 'admin'), async (_req, res) => {
+topologyRouter.get('/views', requireRole('viewer', 'operator', 'approver', 'admin'), async (_req, res) => {
     const { rows } = await pool.query(`SELECT tv.*, u.username as created_by_name,
        (SELECT COUNT(*) FROM topology_flows tf WHERE tf.topology_view_id = tv.id) as flow_count
      FROM topology_views tv
@@ -15,7 +15,7 @@ topologyRouter.get('/views', requireRole('viewer', 'operator', 'admin'), async (
     res.json({ views: rows });
 });
 // Get single topology view with flows
-topologyRouter.get('/views/:id', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+topologyRouter.get('/views/:id', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
     const { rows } = await pool.query(`SELECT * FROM topology_views WHERE id = $1`, [req.params.id]);
     if (!rows[0])
         return res.status(404).json({ error: 'not_found' });
@@ -110,7 +110,7 @@ topologyRouter.post('/views/:id/generate-policies', requireRole('operator', 'adm
     }
 });
 // Auto-discover topology from existing inventory and policies
-topologyRouter.get('/auto-discover', requireRole('viewer', 'operator', 'admin'), async (_req, res) => {
+topologyRouter.get('/auto-discover', requireRole('viewer', 'operator', 'approver', 'admin'), async (_req, res) => {
     try {
         const result = await autoDiscoverTopology();
         res.json(result);

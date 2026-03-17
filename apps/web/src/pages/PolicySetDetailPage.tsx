@@ -92,6 +92,26 @@ export function PolicySetDetailPage() {
     }
   }
 
+  async function deleteVersion(versionId: string) {
+    if (!confirm('Delete this DRAFT version? This will permanently remove the version and all its rules.')) return;
+    try {
+      await api.deleteVersion(versionId);
+      loadData();
+    } catch (e: any) {
+      setError(String(e.message || e));
+    }
+  }
+
+  async function archiveVersion(versionId: string) {
+    if (!confirm('Archive this policy version? Archived versions cannot be deployed but remain visible for reference.')) return;
+    try {
+      await api.archiveVersion(versionId);
+      loadData();
+    } catch (e: any) {
+      setError(String(e.message || e));
+    }
+  }
+
   if (!policySetId) return <div className="error">Missing policy set ID</div>;
   if (!policySet) return <div>Loading...</div>;
 
@@ -205,6 +225,12 @@ export function PolicySetDetailPage() {
                       )}
                       {isApproved && (
                         <button onClick={() => cloneVersion(v.id)} className="btn-small btn-secondary">Clone</button>
+                      )}
+                      {(isApproved || v.status === 'DEPLOYED' || v.status === 'PENDING_APPROVAL') && v.status !== 'ARCHIVED' && (
+                        <button onClick={() => archiveVersion(v.id)} className="btn-small btn-secondary" style={{ color: '#78644e' }}>Archive</button>
+                      )}
+                      {(isDraft || isRejected) && (
+                        <button onClick={() => deleteVersion(v.id)} className="btn-small btn-danger">Delete</button>
                       )}
                     </div>
                   </td>

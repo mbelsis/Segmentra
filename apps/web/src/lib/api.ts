@@ -87,6 +87,10 @@ export const api = {
     request<{ version: any }>(`/policy-versions/${versionId}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
   cloneVersion: (versionId: string) =>
     request<{ version: any }>(`/policy-versions/${versionId}/clone`, { method: 'POST' }),
+  deleteVersion: (versionId: string) =>
+    request<{ ok: boolean }>(`/policy-versions/${versionId}`, { method: 'DELETE' }),
+  archiveVersion: (versionId: string) =>
+    request<{ version: any }>(`/policy-versions/${versionId}/archive`, { method: 'POST' }),
 
   render: (versionId: string, hostId: string) =>
     request<{ backend: string; sha256: string; text: string }>(`/policy-versions/${versionId}/render/host/${hostId}`),
