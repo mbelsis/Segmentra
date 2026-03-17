@@ -546,7 +546,17 @@ deploymentsRouter.get('/executions/:executionId/logs', requireRole('viewer', 'op
 });
 
 async function generateBundle(deploymentId: string) {
+  // Validate deploymentId to prevent path traversal
+  if (!/^[0-9a-f-]+$/i.test(deploymentId)) {
+    throw new Error('Invalid deployment ID format');
+  }
   const bundleDir = path.join(env.BUNDLES_DIR, deploymentId);
+  // Verify the resolved path is within BUNDLES_DIR
+  const resolvedBundle = path.resolve(bundleDir);
+  const resolvedBase = path.resolve(env.BUNDLES_DIR);
+  if (!resolvedBundle.startsWith(resolvedBase)) {
+    throw new Error('Invalid bundle path');
+  }
   const hostRulesDir = path.join(bundleDir, 'host_rules');
   fs.mkdirSync(hostRulesDir, { recursive: true });
 

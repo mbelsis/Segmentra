@@ -51,6 +51,12 @@ function sha256(text: string): string {
   return crypto.createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
+/** Sanitize a CIDR/IP value to prevent injection into nftables/iptables rules */
+function sanitizeCidr(value: string): string {
+  // Only allow: digits, dots, colons (IPv6), slashes (CIDR), and commas
+  return value.replace(/[^0-9a-fA-F.:\/,]/g, '');
+}
+
 function resolveInterfaceNames(host: Host, scope: InterfaceScope): string[] {
   if (scope.type === 'ALL_INTERFACES') return [];
   if (scope.type === 'INTERFACE_NAME') return scope.names;
@@ -73,9 +79,10 @@ export function compileHostPolicy(input: CompileInput): CompileOutput {
     lines.push(`  chain input { type filter hook input priority 0; policy ${inputPolicy}; }`);
     lines.push('  chain output { type filter hook output priority 0; policy accept; }');
 
-    // address sets (resolved by API)
+    // address sets (resolved by API) — skip empty sets
     for (const [name, elements] of Object.entries(input.sets)) {
-      const elems = elements.join(', ');
+      if (elements.length === 0) continue; // Skip empty sets to avoid invalid nftables syntax
+      const elems = elements.map(e => sanitizeCidr(e)).join(', ');
       lines.push(`  set ${name} { type ipv4_addr; elements = { ${elems} } }`);
     }
     lines.push('}');
@@ -121,9 +128,9 @@ export function compileHostPolicy(input: CompileInput): CompileOutput {
           : `oifname { ${iifs.map((n) => `"${n}"`).join(', ')} }`;
 
       const remoteIn =
-        r.remote.kind === 'SET' ? `ip saddr @${r.remote.setName}` : `ip saddr ${r.sourceValue}`;
+        r.remote.kind === 'SET' ? `ip saddr @${r.remote.setName}` : `ip saddr ${sanitizeCidr(r.sourceValue)}`;
       const remoteOut =
-        r.remote.kind === 'SET' ? `ip daddr @${r.remote.setName}` : `ip daddr ${r.sourceValue}`;
+        r.remote.kind === 'SET' ? `ip daddr @${r.remote.setName}` : `ip daddr ${sanitizeCidr(r.sourceValue)}`;
       const comment = r.comment ? ` comment \"${r.comment.replace(/\"/g, '')}\"` : '';
 
       const emit = (chain: 'input' | 'output') => {
@@ -212,7 +219,7 @@ export function compileHostPolicy(input: CompileInput): CompileOutput {
         for (const iface of ifaceList) {
           const ifaceFlag = iface ? (chain === 'INPUT' ? `-i ${iface}` : `-o ${iface}`) : '';
           for (const elem of elements) {
-            const remote = chain === 'INPUT' ? `-s ${elem}` : `-d ${elem}`;
+            const remote = chain === 'INPUT' ? `-s ${sanitizeCidr(elem)}` : `-d ${sanitizeCidr(elem)}`;
 
             if (logOnly) {
               const logPrefix = `-j LOG --log-prefix "FW-AUDIT: ${r.action} ${r.comment ? r.comment.replace(/"/g, '') : 'rule'}: "`;
