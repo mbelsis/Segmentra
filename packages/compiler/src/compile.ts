@@ -188,13 +188,19 @@ export function compileHostPolicy(input: CompileInput): CompileOutput {
       const ifNames = resolveInterfaceNames(input.host, scope);
       const action = r.action === 'ALLOW' ? 'ACCEPT' : 'DROP';
       const proto = r.protocol === 'any' ? '' : `-p ${r.protocol}`;
-      // Handle comma-separated ports with -m multiport, single ports with --dport, ranges with --dport
+      // Handle ports for iptables:
+      // - Comma-separated (80,443): -m multiport --dports 80,443
+      // - Ranges (8000-9000): --dport 8000:9000 (iptables uses colon for ranges)
+      // - Single port (22): --dport 22
+      // - Comma + range mix (80,443,8000-9000): -m multiport --dports 80,443,8000:9000
       let ports = '';
       if ((r.protocol === 'tcp' || r.protocol === 'udp') && r.ports) {
-        if (r.ports.includes(',')) {
-          ports = `-m multiport --dports ${r.ports}`;
+        // Normalize dash ranges to colon ranges for iptables
+        const normalizedPorts = r.ports.replace(/(\d+)-(\d+)/g, '$1:$2');
+        if (normalizedPorts.includes(',')) {
+          ports = `-m multiport --dports ${normalizedPorts}`;
         } else {
-          ports = `--dport ${r.ports}`;
+          ports = `--dport ${normalizedPorts}`;
         }
       }
       // Emit rules for ALL matching interfaces (not just the first)

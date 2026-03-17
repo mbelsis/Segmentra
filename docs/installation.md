@@ -188,21 +188,28 @@ Production runs 4 containers:
 
 ### Step 1: Configure Environment
 
-Create a `.env` file in the project root (optional — defaults work for basic setup):
+Create a `.env` file in the project root. **This is required for production** — do not deploy with default secrets.
 
 ```env
-# Required for production
+# REQUIRED — generate a unique random string (minimum 32 characters)
+# Example: openssl rand -base64 48
 JWT_SECRET=your-long-random-secret-here-minimum-32-characters
 
-# Optional: encryption key for SSH keys and secrets (recommended)
+# REQUIRED for production — encryption key for SSH keys and LDAP passwords
 # Generate: python3 -c "import os,base64; print(base64.b64encode(os.urandom(32)).decode())"
-SEGMENTRA_KEK_B64=
+SEGMENTRA_KEK_B64=your-base64-encoded-32-byte-key
 
 # Optional: override default ports
 # API_PORT=8080
 # WEB_PORT=80
 # DB_PORT=15432
 ```
+
+> **Security Warning:** The default `docker-compose.yml` uses hardcoded database credentials (`segmentra/segmentra`) and exposes PostgreSQL on port 15432. For production:
+> - Change the database password in both `docker-compose.yml` and `DATABASE_URL`
+> - Consider not exposing the PostgreSQL port externally (remove the `ports` mapping for `segmentra-db`)
+> - The Docker socket mount (`/var/run/docker.sock`) is required for the Ansible executor. If you use SSH Direct executor only, remove this mount to reduce the attack surface.
+> - JWT tokens are valid for 12 hours. Disabling a user or changing roles takes effect on next login, not immediately.
 
 ### Step 2: Build and Start
 
@@ -335,12 +342,16 @@ Configure in: **Admin → SSH Credentials**
 
 ## Security Notes
 
-- Change the default admin password immediately after first login
-- Set a strong `JWT_SECRET` (32+ random characters)
-- Set `SEGMENTRA_KEK_B64` for secret encryption (SSH keys, LDAP passwords)
-- Back up the PostgreSQL volume (`segmentra_pgdata`) regularly
-- The Ansible executor requires Docker socket access — treat the API container as high-trust
-- In production, consider placing an additional reverse proxy (with TLS) in front of the nginx container
+- **Change the default admin password** immediately after first login
+- **Set a strong `JWT_SECRET`** (32+ random characters) — never use the default in production
+- **Set `SEGMENTRA_KEK_B64`** for AES-256-GCM encryption of SSH keys and LDAP passwords
+- **Change database credentials** in `docker-compose.yml` for production (default: `segmentra/segmentra`)
+- **Remove PostgreSQL port exposure** — consider removing `ports: "15432:5432"` from `segmentra-db` if external DB access is not needed
+- **Docker socket mount** — `/var/run/docker.sock` is required for the Ansible executor; if using SSH Direct only, remove this mount. Treat the API container as high-trust when the socket is mounted.
+- **SSH host key verification** — disabled by default (`StrictHostKeyChecking=no`) for deployment automation. For high-security environments, consider configuring a known_hosts file.
+- **JWT token lifetime** — tokens are valid for 12 hours. Disabling a user or changing roles takes effect on next login, not immediately. For faster revocation, consider shortening the token expiry in `apps/api/src/services/jwt.ts`.
+- **TLS** — in production, place a reverse proxy with TLS (e.g., nginx with Let's Encrypt) in front of the `segmentra-web` container
+- **Back up** the PostgreSQL volume (`segmentra_pgdata`) regularly
 
 ---
 
