@@ -91,7 +91,7 @@ export function AppShell() {
           </div>
           <div style={{
             textAlign: 'center',
-            fontSize: '0.7em',
+            fontSize: '0.85em',
             color: '#97846c'
           }}>
             © Belsis Meletis

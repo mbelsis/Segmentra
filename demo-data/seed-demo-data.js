@@ -19,7 +19,7 @@ const vlans = [
 const vlanIds = {};
 for (const v of vlans) {
   const res = await client.query(
-    `INSERT INTO vlans (vlan_tag, name, description, subnet) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING RETURNING id`,
+    `INSERT INTO vlans (vlan_tag, name, description, subnet) VALUES ($1,$2,$3,$4) ON CONFLICT (vlan_tag) DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.description, subnet = EXCLUDED.subnet RETURNING id`,
     [v.tag, v.name, v.desc, v.subnet]
   );
   if (res.rows[0]) vlanIds[v.name] = res.rows[0].id;

@@ -139,61 +139,130 @@ integrationsRouter.delete('/:id', requireRole('admin'), async (req, res) => {
   res.json({ ok: true });
 });
 
-// Test integration connectivity
-// NOTE: This is a connectivity placeholder — it logs a test event and updates status
-// but does not actually connect to the external system. Real connectivity testing
-// requires implementing a custom adapter for each integration provider.
+// Test integration connectivity — dispatches to real adapter for supported types
 integrationsRouter.post('/:id/test', requireRole('admin'), async (req, res) => {
   const { rows } = await pool.query(`SELECT * FROM integrations WHERE id = $1`, [req.params.id]);
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
 
-  // Log a test event (placeholder — no actual external connectivity is performed)
-  await pool.query(
-    `INSERT INTO integration_events (integration_id, direction, event_type, payload, status)
-     VALUES ($1, 'outbound', 'connectivity_test', '{}', 'SUCCESS')`,
-    [req.params.id]
-  );
+  try {
+    if (rows[0].type === 'siem') {
+      // Real test: send a test syslog message
+      const { forwardAuditToSiem } = await import('../services/siem-forwarder.js');
+      await forwardAuditToSiem({
+        action: 'INTEGRATION_TEST',
+        actorUsername: req.auth!.username,
+        entityType: 'integration',
+        entityId: req.params.id,
+        metadata: { message: 'Segmentra SIEM connectivity test' },
+      });
 
-  await pool.query(
-    `UPDATE integrations SET last_sync_at = now(), last_sync_status = 'not_tested' WHERE id = $1`,
-    [req.params.id]
-  );
+      await pool.query(
+        `INSERT INTO integration_events (integration_id, direction, event_type, payload, status)
+         VALUES ($1, 'outbound', 'connectivity_test', '{}', 'SUCCESS')`,
+        [req.params.id]
+      );
+      await pool.query(
+        `UPDATE integrations SET last_sync_at = now(), last_sync_status = 'connected' WHERE id = $1`,
+        [req.params.id]
+      );
+      res.json({ success: true, message: 'Test syslog message sent to configured collector. Check your SIEM for the test event.' });
 
-  await pool.query(
-    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
-     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
-    [req.auth!.username, 'INTEGRATION_TEST', 'integration', req.params.id, JSON.stringify({ integrationId: req.params.id })]
-  );
+    } else if (rows[0].type === 'threat_intel') {
+      // Real test: verify API key by checking a known safe IP
+      const config = typeof rows[0].config === 'string' ? JSON.parse(rows[0].config) : rows[0].config;
+      if (!config.apiKey) {
+        return res.status(400).json({ error: 'missing_api_key', message: 'Set apiKey in the integration config: {"apiKey": "your-abuseipdb-key"}' });
+      }
+      const testResp = await fetch(`https://api.abuseipdb.com/api/v2/check?ipAddress=8.8.8.8&maxAgeInDays=90`, {
+        headers: { 'Key': config.apiKey, 'Accept': 'application/json' },
+      });
+      if (!testResp.ok) {
+        const errText = await testResp.text().catch(() => '');
+        throw new Error(`AbuseIPDB returned ${testResp.status}: ${errText}`);
+      }
+      const testData = await testResp.json() as any;
 
-  res.json({ success: true, message: 'Test event logged. Note: actual connectivity testing requires a custom adapter for this provider. Configuration has been saved.' });
+      await pool.query(
+        `INSERT INTO integration_events (integration_id, direction, event_type, payload, status)
+         VALUES ($1, 'outbound', 'connectivity_test', $2, 'SUCCESS')`,
+        [req.params.id, JSON.stringify({ testIp: '8.8.8.8', result: testData.data?.abuseConfidenceScore })]
+      );
+      await pool.query(
+        `UPDATE integrations SET last_sync_at = now(), last_sync_status = 'connected' WHERE id = $1`,
+        [req.params.id]
+      );
+      res.json({ success: true, message: `AbuseIPDB API key is valid. Test lookup: 8.8.8.8 (confidence: ${testData.data?.abuseConfidenceScore}%)` });
+
+    } else {
+      // Other types: placeholder
+      await pool.query(
+        `INSERT INTO integration_events (integration_id, direction, event_type, payload, status)
+         VALUES ($1, 'outbound', 'connectivity_test', '{}', 'SUCCESS')`,
+        [req.params.id]
+      );
+      res.json({ success: true, message: 'Configuration saved. Actual connectivity testing requires a custom adapter for this provider.' });
+    }
+  } catch (e: any) {
+    await pool.query(
+      `INSERT INTO integration_events (integration_id, direction, event_type, payload, status, error_message)
+       VALUES ($1, 'outbound', 'connectivity_test', '{}', 'FAILED', $2)`,
+      [req.params.id, e.message]
+    );
+    await pool.query(
+      `UPDATE integrations SET last_sync_status = 'error' WHERE id = $1`,
+      [req.params.id]
+    );
+    res.status(500).json({ error: 'test_failed', message: e.message });
+  }
 });
 
-// Sync integration
-// NOTE: This is a sync placeholder — it updates sync status and logs an event
-// but does not actually exchange data with the external system. Real data sync
-// requires implementing a custom adapter for each integration provider.
+// Sync integration — dispatches to real adapter for supported types
 integrationsRouter.post('/:id/sync', requireRole('admin'), async (req, res) => {
   const { rows } = await pool.query(`SELECT * FROM integrations WHERE id = $1`, [req.params.id]);
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
 
-  await pool.query(
-    `UPDATE integrations SET last_sync_at = now(), last_sync_status = 'pending_adapter' WHERE id = $1`,
-    [req.params.id]
-  );
+  try {
+    if (rows[0].type === 'threat_intel') {
+      // Real sync: AbuseIPDB threat intelligence
+      const { syncAbuseIPDB } = await import('../services/threat-intel-abuseipdb.js');
+      const result = await syncAbuseIPDB(req.params.id);
 
-  await pool.query(
-    `INSERT INTO integration_events (integration_id, direction, event_type, payload, status)
-     VALUES ($1, 'inbound', 'sync', '{}', 'SUCCESS')`,
-    [req.params.id]
-  );
+      await pool.query(
+        `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+         VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
+        [req.auth!.username, 'INTEGRATION_SYNC', 'integration', req.params.id, JSON.stringify(result)]
+      );
 
-  await pool.query(
-    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
-     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
-    [req.auth!.username, 'INTEGRATION_SYNC', 'integration', req.params.id, JSON.stringify({ integrationId: req.params.id })]
-  );
-
-  res.json({ success: true, message: 'Sync event logged. Note: actual data synchronization requires a custom adapter for this provider.' });
+      res.json({
+        success: true,
+        message: `Synced ${result.fetched} entries from AbuseIPDB (${result.newEntries} new, ${result.updatedEntries} updated${result.autoBlockedRules > 0 ? `, ${result.autoBlockedRules} auto-block rules created` : ''})`,
+        ...result,
+      });
+    } else {
+      // Other types: placeholder
+      await pool.query(
+        `UPDATE integrations SET last_sync_at = now(), last_sync_status = 'pending_adapter' WHERE id = $1`,
+        [req.params.id]
+      );
+      await pool.query(
+        `INSERT INTO integration_events (integration_id, direction, event_type, payload, status)
+         VALUES ($1, 'inbound', 'sync', '{}', 'SUCCESS')`,
+        [req.params.id]
+      );
+      res.json({ success: true, message: 'Sync event logged. Actual data synchronization requires a custom adapter for this provider.' });
+    }
+  } catch (e: any) {
+    await pool.query(
+      `UPDATE integrations SET last_sync_at = now(), last_sync_status = 'error' WHERE id = $1`,
+      [req.params.id]
+    );
+    await pool.query(
+      `INSERT INTO integration_events (integration_id, direction, event_type, payload, status, error_message)
+       VALUES ($1, 'inbound', 'sync', '{}', 'FAILED', $2)`,
+      [req.params.id, e.message]
+    );
+    res.status(500).json({ error: 'sync_failed', message: e.message });
+  }
 });
 
 // Get integration events
