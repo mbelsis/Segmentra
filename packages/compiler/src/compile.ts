@@ -95,12 +95,9 @@ export function compileHostPolicy(input: CompileInput): CompileOutput {
       }
     }
 
-    // Policy rules (very v1: source resolution is performed by API; here we treat sourceValue as cidr/ipset name)
+    // Policy rules — emitted in user-defined order_index order (no reordering)
     const policyScopeNames = resolveInterfaceNames(input.host, input.policyInterfaceScope);
-    const rulesSorted = [...input.rules].sort((a, b) => {
-      if (a.action !== b.action) return a.action === 'ALLOW' ? -1 : 1;
-      return a.orderIndex - b.orderIndex;
-    });
+    const rulesSorted = [...input.rules].sort((a, b) => a.orderIndex - b.orderIndex);
     for (const r of rulesSorted) {
       const scope = r.usePolicyInterfaceScope ? input.policyInterfaceScope : r.interfaceScope ?? input.policyInterfaceScope;
       const iifs = resolveInterfaceNames(input.host, scope);
@@ -184,43 +181,44 @@ export function compileHostPolicy(input: CompileInput): CompileOutput {
       }
     }
 
-    const rulesSorted = [...input.rules].sort((a, b) => {
-      if (a.action !== b.action) return a.action === 'ALLOW' ? -1 : 1;
-      return a.orderIndex - b.orderIndex;
-    });
+    // iptables rules — emitted in user-defined order_index order (no reordering)
+    const rulesSorted = [...input.rules].sort((a, b) => a.orderIndex - b.orderIndex);
     for (const r of rulesSorted) {
       const scope = r.usePolicyInterfaceScope ? input.policyInterfaceScope : r.interfaceScope ?? input.policyInterfaceScope;
       const ifNames = resolveInterfaceNames(input.host, scope);
       const action = r.action === 'ALLOW' ? 'ACCEPT' : 'DROP';
       const proto = r.protocol === 'any' ? '' : `-p ${r.protocol}`;
-      const ports =
-        r.protocol === 'tcp' || r.protocol === 'udp'
-          ? r.ports
-            ? `--dport ${r.ports}`
-            : ''
-          : '';
-      const inIface = scope.type === 'ALL_INTERFACES' || ifNames.length === 0 ? '' : `-i ${ifNames[0]}`; // v1: pick first
-      const outIface = scope.type === 'ALL_INTERFACES' || ifNames.length === 0 ? '' : `-o ${ifNames[0]}`;
+      // Handle comma-separated ports with -m multiport, single ports with --dport, ranges with --dport
+      let ports = '';
+      if ((r.protocol === 'tcp' || r.protocol === 'udp') && r.ports) {
+        if (r.ports.includes(',')) {
+          ports = `-m multiport --dports ${r.ports}`;
+        } else {
+          ports = `--dport ${r.ports}`;
+        }
+      }
+      // Emit rules for ALL matching interfaces (not just the first)
+      const ifaceList = scope.type === 'ALL_INTERFACES' || ifNames.length === 0 ? [''] : ifNames;
 
       const elements =
         r.remote.kind === 'SET' ? input.sets[r.remote.setName] ?? [] : [r.sourceValue];
       const emit = (chain: 'INPUT' | 'OUTPUT') => {
-        for (const elem of elements) {
-          const remote = chain === 'INPUT' ? `-s ${elem}` : `-d ${elem}`;
-          const iface = chain === 'INPUT' ? inIface : outIface;
-          
-          if (logOnly) {
-            // In log-only mode, log then accept
-            const logPrefix = `-j LOG --log-prefix "FW-AUDIT: ${r.action} ${r.comment ? r.comment.replace(/"/g, '') : 'rule'}: "`;
-            const logLine = `-A ${chain} ${iface} ${proto} ${remote} ${ports} ${logPrefix}`.replace(/\s+/g, ' ').trim();
-            lines.push(logLine);
-            const acceptLine = `-A ${chain} ${iface} ${proto} ${remote} ${ports} -j ACCEPT`.replace(/\s+/g, ' ').trim();
-            lines.push(acceptLine);
-          } else {
-            // Normal mode
-            lines.push(
-              `-A ${chain} ${iface} ${proto} ${remote} ${ports} -j ${action}`.replace(/\s+/g, ' ').trim()
-            );
+        for (const iface of ifaceList) {
+          const ifaceFlag = iface ? (chain === 'INPUT' ? `-i ${iface}` : `-o ${iface}`) : '';
+          for (const elem of elements) {
+            const remote = chain === 'INPUT' ? `-s ${elem}` : `-d ${elem}`;
+
+            if (logOnly) {
+              const logPrefix = `-j LOG --log-prefix "FW-AUDIT: ${r.action} ${r.comment ? r.comment.replace(/"/g, '') : 'rule'}: "`;
+              const logLine = `-A ${chain} ${ifaceFlag} ${proto} ${remote} ${ports} ${logPrefix}`.replace(/\s+/g, ' ').trim();
+              lines.push(logLine);
+              const acceptLine = `-A ${chain} ${ifaceFlag} ${proto} ${remote} ${ports} -j ACCEPT`.replace(/\s+/g, ' ').trim();
+              lines.push(acceptLine);
+            } else {
+              lines.push(
+                `-A ${chain} ${ifaceFlag} ${proto} ${remote} ${ports} -j ${action}`.replace(/\s+/g, ' ').trim()
+              );
+            }
           }
         }
       };
