@@ -870,11 +870,31 @@ export async function executeDeploymentStart(
     const results = await runSshDeployment({
       hosts: sshHosts,
       stdoutPath,
-      stderrPath
+      stderrPath,
+      // Check between each host if deployment was stopped/paused
+      shouldContinue: async () => {
+        const statusCheck = await pool.query(
+          `SELECT status FROM deployments WHERE id = $1`,
+          [deploymentId]
+        );
+        const currentStatus = statusCheck.rows[0]?.status;
+        // Continue only if still RUNNING
+        return currentStatus === 'RUNNING';
+      },
     });
 
+    // Mark skipped hosts in the database
+    for (const r of results) {
+      if (r.skipped) {
+        await pool.query(
+          `UPDATE deployment_hosts SET status='SKIPPED', finished_at=now(), message=$2 WHERE deployment_id=$1 AND host_id=(SELECT id FROM hosts WHERE hostname=$3)`,
+          [deploymentId, 'Deployment was stopped before this host was processed', r.hostname]
+        );
+      }
+    }
+
     // Update deployment_hosts based on results
-    const failedHosts = results.filter(r => !r.success);
+    const failedHosts = results.filter(r => !r.success && !r.skipped);
     ok = failedHosts.length === 0;
     exitCode = ok ? 0 : 1;
 
