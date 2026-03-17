@@ -250,7 +250,7 @@ const createUserSchema = z.object({
   username: z.string().min(1).max(100),
   displayName: z.string().min(1).max(200),
   email: z.string().email().optional().nullable(),
-  password: z.string().min(6),
+  password: z.string().min(8),
   roles: z.array(z.enum(['viewer', 'operator', 'approver', 'admin'])).min(1),
   isActive: z.boolean().default(true),
 });
@@ -369,9 +369,9 @@ adminRouter.put('/users/:id', requireAuth, requireRole('admin'), async (req, res
 
 // Reset password
 adminRouter.post('/users/:id/reset-password', requireAuth, requireRole('admin'), async (req, res) => {
-  const bodySchema = z.object({ newPassword: z.string().min(6) });
+  const bodySchema = z.object({ newPassword: z.string().min(8) });
   const parsed = bodySchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'invalid_body', message: 'Password must be at least 6 characters.' });
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_body', message: 'Password must be at least 8 characters.' });
 
   const passwordHash = await bcrypt.hash(parsed.data.newPassword, 10);
   const { rowCount } = await pool.query(

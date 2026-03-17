@@ -43,7 +43,7 @@ Segmentra is an on-prem, web-based **fleet firewall & microsegmentation manageme
 - **Visual Topology Design** — draw network flows between groups, auto-discover from existing infrastructure, and generate policies automatically
 - **Policy Recommendations** — after firewall learning, auto-generate rules from observed traffic with confidence scoring and IP-to-tag resolution
 - **Policy Impact Analysis** — semantic diff showing new/removed allows and denies per host before approval
-- **High-Risk Detection** — automatically flags broad rules, wide scopes, and sensitive port exposure; requires enhanced approval
+- **High-Risk Detection** — audit policies to flag broad rules, wide scopes, and sensitive port exposure
 - **Policy Expiry** — optional time-limited deployments with 24-hour warnings and configurable expiry actions (notify, remove, revert)
 - **Policy Archive & Delete** — archive deployed/approved versions (read-only), delete DRAFT/REJECTED versions
 
@@ -77,10 +77,10 @@ Segmentra is an on-prem, web-based **fleet firewall & microsegmentation manageme
 - **Deployment Warning** — deploying to IoT gateways triggers a warning about impact on protected devices
 
 ### Kubernetes Microsegmentation
-- **Agentless K8s Management** — connect to Kubernetes API servers to discover workloads and manage NetworkPolicy resources
+- **Agentless K8s Management** — connect to Kubernetes API servers to discover workloads and generate NetworkPolicy manifests
 - **Workload Discovery** — sync namespaces, pods, deployments, services, and labels
 - **Label-to-Tag Mapping** — map K8s labels to Segmentra tags for unified policy management
-- **NetworkPolicy Generation** — translate Segmentra rules into K8s NetworkPolicy JSON manifests
+- **NetworkPolicy Generation** — translate Segmentra rules into K8s NetworkPolicy JSON manifests for export; apply to clusters via `kubectl` or CI/CD pipelines
 - **Multi-Cluster Support** — manage multiple clusters from a single instance
 
 ### Security & Compliance
@@ -88,7 +88,7 @@ Segmentra is an on-prem, web-based **fleet firewall & microsegmentation manageme
 - **Comprehensive Audit Trail** — every action logged with actor, timestamp, entity, and rich metadata
 - **Notification System** — Slack webhooks, generic HTTP webhooks, email (stub); subscribe channels to 10 event types (policy approvals, deployment failures, compliance drift, expiry warnings, security findings)
 - **Encrypted Secret Storage** — SSH keys and LDAP passwords encrypted with AES-256-GCM
-- **Integrations** — connect to SIEM, SOAR, vulnerability scanners, and threat intelligence feeds
+- **Integrations** — administrative registry for SIEM, SOAR, vulnerability scanners, and threat intelligence feeds. Track integration configuration, credentials, and sync status. Actual data exchange with external systems requires custom adapter implementation.
 
 ### Dashboard
 - **Real-time Overview** — deployment status, success rates, activity charts
@@ -100,6 +100,40 @@ Segmentra is an on-prem, web-based **fleet firewall & microsegmentation manageme
 </div>
 
 ---
+### ACL Audit 
+
+<div align="center">
+  <img src="docs/images/Policies_audit.png" alt="Dashboard" style="max-width: 100%; height: auto;" />
+</div>
+
+
+### Topology 
+
+<div align="center">
+  <img src="docs/images/Topology.png" alt="Dashboard" style="max-width: 100%; height: auto;" />
+</div>
+
+
+Still Work in progress :) :) 
+
+### IOT / OT 
+
+<div align="center">
+  <img src="docs/images/IOT.png" alt="Dashboard" style="max-width: 100%; height: auto;" />
+</div>
+
+### Kubernetes 
+
+<div align="center">
+  <img src="docs/images/Kubernetes.png" alt="Dashboard" style="max-width: 100%; height: auto;" />
+</div>
+
+### Integrations 
+
+<div align="center">
+  <img src="docs/images/Integrations.png" alt="Dashboard" style="max-width: 100%; height: auto;" />
+</div>
+
 
 ## Installation & Quick Start
 

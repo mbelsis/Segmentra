@@ -673,7 +673,7 @@ export function InventoryPage() {
           className={activeTab === 'tag-rules' ? 'btn-primary' : 'btn-secondary'}
           style={{ borderBottom: activeTab === 'tag-rules' ? '2px solid #646cff' : 'none', borderRadius: 0, marginBottom: -2 }}
         >
-          Tag Rules
+          Auto-Tagging
         </button>
       </div>
 

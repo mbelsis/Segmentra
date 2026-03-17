@@ -2,7 +2,7 @@
 
 ## Segmentra - License Agreement
 
-**IMPORTANT: This software is provided as-is and is currently a work in progress.**
+**IMPORTANT: This software is created by Belsis Meletis and is provided as-is and is currently a work in progress.**
 
 ## Terms and Conditions
 
@@ -16,6 +16,9 @@ You are free to:
 
 3. **Distribute internally** - You may share modified versions within your organization.
 
+4. **Alter and modify to freely distributed ** - You may modify, adapt, expand the code to redistribute for free
+
+
 ### Prohibited Uses
 
 You are **NOT allowed** to:
@@ -28,7 +31,7 @@ You are **NOT allowed** to:
    - A service offering
    - Any other commercial form
 
-3. **Remove license or attribution** - You must retain this license file and any copyright notices in the code.
+3. **Remove license or attribution** - You must retain this license file and any copyright notices in the code and in the UI.
 
 ### Disclaimer of Warranty
 

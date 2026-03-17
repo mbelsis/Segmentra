@@ -95,29 +95,35 @@ integrationsRouter.delete('/:id', requireRole('admin'), async (req, res) => {
     res.json({ ok: true });
 });
 // Test integration connectivity
+// NOTE: This is a connectivity placeholder — it logs a test event and updates status
+// but does not actually connect to the external system. Real connectivity testing
+// requires implementing a custom adapter for each integration provider.
 integrationsRouter.post('/:id/test', requireRole('admin'), async (req, res) => {
     const { rows } = await pool.query(`SELECT * FROM integrations WHERE id = $1`, [req.params.id]);
     if (!rows[0])
         return res.status(404).json({ error: 'not_found' });
-    // Log a test event
+    // Log a test event (placeholder — no actual external connectivity is performed)
     await pool.query(`INSERT INTO integration_events (integration_id, direction, event_type, payload, status)
      VALUES ($1, 'outbound', 'connectivity_test', '{}', 'SUCCESS')`, [req.params.id]);
-    await pool.query(`UPDATE integrations SET last_sync_at = now(), last_sync_status = 'connected' WHERE id = $1`, [req.params.id]);
+    await pool.query(`UPDATE integrations SET last_sync_at = now(), last_sync_status = 'not_tested' WHERE id = $1`, [req.params.id]);
     await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
      VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`, [req.auth.username, 'INTEGRATION_TEST', 'integration', req.params.id, JSON.stringify({ integrationId: req.params.id })]);
-    res.json({ success: true, message: 'Integration connectivity test passed' });
+    res.json({ success: true, message: 'Test event logged. Note: actual connectivity testing requires a custom adapter for this provider. Configuration has been saved.' });
 });
 // Sync integration
+// NOTE: This is a sync placeholder — it updates sync status and logs an event
+// but does not actually exchange data with the external system. Real data sync
+// requires implementing a custom adapter for each integration provider.
 integrationsRouter.post('/:id/sync', requireRole('admin'), async (req, res) => {
     const { rows } = await pool.query(`SELECT * FROM integrations WHERE id = $1`, [req.params.id]);
     if (!rows[0])
         return res.status(404).json({ error: 'not_found' });
-    await pool.query(`UPDATE integrations SET last_sync_at = now(), last_sync_status = 'synced' WHERE id = $1`, [req.params.id]);
+    await pool.query(`UPDATE integrations SET last_sync_at = now(), last_sync_status = 'pending_adapter' WHERE id = $1`, [req.params.id]);
     await pool.query(`INSERT INTO integration_events (integration_id, direction, event_type, payload, status)
      VALUES ($1, 'inbound', 'sync', '{}', 'SUCCESS')`, [req.params.id]);
     await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
      VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`, [req.auth.username, 'INTEGRATION_SYNC', 'integration', req.params.id, JSON.stringify({ integrationId: req.params.id })]);
-    res.json({ success: true, message: 'Integration sync completed' });
+    res.json({ success: true, message: 'Sync event logged. Note: actual data synchronization requires a custom adapter for this provider.' });
 });
 // Get integration events
 integrationsRouter.get('/:id/events', requireRole('admin'), async (req, res) => {

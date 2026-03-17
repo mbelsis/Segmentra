@@ -148,7 +148,7 @@ export function PolicyTestPage() {
 
   return (
     <div>
-      <h2>Policy Testing</h2>
+      <h2>Policy Impact Analysis</h2>
       <p style={{ color: '#666', marginBottom: 16 }}>
         Test a firewall policy against real traffic <strong>before enforcing it</strong>. The policy is deployed in log-only mode
         (nothing gets blocked), traffic is captured, then analyzed to find gaps.

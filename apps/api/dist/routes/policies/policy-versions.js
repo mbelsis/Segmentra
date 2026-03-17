@@ -8,7 +8,15 @@ export const policyVersionsRouter = Router();
 policyVersionsRouter.use(requireAuth);
 // GET endpoints are read-only and accessible to viewers
 policyVersionsRouter.get('/policy-sets/:id/versions', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
-    const { rows } = await pool.query(`SELECT * FROM policy_versions WHERE policy_set_id=$1 ORDER BY version_number DESC`, [req.params.id]);
+    const { rows } = await pool.query(`SELECT pv.*,
+       u_created.username as created_by_username,
+       u_approved.username as approved_by_username,
+       u_rejected.username as rejected_by_username
+     FROM policy_versions pv
+     LEFT JOIN users u_created ON u_created.id = pv.created_by
+     LEFT JOIN users u_approved ON u_approved.id = pv.approved_by
+     LEFT JOIN users u_rejected ON u_rejected.id = pv.rejected_by
+     WHERE pv.policy_set_id=$1 ORDER BY pv.version_number DESC`, [req.params.id]);
     res.json({ versions: rows });
 });
 const createVersionSchema = z.object({

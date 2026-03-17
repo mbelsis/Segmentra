@@ -252,7 +252,7 @@ kubernetesRouter.post('/clusters/:id/deploy-policy', requireRole('operator', 'ad
 
   const { rows } = await pool.query(
     `INSERT INTO k8s_network_policies (cluster_id, policy_version_id, namespace, policy_name, manifest, status, deployed_hash, deployed_at)
-     VALUES ($1, $2, $3, $4, $5, 'DEPLOYED', $6, now()) RETURNING *`,
+     VALUES ($1, $2, $3, $4, $5, 'GENERATED', $6, now()) RETURNING *`,
     [req.params.id, b.policyVersionId, b.namespace, b.policyName, JSON.stringify(manifest), hash]
   );
 

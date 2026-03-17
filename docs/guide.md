@@ -58,14 +58,16 @@ This guide walks through every step of using Segmentra — from initial setup to
 
 ### Step 1: Start Segmentra
 
-**Windows:**
-```batch
-start.bat dev
+**Linux/macOS:**
+```bash
+./install.sh --development
+./run.sh --start --development
 ```
 
-**macOS/Linux:**
-```bash
-./start.sh dev
+**Windows (PowerShell):**
+```powershell
+.\install.ps1 --development
+.\run.ps1 -start -development
 ```
 
 This starts PostgreSQL (port 15432), runs migrations, seeds roles, creates the default admin user, and starts the API (port 8080) and UI (port 5173).
@@ -74,7 +76,7 @@ This starts PostgreSQL (port 15432), runs migrations, seeds roles, creates the d
 
 Open `http://localhost:5173` and login with:
 - **Username:** `admin`
-- **Password:** `admin`
+- **Password:** `admin123`
 
 Change the password immediately after first login.
 
@@ -721,7 +723,7 @@ Detect when hosts have been manually modified after a deployment.
 
 ## 17. Integrations
 
-Connect Segmentra to external security tools.
+Register and track external security tool integrations. Segmentra provides an administrative registry for managing integration configuration, credentials, and sync status. Actual data exchange with external systems requires custom adapter implementation.
 
 ### Setting Up an Integration
 
@@ -735,24 +737,26 @@ Go to **Integrations** in the sidebar:
 
 ### Integration Types
 
-| Type | What It Does |
+| Type | What It Tracks |
 |------|-------------|
-| **SIEM** | Forwards audit events to your SIEM via syslog/webhook |
-| **SOAR** | Exposes actions (isolate host, apply emergency policy) via inbound webhooks |
-| **Vulnerability DB** | Polls vulnerability scanner API, tracks CVEs per host |
-| **Threat Intelligence** | Polls threat feeds, maintains IP/CIDR blocklists with confidence scores |
+| **SIEM** | Configuration for forwarding audit events to your SIEM via syslog/webhook |
+| **SOAR** | Configuration for inbound webhook actions (isolate host, apply emergency policy) |
+| **Vulnerability DB** | Configuration for vulnerability scanner API polling, CVE tracking per host |
+| **Threat Intelligence** | Configuration for threat feeds, IP/CIDR blocklists with confidence scores |
+
+> **Note:** The integration types above describe the intended data exchange model. The current implementation provides configuration storage and status tracking. Actual connectivity to external systems requires building a custom adapter for each provider.
 
 ### Testing & Syncing
 
-- **Test**: Verify connectivity to the integration endpoint
-- **Sync**: Trigger a manual data sync
-- **Events**: View the event log showing all sync and webhook operations
+- **Test**: Placeholder connectivity check (logs a test event and updates status; does not connect to the external system)
+- **Sync**: Placeholder data sync (logs a sync event and updates status; does not exchange data with the external system)
+- **Events**: View the event log showing all test and sync operations
 
 ---
 
 ## 18. Kubernetes Microsegmentation
 
-Manage Kubernetes NetworkPolicy resources agentlessly via the K8s API.
+Generate Kubernetes NetworkPolicy manifests from Segmentra policies for export and application via `kubectl` or CI/CD pipelines.
 
 ### Step 1: Add a Cluster
 
@@ -770,12 +774,12 @@ Click **Sync** to discover namespaces, pods, deployments, services, and their la
 
 Map Kubernetes labels to Segmentra tags for unified policy management. For example, `app=nginx` K8s label → `web-server` Segmentra tag.
 
-### Step 4: Deploy NetworkPolicy
+### Step 4: Generate NetworkPolicy
 
-Create a Segmentra policy set, get it approved, then deploy it as a Kubernetes NetworkPolicy:
+Create a Segmentra policy set, get it approved, then generate a Kubernetes NetworkPolicy manifest:
 1. Select the cluster and namespace
 2. The system translates Segmentra rules into K8s NetworkPolicy manifest JSON
-3. The policy is applied via the K8s API (not via Ansible/SSH)
+3. The generated manifest is stored for export; apply it to your cluster using `kubectl apply` or your CI/CD pipeline
 
 ---
 
@@ -824,13 +828,15 @@ Select an asset and click **Baseline** to snapshot its current traffic pattern. 
 3. Set **Policy Expires At** to the desired expiry date/time
 4. Choose **On Expiry**:
    - **Notify Only** — sends alert, rules stay active (default)
-   - **Remove** — auto-rollback firewall rules on all hosts
-   - **Revert** — re-deploy the previous policy version
+   - **Remove** — marks deployment as expired, sends notification requesting manual rollback of firewall rules
+   - **Revert** — marks deployment as expired, sends notification requesting manual redeployment of previous version
+
+Full automated rollback/redeploy is planned for a future release.
 
 ### What Happens Automatically
 
 - **24 hours before expiry**: A `POLICY_EXPIRING_SOON` notification is sent to subscribed channels
-- **At expiry**: The deployment is marked expired, `POLICY_EXPIRED` notification sent, and the chosen action is executed
+- **At expiry**: The deployment is marked expired and a `POLICY_EXPIRED` notification is sent to subscribed channels
 - **Audit trail**: Both the warning and expiry are logged in audit events
 
 ---
@@ -843,7 +849,7 @@ Select an asset and click **Baseline** to snapshot its current traffic pattern. 
 2. Click **+ New Channel** and choose:
    - **Slack** — provide a webhook URL
    - **Webhook** — provide an endpoint URL and optional auth header
-   - **Email** — provide SMTP settings and recipient
+   - **Email** — provide SMTP settings and recipient (preview — requires SMTP implementation)
 3. Click **Send Test** to verify connectivity
 4. Add **Event Subscriptions** — choose which events trigger notifications on this channel
 
@@ -855,7 +861,7 @@ Select an asset and click **Baseline** to snapshot its current traffic pattern. 
 **Webhook to SIEM:**
 - Subscribe to: POLICY_APPROVED, POLICY_EXPIRED, EXCESSIVE_RULES_DETECTED
 
-**Email to security team:**
+**Email to security team** (preview — requires SMTP implementation):
 - Subscribe to: POLICY_EXPIRING_SOON, COMPLIANCE_DRIFT, EXCESSIVE_RULES_DETECTED
 
 ---

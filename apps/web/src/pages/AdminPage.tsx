@@ -360,7 +360,7 @@ export function AdminPage() {
             {!editingUser && (
               <div className="form-group">
                 <label>Password *</label>
-                <input type="password" value={userForm.password} onChange={e => setUserForm(f => ({ ...f, password: e.target.value }))} placeholder="Minimum 6 characters" />
+                <input type="password" value={userForm.password} onChange={e => setUserForm(f => ({ ...f, password: e.target.value }))} placeholder="Minimum 8 characters" />
               </div>
             )}
           </div>
@@ -397,10 +397,10 @@ export function AdminPage() {
           <h3>Reset Password</h3>
           <div className="form-group">
             <label>New Password *</label>
-            <input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="Minimum 6 characters" />
+            <input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="Minimum 8 characters" />
           </div>
           <div className="form-actions" style={{ marginTop: 12 }}>
-            <button onClick={resetUserPassword} className="btn-primary" disabled={loading || newPassword.length < 6}>Reset Password</button>
+            <button onClick={resetUserPassword} className="btn-primary" disabled={loading || newPassword.length < 8}>Reset Password</button>
             <button onClick={() => { setResetPasswordUserId(null); setNewPassword(''); }} className="btn-secondary">Cancel</button>
           </div>
         </div>

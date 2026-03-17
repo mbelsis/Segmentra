@@ -1,94 +1,57 @@
 import { pool } from '../db/pool.js';
-export async function decomposeFlowsIntoPolicies(topologyViewId) {
-    const { rows: flows } = await pool.query(`SELECT * FROM topology_flows WHERE topology_view_id = $1`, [topologyViewId]);
-    // Group flows by source entity (each source gets a policy set)
-    const policyMap = new Map();
-    for (const flow of flows) {
-        // Create rules on both sides of the flow
-        const sourceKey = `${flow.source_type}:${flow.source_value}`;
-        const targetKey = `${flow.target_type}:${flow.target_value}`;
-        // Source-side: OUT rule
-        if (!policyMap.has(sourceKey)) {
-            policyMap.set(sourceKey, {
-                policySetName: `Topology: ${flow.source_type} ${flow.source_value}`,
-                scopeType: flow.source_type,
-                scopeValue: flow.source_value,
-                rules: [],
-            });
-        }
-        policyMap.get(sourceKey).rules.push({
-            direction: 'OUT',
-            action: flow.action,
-            protocol: flow.protocol,
-            ports: flow.ports,
-            sourceType: flow.target_type,
-            sourceValue: flow.target_value,
-            comment: flow.comment || `Visual topology flow to ${flow.target_type}:${flow.target_value}`,
-        });
-        // Target-side: IN rule
-        if (!policyMap.has(targetKey)) {
-            policyMap.set(targetKey, {
-                policySetName: `Topology: ${flow.target_type} ${flow.target_value}`,
-                scopeType: flow.target_type,
-                scopeValue: flow.target_value,
-                rules: [],
-            });
-        }
-        policyMap.get(targetKey).rules.push({
-            direction: 'IN',
-            action: flow.action,
-            protocol: flow.protocol,
-            ports: flow.ports,
-            sourceType: flow.source_type,
-            sourceValue: flow.source_value,
-            comment: flow.comment || `Visual topology flow from ${flow.source_type}:${flow.source_value}`,
-        });
+export async function generatePoliciesFromTopology(topologyViewId, userId, policySetName) {
+    // Get the topology view for naming
+    const { rows: viewRows } = await pool.query(`SELECT name FROM topology_views WHERE id = $1`, [topologyViewId]);
+    const viewName = viewRows[0]?.name || 'Topology';
+    // Get all flows for this topology
+    const { rows: flows } = await pool.query(`SELECT * FROM topology_flows WHERE topology_view_id = $1 ORDER BY created_at ASC`, [topologyViewId]);
+    if (flows.length === 0) {
+        throw new Error('No flows defined in this topology view');
     }
-    return Array.from(policyMap.values());
-}
-export async function generatePoliciesFromTopology(topologyViewId, userId) {
-    const decompositions = await decomposeFlowsIntoPolicies(topologyViewId);
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
-        let policySetsCreated = 0;
-        let versionsCreated = 0;
-        let rulesCreated = 0;
-        for (const decomp of decompositions) {
-            // Determine scope
-            let scopeTagId = null;
-            let scopeVlanId = null;
-            let scopeType = 'TAG';
-            if (decomp.scopeType === 'TAG') {
-                scopeTagId = decomp.scopeValue;
+        // Create a single policy set for the entire topology — scope HOST_LIST (most flexible)
+        const setName = policySetName || `Topology: ${viewName}`;
+        const { rows: ps } = await client.query(`INSERT INTO policy_sets (name, description, scope_type, created_by)
+       VALUES ($1, $2, 'HOST_LIST', $3) RETURNING *`, [setName, `Generated from topology view "${viewName}" with ${flows.length} flows`, userId]);
+        const policySetId = ps[0].id;
+        // Create a single version with all rules
+        const { rows: v } = await client.query(`INSERT INTO policy_versions (policy_set_id, version_number, status, change_summary, created_by, interface_scope_type)
+       VALUES ($1, 1, 'DRAFT', $2, $3, 'ALL_INTERFACES') RETURNING *`, [policySetId, `Generated from topology: ${flows.length} flows decomposed into firewall rules`, userId]);
+        const versionId = v[0].id;
+        // Decompose flows into rules — each flow creates both IN and OUT rules
+        let ruleIndex = 0;
+        // Helper: resolve entity name for comments
+        async function entityLabel(type, value) {
+            if (type === 'TAG') {
+                const { rows } = await client.query(`SELECT name FROM tags WHERE id = $1`, [value]);
+                return rows[0] ? `TAG:${rows[0].name}` : `TAG:${value}`;
             }
-            else if (decomp.scopeType === 'VLAN') {
-                scopeVlanId = decomp.scopeValue;
-                scopeType = 'VLAN';
+            if (type === 'VLAN') {
+                const { rows } = await client.query(`SELECT name, vlan_tag FROM vlans WHERE id = $1`, [value]);
+                return rows[0] ? `VLAN ${rows[0].vlan_tag}:${rows[0].name}` : `VLAN:${value}`;
             }
-            else {
-                scopeType = 'HOST_LIST';
-            }
-            // Create policy set
-            const { rows: ps } = await client.query(`INSERT INTO policy_sets (name, description, scope_type, scope_tag_id, scope_vlan_id, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`, [decomp.policySetName, 'Generated from visual topology', scopeType, scopeTagId, scopeVlanId, userId]);
-            policySetsCreated++;
-            // Create version
-            const { rows: v } = await client.query(`INSERT INTO policy_versions (policy_set_id, version_number, status, change_summary, created_by)
-         VALUES ($1, 1, 'DRAFT', 'Generated from visual topology design', $2) RETURNING *`, [ps[0].id, userId]);
-            versionsCreated++;
-            // Create rules
-            for (let i = 0; i < decomp.rules.length; i++) {
-                const rule = decomp.rules[i];
-                await client.query(`INSERT INTO policy_rules (policy_version_id, order_index, direction, action, protocol, ports, source_type, source_value, log_mode, comment)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'NONE', $9)`, [v[0].id, i, rule.direction, rule.action, rule.protocol, rule.ports, rule.sourceType, rule.sourceValue, rule.comment]);
-                rulesCreated++;
-            }
+            return `${type}:${value}`;
+        }
+        for (const flow of flows) {
+            const srcLabel = await entityLabel(flow.source_type, flow.source_value);
+            const tgtLabel = await entityLabel(flow.target_type, flow.target_value);
+            const portDesc = flow.ports ? `${flow.protocol.toUpperCase()}/${flow.ports}` : flow.protocol.toUpperCase();
+            const flowComment = flow.comment || `${srcLabel} → ${tgtLabel} (${portDesc})`;
+            // IN rule: traffic arriving at the target from the source
+            await client.query(`INSERT INTO policy_rules (policy_version_id, order_index, direction, action, protocol, ports, source_type, source_value, log_mode, comment)
+         VALUES ($1, $2, 'IN', $3, $4, $5, $6, $7, $8, $9)`, [versionId, ruleIndex++, flow.action, flow.protocol, flow.ports, flow.source_type, flow.source_value,
+                flow.action === 'DENY' ? 'LOG' : 'NONE', `IN: ${flowComment}`]);
+            // OUT rule: traffic leaving the source toward the target
+            await client.query(`INSERT INTO policy_rules (policy_version_id, order_index, direction, action, protocol, ports, source_type, source_value, log_mode, comment)
+         VALUES ($1, $2, 'OUT', $3, $4, $5, $6, $7, $8, $9)`, [versionId, ruleIndex++, flow.action, flow.protocol, flow.ports, flow.target_type, flow.target_value,
+                flow.action === 'DENY' ? 'LOG' : 'NONE', `OUT: ${flowComment}`]);
         }
         await client.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
-       VALUES ($1, 'TOPOLOGY_GENERATE', 'topology_view', $2, $3)`, [userId, topologyViewId, JSON.stringify({ policySetsCreated, versionsCreated, rulesCreated })]);
+       VALUES ($1, 'TOPOLOGY_GENERATE', 'topology_view', $2, $3)`, [userId, topologyViewId, JSON.stringify({ policySetId, versionId, rulesCreated: ruleIndex, flowCount: flows.length })]);
         await client.query('COMMIT');
-        return { policySetsCreated, versionsCreated, rulesCreated };
+        return { policySetId, versionId, rulesCreated: ruleIndex };
     }
     catch (e) {
         await client.query('ROLLBACK');

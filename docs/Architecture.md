@@ -250,6 +250,8 @@ Base URL: `http://localhost:8080/api`
 - `POST /deployments/:deploymentId/pause` — Pause a running deployment (marks RUNNING hosts as PAUSED, leaves PENDING hosts for resume)
 - `POST /deployments/:deploymentId/resume` — Resume a paused deployment (marks PAUSED hosts back to RUNNING)
 - `POST /deployments/:deploymentId/stop` — Stop a running or paused deployment (marks all PENDING/RUNNING/PAUSED hosts as SKIPPED)
+
+> **Note:** Pause, resume, and stop currently update the deployment status in the database but do not interrupt an in-progress SSH/Ansible execution. If a deployment is already running, the executor will complete its current work. These controls are most useful for managing queued deployments that haven't started yet.
 - `POST /deployments/:deploymentId/cancel` — Best-effort cancellation (deprecated - use `/stop` instead)
 - `POST /deployments/:deploymentId/retry-failed` — Retry failed hosts (v1 helper)
 - `GET /executions/:executionId/logs` — Returns stdout and stderr from execution
@@ -1580,7 +1582,7 @@ Multi-channel alerting for security events and operational changes.
 |-------------|---------------|---------|
 | **Slack** | `{ "webhookUrl": "https://hooks.slack.com/services/..." }` | Posts formatted messages with color-coded severity |
 | **Webhook** | `{ "url": "https://...", "authHeader": "Bearer ..." }` | POSTs JSON payload to any HTTP endpoint |
-| **Email** | `{ "to": "admin@company.com", "smtpHost": "..." }` | Sends email notifications (requires SMTP) |
+| **Email** | `{ "to": "admin@company.com", "smtpHost": "..." }` | Sends email notifications (preview — requires SMTP implementation) |
 
 #### Event Types
 

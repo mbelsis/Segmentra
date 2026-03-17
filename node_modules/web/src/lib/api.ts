@@ -401,7 +401,7 @@ export const api = {
     deleteView: (id: string) => request<{ ok: boolean }>(`/topology/views/${id}`, { method: 'DELETE' }),
     addFlow: (viewId: string, b: any) => request<{ flow: any }>(`/topology/views/${viewId}/flows`, { method: 'POST', body: JSON.stringify(b) }),
     deleteFlow: (flowId: string) => request<{ ok: boolean }>(`/topology/flows/${flowId}`, { method: 'DELETE' }),
-    generatePolicies: (viewId: string) => request<{ policySetsCreated: number; versionsCreated: number; rulesCreated: number }>(`/topology/views/${viewId}/generate-policies`, { method: 'POST' }),
+    generatePolicies: (viewId: string, name?: string) => request<{ policySetId: string; versionId: string; rulesCreated: number }>(`/topology/views/${viewId}/generate-policies`, { method: 'POST', body: JSON.stringify({ name }) }),
     autoDiscover: () => request<{ nodes: any[]; edges: any[] }>('/topology/auto-discover'),
   },
 

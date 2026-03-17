@@ -638,9 +638,9 @@ All new code follows existing patterns:
 
 Deployments can optionally have an expiry date and action:
 - `expires_at` — when the deployment should expire
-- `expiry_action` — NOTIFY_ONLY (send alert), REMOVE (rollback rules), REVERT (restore previous policy)
+- `expiry_action` — NOTIFY_ONLY (send alert), REMOVE (mark expired + notify for manual rollback), REVERT (mark expired + notify for manual redeployment of previous version)
 
-A background job checks every minute and processes expired deployments. A 24-hour warning notification is sent in advance.
+A background job checks every minute and processes expired deployments. A 24-hour warning notification is sent in advance. Full automated rollback/redeploy is planned for a future release.
 
 **Tables modified**: `deployments` (added `expires_at`, `expiry_action`, `expired` columns)
 

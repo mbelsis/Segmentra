@@ -202,8 +202,8 @@ export async function applyRecommendation(recommendationId, userId, policySetId)
         const { rows: latestV } = await client.query(`SELECT COALESCE(MAX(version_number), 0)::int AS v FROM policy_versions WHERE policy_set_id = $1`, [targetPolicySetId]);
         const nextVersion = (latestV[0]?.v ?? 0) + 1;
         // Create version
-        const { rows: vRows } = await client.query(`INSERT INTO policy_versions (policy_set_id, version_number, status, change_summary, created_by)
-       VALUES ($1, $2, 'DRAFT', $3, $4) RETURNING *`, [targetPolicySetId, nextVersion, 'Auto-generated from audit recommendation', userId]);
+        const { rows: vRows } = await client.query(`INSERT INTO policy_versions (policy_set_id, version_number, status, change_summary, created_by, interface_scope_type)
+       VALUES ($1, $2, 'DRAFT', $3, $4, 'ALL_INTERFACES') RETURNING *`, [targetPolicySetId, nextVersion, 'Auto-generated from audit recommendation', userId]);
         const version = vRows[0];
         // Create rules
         let rulesCreated = 0;

@@ -285,8 +285,8 @@ export async function applyRecommendation(
 
     // Create version
     const { rows: vRows } = await client.query(
-      `INSERT INTO policy_versions (policy_set_id, version_number, status, change_summary, created_by)
-       VALUES ($1, $2, 'DRAFT', $3, $4) RETURNING *`,
+      `INSERT INTO policy_versions (policy_set_id, version_number, status, change_summary, created_by, interface_scope_type)
+       VALUES ($1, $2, 'DRAFT', $3, $4, 'ALL_INTERFACES') RETURNING *`,
       [targetPolicySetId, nextVersion, 'Auto-generated from audit recommendation', userId]
     );
     const version = vRows[0];

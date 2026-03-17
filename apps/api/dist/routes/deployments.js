@@ -375,10 +375,11 @@ deploymentsRouter.get('/deployments', requireRole('viewer', 'operator', 'approve
     // Get total count for pagination
     const countRes = await pool.query(`SELECT COUNT(*) as total FROM deployments d ${whereClause}`, params);
     const total = parseInt(countRes.rows[0].total, 10);
-    // Get paginated results
+    // Get paginated results with creator username
     const query = `
-    SELECT d.*
+    SELECT d.*, u.username as created_by_username
     FROM deployments d
+    LEFT JOIN users u ON u.id = d.created_by
     ${whereClause}
     ORDER BY d.${sortColumn} ${sortDir}
     LIMIT $${paramIndex} OFFSET $${paramIndex + 1}

@@ -48,7 +48,7 @@ export function AppShell() {
 
         {sectionLabel('Analysis')}
         <NavLink to="/troubleshoot">Troubleshoot</NavLink>
-        {isOperator && <NavLink to="/policy-testing">Policy Testing</NavLink>}
+        {isOperator && <NavLink to="/policy-testing">Policy Impact Analysis</NavLink>}
 
         {sectionLabel('Extended')}
         <NavLink to="/kubernetes">Kubernetes</NavLink>

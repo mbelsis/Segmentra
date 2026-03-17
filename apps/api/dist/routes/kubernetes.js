@@ -179,7 +179,7 @@ kubernetesRouter.post('/clusters/:id/deploy-policy', requireRole('operator', 'ad
     const crypto = await import('node:crypto');
     const hash = crypto.createHash('sha256').update(JSON.stringify(manifest)).digest('hex');
     const { rows } = await pool.query(`INSERT INTO k8s_network_policies (cluster_id, policy_version_id, namespace, policy_name, manifest, status, deployed_hash, deployed_at)
-     VALUES ($1, $2, $3, $4, $5, 'DEPLOYED', $6, now()) RETURNING *`, [req.params.id, b.policyVersionId, b.namespace, b.policyName, JSON.stringify(manifest), hash]);
+     VALUES ($1, $2, $3, $4, $5, 'GENERATED', $6, now()) RETURNING *`, [req.params.id, b.policyVersionId, b.namespace, b.policyName, JSON.stringify(manifest), hash]);
     const userRes = await pool.query(`SELECT id FROM users WHERE username=$1 LIMIT 1`, [req.auth.username]);
     const userId = userRes.rows[0]?.id ?? null;
     await pool.query(`INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)

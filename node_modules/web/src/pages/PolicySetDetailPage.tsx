@@ -157,9 +157,9 @@ export function PolicySetDetailPage() {
               <th>Version</th>
               <th>Version ID</th>
               <th>Status</th>
+              <th>Approved By</th>
               <th>Interface Scope</th>
               <th>Change Summary</th>
-              <th>Rejection Reason</th>
               <th>Created</th>
               <th>Actions</th>
             </tr>
@@ -192,6 +192,15 @@ export function PolicySetDetailPage() {
                     </code>
                   </td>
                   <td>{getStatusBadge(v.status)}</td>
+                  <td style={{ fontSize: '12.5px' }}>
+                    {v.approved_by_username ? (
+                      <span style={{ color: '#5a7a3a' }}>{v.approved_by_username}</span>
+                    ) : v.rejected_by_username ? (
+                      <span style={{ color: '#a63d2f' }}>{v.rejected_by_username} (rejected)</span>
+                    ) : (
+                      <span style={{ color: '#97846c' }}>-</span>
+                    )}
+                  </td>
                   <td>
                     <code>{v.interface_scope_type}</code>
                     {v.interface_scope_roles && v.interface_scope_roles.length > 0 && (
@@ -205,13 +214,13 @@ export function PolicySetDetailPage() {
                       </div>
                     )}
                   </td>
-                  <td>{v.change_summary || '-'}</td>
                   <td>
-                    {isRejected && v.rejection_reason ? (
-                      <div style={{ color: '#F44336', fontSize: '0.9em', maxWidth: '300px' }}>
-                        <strong>Rejected:</strong> {v.rejection_reason}
+                    {v.change_summary || '-'}
+                    {isRejected && v.rejection_reason && (
+                      <div style={{ color: '#a63d2f', fontSize: '0.85em', marginTop: 4 }}>
+                        Reason: {v.rejection_reason}
                       </div>
-                    ) : '-'}
+                    )}
                   </td>
                   <td>{new Date(v.created_at).toLocaleString()}</td>
                   <td>
