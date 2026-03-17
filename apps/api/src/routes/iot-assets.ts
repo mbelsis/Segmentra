@@ -8,7 +8,7 @@ export const iotAssetsRouter = Router();
 iotAssetsRouter.use(requireAuth);
 
 // List IoT assets with their assigned gateways
-iotAssetsRouter.get('/', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+iotAssetsRouter.get('/', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const assetType = req.query.assetType ? String(req.query.assetType) : null;
   const zone = req.query.zone ? String(req.query.zone) : null;
   const vlanId = req.query.vlanId ? String(req.query.vlanId) : null;
@@ -38,7 +38,7 @@ iotAssetsRouter.get('/', requireRole('viewer', 'operator', 'admin'), async (req,
 });
 
 // Get single IoT asset with gateways and flows
-iotAssetsRouter.get('/:id', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+iotAssetsRouter.get('/:id', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const { rows } = await pool.query(
     `SELECT ia.*, v.name as vlan_name, v.vlan_tag FROM iot_assets ia
      LEFT JOIN vlans v ON v.id = ia.vlan_id WHERE ia.id = $1`,
@@ -238,7 +238,7 @@ iotAssetsRouter.delete('/:id/gateways/:hostId', requireRole('operator', 'admin')
 // === Gateway View ===
 
 // List IoT gateways (hosts tagged "iot-gateway") with protected asset counts and deployed policy info
-iotAssetsRouter.get('/gateways/list', requireRole('viewer', 'operator', 'admin'), async (_req, res) => {
+iotAssetsRouter.get('/gateways/list', requireRole('viewer', 'operator', 'approver', 'admin'), async (_req, res) => {
   const { rows } = await pool.query(
     `SELECT h.id, h.hostname, h.mgmt_ip, h.firewall_backend, h.enabled,
        (SELECT COUNT(*)::int FROM iot_asset_gateways iag WHERE iag.host_id = h.id) as protected_asset_count,
@@ -263,7 +263,7 @@ iotAssetsRouter.get('/gateways/list', requireRole('viewer', 'operator', 'admin')
 });
 
 // Get single gateway with its protected assets and deployment history
-iotAssetsRouter.get('/gateways/:hostId', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+iotAssetsRouter.get('/gateways/:hostId', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const { rows: hostRows } = await pool.query(
     `SELECT h.*, v.name as vlan_name, v.vlan_tag
      FROM hosts h LEFT JOIN vlans v ON v.id = h.vlan_id WHERE h.id = $1`,
@@ -314,7 +314,7 @@ iotAssetsRouter.delete('/:id/tags/:tagId', requireRole('operator', 'admin'), asy
 });
 
 // === Flows ===
-iotAssetsRouter.get('/:id/flows', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+iotAssetsRouter.get('/:id/flows', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const { rows: asset } = await pool.query(`SELECT ip_address FROM iot_assets WHERE id = $1`, [req.params.id]);
   if (!asset[0]) return res.status(404).json({ error: 'not_found' });
 

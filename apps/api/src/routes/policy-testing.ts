@@ -16,7 +16,7 @@ export const policyTestingRouter = Router();
 policyTestingRouter.use(requireAuth);
 
 // List test sessions
-policyTestingRouter.get('/sessions', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+policyTestingRouter.get('/sessions', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const hostId = req.query.hostId ? String(req.query.hostId) : null;
   const status = req.query.status ? String(req.query.status) : null;
 
@@ -45,7 +45,7 @@ policyTestingRouter.get('/sessions', requireRole('viewer', 'operator', 'admin'),
 });
 
 // Get single test session
-policyTestingRouter.get('/sessions/:id', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+policyTestingRouter.get('/sessions/:id', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const { rows } = await pool.query(
     `SELECT pts.*, h.hostname, h.mgmt_ip, h.firewall_backend,
       pv.version_number, ps.name as policy_set_name

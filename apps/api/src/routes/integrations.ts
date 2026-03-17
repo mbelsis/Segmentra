@@ -8,7 +8,7 @@ export const integrationsRouter = Router();
 integrationsRouter.use(requireAuth);
 
 // List integrations
-integrationsRouter.get('/', requireRole('viewer', 'operator', 'admin'), async (_req, res) => {
+integrationsRouter.get('/', requireRole('admin'), async (_req, res) => {
   const { rows } = await pool.query(
     `SELECT id, type, provider, name, description, enabled, config, last_sync_at, last_sync_status, created_at
      FROM integrations ORDER BY type ASC, name ASC`
@@ -17,7 +17,7 @@ integrationsRouter.get('/', requireRole('viewer', 'operator', 'admin'), async (_
 });
 
 // Host vulnerabilities
-integrationsRouter.get('/vulnerabilities/by-host/:hostId', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+integrationsRouter.get('/vulnerabilities/by-host/:hostId', requireRole('admin'), async (req, res) => {
   const { rows } = await pool.query(
     `SELECT hv.*, i.name as integration_name, i.provider as integration_provider
      FROM host_vulnerabilities hv
@@ -30,7 +30,7 @@ integrationsRouter.get('/vulnerabilities/by-host/:hostId', requireRole('viewer',
 });
 
 // Threat intel entries
-integrationsRouter.get('/threat-intel', requireRole('viewer', 'operator', 'admin'), async (_req, res) => {
+integrationsRouter.get('/threat-intel', requireRole('admin'), async (_req, res) => {
   const { rows } = await pool.query(
     `SELECT tie.*, i.name as integration_name
      FROM threat_intel_entries tie
@@ -42,7 +42,7 @@ integrationsRouter.get('/threat-intel', requireRole('viewer', 'operator', 'admin
 });
 
 // Get single integration
-integrationsRouter.get('/:id', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+integrationsRouter.get('/:id', requireRole('admin'), async (req, res) => {
   const { rows } = await pool.query(
     `SELECT id, type, provider, name, description, enabled, config, last_sync_at, last_sync_status, created_at
      FROM integrations WHERE id = $1`,
@@ -191,7 +191,7 @@ integrationsRouter.post('/:id/sync', requireRole('admin'), async (req, res) => {
 });
 
 // Get integration events
-integrationsRouter.get('/:id/events', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+integrationsRouter.get('/:id/events', requireRole('admin'), async (req, res) => {
   const limit = parseInt(String(req.query.limit ?? '50'), 10);
   const { rows } = await pool.query(
     `SELECT * FROM integration_events WHERE integration_id = $1 ORDER BY created_at DESC LIMIT $2`,

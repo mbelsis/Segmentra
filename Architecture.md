@@ -31,6 +31,7 @@ This document provides detailed technical information about Segmentra's architec
    - [Policy Expiry](#policy-expiry)
    - [Notification System](#notification-system)
    - [Security Posture Audit](#security-posture-audit)
+   - [Role-Based Access Control (RBAC)](#role-based-access-control-rbac)
 7. [Troubleshooting](#troubleshooting)
 8. [Configuration Details](#configuration-details)
    - [Environment Variables](#environment-variables)
@@ -1622,6 +1623,64 @@ On-demand scanning of all deployed policies for excessive permissions and compli
 #### Auto-Notification
 
 When the scan finds critical or high severity findings, it automatically sends an `EXCESSIVE_RULES_DETECTED` notification to all subscribed channels.
+
+### Role-Based Access Control (RBAC)
+
+Segmentra enforces role-based access control at both the API level (backend) and the UI level (frontend).
+
+#### Roles
+
+| Role | Description |
+|------|-------------|
+| **viewer** | Read-only access to all data. Cannot create, modify, or deploy anything. |
+| **operator** | Full operational access. Can manage inventory, create policies and rules, run deployments, use troubleshooting tools, and manage IoT assets. |
+| **approver** | Can view everything and approve/reject policy versions. Cannot create policies, manage inventory, or run deployments. |
+| **admin** | Full access to everything including user management, LDAP configuration, SSH credentials, integrations, notifications, and system settings. |
+
+#### Permission Matrix
+
+| Action | Viewer | Operator | Approver | Admin |
+|--------|--------|----------|----------|-------|
+| **View** dashboard, inventory, policies, deployments | Yes | Yes | Yes | Yes |
+| **View** troubleshoot results, topology, IoT, K8s | Yes | Yes | Yes | Yes |
+| **View** security audit results | Yes | Yes | Yes | Yes |
+| **Create/edit** hosts, tags, VLANs, interfaces | - | Yes | - | Yes |
+| **Create/edit** policy sets, versions, rules | - | Yes | - | Yes |
+| **Create/edit** policy templates | - | Yes | - | Yes |
+| **Create/edit** topology views and flows | - | Yes | - | Yes |
+| **Create/start** deployments | - | Yes | - | Yes |
+| **Submit** policy versions for approval | - | Yes | - | Yes |
+| **Approve/reject** policy versions | - | - | Yes | Yes |
+| **Run** firewall learning, policy testing | - | Yes | - | Yes |
+| **Run** communication simulation | - | Yes | - | Yes |
+| **Manage** IoT assets and gateway assignments | - | Yes | - | Yes |
+| **Manage** K8s clusters and workloads | - | Yes | - | Yes |
+| **Evaluate** tag rules | - | Yes | - | Yes |
+| **Generate** policy recommendations | - | Yes | - | Yes |
+| **Manage** users (create, edit, delete, reset password) | - | - | - | Yes |
+| **Configure** LDAP/AD settings | - | - | - | Yes |
+| **Manage** SSH credentials | - | - | - | Yes |
+| **Manage** integrations (SIEM, SOAR, etc.) | - | - | - | Yes |
+| **Configure** notifications | - | - | - | Yes |
+| **View** audit log | - | - | - | Yes |
+| **Configure** deployment executor, management VLAN | - | - | - | Yes |
+
+#### Enforcement
+
+- **API Level**: Every route has `requireAuth` (JWT validation) and `requireRole(...)` middleware. Unauthorized requests return 401 (no token) or 403 (insufficient role).
+- **UI Level**: The sidebar navigation hides links the user cannot access. Route-level `RequireRole` components block direct URL access and show an "Access Denied" message.
+- **Authentication**: JWT tokens stored in browser localStorage (`segmentra_token`). Tokens contain `sub` (username) and `roles` (array of role names). Token is sent as `Authorization: Bearer <token>` on every API request.
+- **Separation of Duties**: Policy approvers must be different from policy creators. High-risk policies require a different approver even for admins.
+
+#### Local Users vs LDAP Users
+
+| Feature | Local Users | LDAP Users |
+|---------|------------|------------|
+| **Created by** | Admin via Admin page | Automatically on first LDAP login |
+| **Password stored** | bcrypt hash in `users.password_hash` | Not stored — authenticated against AD |
+| **Roles assigned** | Manually by admin | Via AD group → role mappings |
+| **Password reset** | Admin resets via UI | User resets in Active Directory |
+| **Displayed as** | "Local" in user list | "LDAP" in user list |
 
 ---
 

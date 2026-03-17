@@ -8,7 +8,7 @@ export const policyRulesRouter = Router();
 policyRulesRouter.use(requireAuth);
 
 // GET endpoints are read-only and accessible to viewers
-policyRulesRouter.get('/policy-versions/:versionId/rules', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+policyRulesRouter.get('/policy-versions/:versionId/rules', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const { rows } = await pool.query(
     `SELECT * FROM policy_rules WHERE policy_version_id=$1 ORDER BY order_index ASC`,
     [req.params.versionId]

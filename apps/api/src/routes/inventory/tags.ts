@@ -8,7 +8,7 @@ export const tagsRouter = Router();
 tagsRouter.use(requireAuth);
 
 // GET endpoints are read-only and accessible to viewers
-tagsRouter.get('/', requireRole('viewer', 'operator', 'admin'), async (_req, res) => {
+tagsRouter.get('/', requireRole('viewer', 'operator', 'approver', 'admin'), async (_req, res) => {
   const { rows } = await pool.query(`SELECT * FROM tags ORDER BY name ASC`);
   res.json({ tags: rows });
 });

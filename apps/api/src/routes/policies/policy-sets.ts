@@ -8,7 +8,7 @@ export const policySetsRouter = Router();
 policySetsRouter.use(requireAuth);
 
 // GET endpoints are read-only and accessible to viewers
-policySetsRouter.get('/', requireRole('viewer', 'operator', 'admin'), async (_req, res) => {
+policySetsRouter.get('/', requireRole('viewer', 'operator', 'approver', 'admin'), async (_req, res) => {
   const { rows } = await pool.query(`SELECT * FROM policy_sets ORDER BY created_at DESC`);
   res.json({ policySets: rows });
 });
@@ -73,7 +73,7 @@ policySetsRouter.post('/', requireRole('operator', 'admin'), async (req, res) =>
   }
 });
 
-policySetsRouter.get('/:id', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+policySetsRouter.get('/:id', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const { rows } = await pool.query(`SELECT * FROM policy_sets WHERE id=$1`, [req.params.id]);
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
   res.json({ policySet: rows[0] });

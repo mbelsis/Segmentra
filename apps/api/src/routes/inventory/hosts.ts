@@ -10,7 +10,7 @@ export const hostsRouter = Router();
 hostsRouter.use(requireAuth);
 
 // GET endpoints are read-only and accessible to viewers
-hostsRouter.get('/', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+hostsRouter.get('/', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const hostname = String(req.query.hostname ?? '');
   const tag = String(req.query.tag ?? '');
   const vlan = String(req.query.vlan ?? '');
@@ -206,7 +206,7 @@ hostsRouter.post('/', requireRole('operator', 'admin'), async (req, res) => {
   }
 });
 
-hostsRouter.get('/:id', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+hostsRouter.get('/:id', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const { rows } = await pool.query(
     `SELECT h.*, v.vlan_tag, v.name as vlan_name
      FROM hosts h

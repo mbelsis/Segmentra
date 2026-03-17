@@ -522,6 +522,17 @@ export const api = {
     },
   },
 
+  // === User Management ===
+  users: {
+    list: () => request<{ users: any[] }>('/admin/users'),
+    get: (id: string) => request<{ user: any }>(`/admin/users/${id}`),
+    create: (b: any) => request<{ user: any }>('/admin/users', { method: 'POST', body: JSON.stringify(b) }),
+    update: (id: string, b: any) => request<{ user: any }>(`/admin/users/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
+    resetPassword: (id: string, newPassword: string) =>
+      request<{ ok: boolean }>(`/admin/users/${id}/reset-password`, { method: 'POST', body: JSON.stringify({ newPassword }) }),
+    delete: (id: string) => request<{ ok: boolean }>(`/admin/users/${id}`, { method: 'DELETE' }),
+  },
+
   // === Security Audit ===
   securityAudit: {
     scan: () => request<{ findings: any[]; summary: any }>('/security-audit/scan'),

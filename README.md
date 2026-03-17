@@ -12,7 +12,13 @@ Segmentra is an on‑prem, web-based **fleet firewall & microsegmentation manage
 
 ### 🔐 Authentication & Authorization
 - **LDAP/Active Directory Integration**: Seamless authentication with your existing directory services
-- **Role-Based Access Control (RBAC)**: Four roles (Viewer, Operator, Approver, Admin) with granular permissions
+- **Role-Based Access Control (RBAC)**: Four roles with enforced permissions at both API and UI level:
+  - **Viewer**: Read-only access to all dashboards, inventory, policies, and deployments
+  - **Operator**: Full operational access — manage inventory, create policies/rules, run deployments, troubleshoot, manage IoT assets
+  - **Approver**: View everything plus approve/reject policy versions (separation of duties — cannot create policies)
+  - **Admin**: Full access including user management, LDAP, SSH credentials, integrations, notifications, and system settings
+- **JWT Authentication**: Stateless authentication via JSON Web Tokens stored in browser localStorage. Tokens contain username and roles, sent as `Authorization: Bearer <token>` on every API request.
+- **Local User Management**: Admin can create, edit, disable, and reset passwords for local users directly in the UI — no LDAP required for small teams
 - **AD Group Mapping**: Automatically assign roles based on Active Directory group membership
 
 ### 📦 Policy Management

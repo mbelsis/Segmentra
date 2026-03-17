@@ -18,7 +18,7 @@ import { checkDeploymentSafety } from '../services/safety-check.js';
 import { isPolicyVersionHighRisk } from '../services/high-risk.js';
 
 export const deploymentsRouter = Router();
-deploymentsRouter.use(requireAuth, requireRole('operator', 'admin'));
+deploymentsRouter.use(requireAuth);
 
 // Host deployment timeout: 10 minutes (600000 ms)
 const HOST_DEPLOYMENT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -231,7 +231,7 @@ async function resolveTargets(q: { tags: string[]; vlans: string[]; hosts: strin
   return [...ids];
 }
 
-deploymentsRouter.post('/deployments', async (req, res) => {
+deploymentsRouter.post('/deployments', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = createDeploymentSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
   const b = parsed.data;
@@ -376,7 +376,7 @@ deploymentsRouter.post('/deployments', async (req, res) => {
   res.status(201).json({ deployment });
 });
 
-deploymentsRouter.get('/deployments', async (req, res) => {
+deploymentsRouter.get('/deployments', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   // Check for stale hosts before returning deployments
   await checkAndTimeoutStaleHosts();
   
@@ -491,13 +491,13 @@ deploymentsRouter.get('/deployments', async (req, res) => {
   });
 });
 
-deploymentsRouter.get('/deployments/:deploymentId', async (req, res) => {
+deploymentsRouter.get('/deployments/:deploymentId', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const { rows } = await pool.query(`SELECT * FROM deployments WHERE id=$1`, [req.params.deploymentId]);
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
   res.json({ deployment: rows[0] });
 });
 
-deploymentsRouter.get('/deployments/:deploymentId/hosts', async (req, res) => {
+deploymentsRouter.get('/deployments/:deploymentId/hosts', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   // Check for stale hosts before returning host status
   await checkAndTimeoutStaleHosts();
   
@@ -512,7 +512,7 @@ deploymentsRouter.get('/deployments/:deploymentId/hosts', async (req, res) => {
   res.json({ hosts: rows });
 });
 
-deploymentsRouter.get('/deployments/:deploymentId/artifacts', async (req, res) => {
+deploymentsRouter.get('/deployments/:deploymentId/artifacts', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const { rows } = await pool.query(
     `SELECT id, bundle_path, bundle_hash, manifest, created_at
      FROM deployment_artifacts
@@ -523,7 +523,7 @@ deploymentsRouter.get('/deployments/:deploymentId/artifacts', async (req, res) =
   res.json({ artifacts: rows });
 });
 
-deploymentsRouter.get('/executions/:executionId/logs', async (req, res) => {
+deploymentsRouter.get('/executions/:executionId/logs', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const { rows } = await pool.query(
     `SELECT stdout_path, stderr_path FROM execution_runs WHERE id=$1`,
     [req.params.executionId]
@@ -1054,7 +1054,7 @@ export async function executeDeploymentStart(
     return { ok, exitCode, executionId: executionId! };
 }
 
-deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
+deploymentsRouter.post('/deployments/:deploymentId/start', requireRole('operator', 'admin'), async (req, res) => {
   const deploymentId = req.params.deploymentId;
 
   try {
@@ -1091,7 +1091,7 @@ deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
   }
 });
 
-deploymentsRouter.post('/deployments/:deploymentId/pause', async (req, res) => {
+deploymentsRouter.post('/deployments/:deploymentId/pause', requireRole('operator', 'admin'), async (req, res) => {
   const deploymentId = req.params.deploymentId;
   
   // Check if deployment is running
@@ -1115,7 +1115,7 @@ deploymentsRouter.post('/deployments/:deploymentId/pause', async (req, res) => {
   res.json({ ok: true });
 });
 
-deploymentsRouter.post('/deployments/:deploymentId/resume', async (req, res) => {
+deploymentsRouter.post('/deployments/:deploymentId/resume', requireRole('operator', 'admin'), async (req, res) => {
   const deploymentId = req.params.deploymentId;
   
   // Check if deployment is paused
@@ -1139,7 +1139,7 @@ deploymentsRouter.post('/deployments/:deploymentId/resume', async (req, res) => 
   res.json({ ok: true });
 });
 
-deploymentsRouter.post('/deployments/:deploymentId/stop', async (req, res) => {
+deploymentsRouter.post('/deployments/:deploymentId/stop', requireRole('operator', 'admin'), async (req, res) => {
   const deploymentId = req.params.deploymentId;
   
   // Check if deployment can be stopped
@@ -1164,7 +1164,7 @@ deploymentsRouter.post('/deployments/:deploymentId/stop', async (req, res) => {
   res.json({ ok: true });
 });
 
-deploymentsRouter.post('/deployments/:deploymentId/cancel', async (req, res) => {
+deploymentsRouter.post('/deployments/:deploymentId/cancel', requireRole('operator', 'admin'), async (req, res) => {
   // v1: best-effort cancellation (no process tracking yet)
   await pool.query(`UPDATE deployments SET status='CANCELLED', finished_at=now() WHERE id=$1 AND status='RUNNING'`, [
     req.params.deploymentId
@@ -1175,7 +1175,7 @@ deploymentsRouter.post('/deployments/:deploymentId/cancel', async (req, res) => 
   res.json({ ok: true });
 });
 
-deploymentsRouter.post('/deployments/:deploymentId/retry-failed', async (req, res) => {
+deploymentsRouter.post('/deployments/:deploymentId/retry-failed', requireRole('operator', 'admin'), async (req, res) => {
   await pool.query(`UPDATE deployment_hosts SET status='PENDING', started_at=null, finished_at=null, message=null WHERE deployment_id=$1 AND status='FAILED'`, [
     req.params.deploymentId
   ]);
