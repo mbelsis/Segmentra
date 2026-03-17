@@ -2,10 +2,10 @@ import { useState, useEffect } from 'react';
 import { api } from '../lib/api';
 
 const INTEGRATION_TYPES = [
-  { value: 'siem', label: 'SIEM' },
-  { value: 'soar', label: 'SOAR' },
-  { value: 'vulnerability_db', label: 'Vulnerability DB' },
-  { value: 'threat_intel', label: 'Threat Intelligence' },
+  { value: 'siem', label: 'SIEM (Syslog Forwarder)', active: true, hint: 'Config: {"host": "siem.company.com", "port": 514, "protocol": "udp", "facility": 13, "severity": 6}' },
+  { value: 'threat_intel', label: 'Threat Intelligence (AbuseIPDB)', active: true, hint: 'Config: {"apiKey": "your-abuseipdb-key", "confidenceMinimum": 90, "maxResults": 100, "expiryDays": 7, "autoBlock": false}' },
+  { value: 'soar', label: 'SOAR (planned)', active: false, hint: 'Not yet implemented — requires custom adapter' },
+  { value: 'vulnerability_db', label: 'Vulnerability DB (planned)', active: false, hint: 'Not yet implemented — requires custom adapter' },
 ];
 
 export function IntegrationsPage() {
@@ -95,9 +95,10 @@ export function IntegrationsPage() {
     <div>
       <h2>Integrations</h2>
       <p style={{ color: '#78644e', fontSize: '13.5px', marginTop: -4, marginBottom: 16, lineHeight: 1.6 }}>
-        Connect Segmentra to your security ecosystem. Forward audit events to your SIEM, receive automated actions from SOAR platforms,
-        import vulnerability data from scanners to track CVEs per host, and subscribe to threat intelligence feeds
-        to maintain IP/CIDR blocklists with confidence scoring and automatic expiry.
+        Connect Segmentra to external security tools. Currently supported:
+        <strong> SIEM</strong> (forward audit events as syslog to Splunk, QRadar, Elastic, Graylog) and
+        <strong> Threat Intelligence</strong> (sync malicious IP blocklists from AbuseIPDB with optional auto-deny rules).
+        SOAR and Vulnerability DB integrations are planned for a future release.
       </p>
       {error && <div style={{ color: 'red', marginBottom: 8 }}>{error} <button onClick={() => setError('')}>dismiss</button></div>}
 
@@ -111,13 +112,16 @@ export function IntegrationsPage() {
         <div className="card" style={{ border: '2px solid #8b6914' }}>
           <h3>Add Integration</h3>
           <div className="form-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
-            <div className="form-group"><label>Type</label>
-              <select value={form.type} onChange={e => setForm(f => ({ ...f, type: e.target.value }))}>
-                {INTEGRATION_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+            <div className="form-group"><label>Type *</label>
+              <select value={form.type} onChange={e => setForm(f => ({ ...f, type: e.target.value, config: '' }))}>
+                {INTEGRATION_TYPES.filter(t => t.active).map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                <optgroup label="Planned (not yet available)">
+                  {INTEGRATION_TYPES.filter(t => !t.active).map(t => <option key={t.value} value={t.value} disabled>{t.label}</option>)}
+                </optgroup>
               </select>
             </div>
             <div className="form-group"><label>Provider</label>
-              <input placeholder="e.g., Splunk, QRadar" value={form.provider} onChange={e => setForm(f => ({ ...f, provider: e.target.value }))} />
+              <input placeholder={form.type === 'siem' ? 'e.g., Splunk, QRadar, Elastic, Graylog' : form.type === 'threat_intel' ? 'AbuseIPDB' : 'Provider name'} value={form.provider} onChange={e => setForm(f => ({ ...f, provider: e.target.value }))} />
             </div>
             <div className="form-group"><label>Name *</label>
               <input placeholder="Integration name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
@@ -125,8 +129,29 @@ export function IntegrationsPage() {
             <div className="form-group"><label>Description</label>
               <input placeholder="Optional description" value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))} />
             </div>
-            <div className="form-group" style={{ gridColumn: '1 / -1' }}><label>Config JSON</label>
-              <textarea placeholder='{"url": "https://...", "apiKey": "..."}' value={form.config} onChange={e => setForm(f => ({ ...f, config: e.target.value }))} rows={3} style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '13px' }} />
+            <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+              <label>Configuration (JSON) *</label>
+              {(() => {
+                const selectedType = INTEGRATION_TYPES.find(t => t.value === form.type);
+                return selectedType?.hint ? (
+                  <div style={{ padding: '8px 12px', background: '#f7f4ef', borderRadius: 6, marginBottom: 8, fontSize: '12px', color: '#5c4633', fontFamily: "'JetBrains Mono', monospace" }}>
+                    {selectedType.hint}
+                  </div>
+                ) : null;
+              })()}
+              <textarea
+                placeholder={INTEGRATION_TYPES.find(t => t.value === form.type)?.hint || '{"key": "value"}'}
+                value={form.config}
+                onChange={e => setForm(f => ({ ...f, config: e.target.value }))}
+                rows={4}
+                style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '13px' }}
+              />
+              {form.type === 'siem' && (
+                <small>Forward all audit events as RFC 5424 syslog messages. Protocol: udp (default) or tcp. Facility: 13=audit (default). Severity: 6=info (default).</small>
+              )}
+              {form.type === 'threat_intel' && (
+                <small>Get a free API key at <a href="https://www.abuseipdb.com" target="_blank" rel="noopener noreferrer" style={{ color: '#8b6914' }}>abuseipdb.com</a>. Set autoBlock: true and autoBlockPolicySetId to auto-create DENY rules from blocklist.</small>
+              )}
             </div>
             <div className="form-group">
               <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -135,7 +160,7 @@ export function IntegrationsPage() {
             </div>
           </div>
           <div className="form-actions" style={{ marginTop: 12 }}>
-            <button onClick={createIntegration} className="btn-primary" disabled={!form.name.trim()}>Create Integration</button>
+            <button onClick={createIntegration} className="btn-primary" disabled={!form.name.trim() || !INTEGRATION_TYPES.find(t => t.value === form.type)?.active}>Create Integration</button>
             <button onClick={() => setShowCreate(false)} className="btn-secondary">Cancel</button>
           </div>
         </div>
