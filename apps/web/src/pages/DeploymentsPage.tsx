@@ -718,6 +718,7 @@ export function DeploymentsPage() {
               <th>Mode</th>
               <th>Targets</th>
               <th>Status</th>
+              <th>Created By</th>
               <th>Created</th>
               <th>Actions</th>
             </tr>
@@ -730,6 +731,7 @@ export function DeploymentsPage() {
                 <td>{d.mode}</td>
                 <td>{d.target_count} host(s)</td>
                 <td>{getStatusBadge(d.status)}</td>
+                <td style={{ fontSize: '12.5px' }}>{d.created_by_username || '-'}</td>
                 <td>{new Date(d.created_at).toLocaleString()}</td>
                 <td>
                   <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>

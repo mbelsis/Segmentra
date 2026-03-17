@@ -91,10 +91,14 @@ export function TopologyPage() {
   const generatePolicies = async () => {
     if (!selectedView) return;
     if (flows.length === 0) { setError('Add at least one flow before generating policies'); return; }
-    if (!confirm(`Generate firewall policies from ${flows.length} flow(s)? This will create DRAFT policy sets that go through the normal approval workflow.`)) return;
+    const name = prompt(
+      `Enter a name for the policy set (${flows.length} flows will be converted to firewall rules):`,
+      `${selectedView.name} Policy`
+    );
+    if (name === null) return; // User cancelled
     try {
-      const result = await api.topology.generatePolicies(selectedView.id);
-      alert(`Generated ${result.policySetsCreated} policy set(s) with ${result.rulesCreated} rule(s). Check the Policy Sets page to review and approve them.`);
+      const result = await api.topology.generatePolicies(selectedView.id, name.trim() || undefined);
+      alert(`Created policy set with ${result.rulesCreated} rules (DRAFT). Go to Policy Sets to review, approve, and deploy.`);
     } catch (e: any) { setError(e.message); }
   };
 

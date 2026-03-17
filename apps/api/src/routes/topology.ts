@@ -140,9 +140,10 @@ topologyRouter.delete('/flows/:flowId', requireRole('operator', 'admin'), async 
 topologyRouter.post('/views/:id/generate-policies', requireRole('operator', 'admin'), async (req, res) => {
   const userRes = await pool.query(`SELECT id FROM users WHERE username=$1 LIMIT 1`, [req.auth!.username]);
   const userId = userRes.rows[0]?.id ?? null;
+  const policySetName = req.body?.name || undefined;
 
   try {
-    const result = await generatePoliciesFromTopology(req.params.id, userId);
+    const result = await generatePoliciesFromTopology(req.params.id, userId, policySetName);
     res.status(201).json(result);
   } catch (e: any) {
     res.status(500).json({ error: e.message });
