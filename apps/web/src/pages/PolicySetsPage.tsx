@@ -393,8 +393,10 @@ export function PolicySetsPage() {
         }}>
           <span style={{ fontSize: '1.2em' }}>💡</span>
           <div style={{ flex: 1 }}>
-            <strong>Tip:</strong> To add firewall rules, click <strong>"New Version"</strong> on a policy set. 
+            <strong>Tip:</strong> To add firewall rules, click <strong>"New Version"</strong> on a policy set.
             This will create a new policy version where you can add, edit, and manage firewall rules.
+            <br />
+            <strong>OT/IoT:</strong> To create firewall policies for IoT devices, create a policy set scoped to TAG <code style={{ background: '#f0ebe2', padding: '1px 6px', borderRadius: 4 }}>iot-gateway</code> and add rules referencing IoT device IPs. The policy will be deployed to the gateway hosts that protect those devices.
           </div>
         </div>
         <table className="data-table">

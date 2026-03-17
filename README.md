@@ -198,12 +198,13 @@ Additional troubleshooting capabilities include:
 
 ### Policy Expiry (Time-Limited Deployments)
 - **Optional Expiry Date**: Set when a deployment should expire (e.g., "vendor access until March 30")
-- **Three Expiry Actions**: Notify Only (alert but keep rules), Remove (auto-rollback on all hosts), Revert (re-deploy previous version)
+- **Three Expiry Actions**: Notify Only (alert, rules stay active), Remove (marks expired, notifies for manual rollback), Revert (marks expired, notifies for manual redeploy)
 - **24-Hour Warnings**: Automatic notification when a deployment is approaching expiry
 - **Background Processing**: Expired deployments are detected and processed every minute
+- **Note**: REMOVE and REVERT currently mark deployments as expired and send notifications requesting manual action. Full automated rollback/redeploy is planned for a future release.
 
 ### Notification System
-- **Channel Types**: Slack (webhook), generic HTTP webhook, email (SMTP)
+- **Channel Types**: Slack (webhook), generic HTTP webhook, email (SMTP — preview/stub; requires SMTP configuration and is not yet fully implemented; Slack and webhook channels are fully functional)
 - **10 Event Types**: POLICY_SUBMITTED, POLICY_APPROVED, POLICY_REJECTED, DEPLOYMENT_STARTED, DEPLOYMENT_COMPLETED, DEPLOYMENT_FAILED, COMPLIANCE_DRIFT, POLICY_EXPIRING_SOON, POLICY_EXPIRED, EXCESSIVE_RULES_DETECTED
 - **Fire-and-Forget**: Notification failures never block core operations
 - **Full Audit Trail**: Every notification attempt logged with status and error details
@@ -264,7 +265,7 @@ start.bat dev
 After starting the application, use these credentials to login:
 
 - **Username**: `admin`
-- **Password**: `admin`
+- **Password**: `admin123`
 
 ⚠️ **Important**: Change the default password after first login! You can change it in the UI or via API endpoint `POST /api/auth/change-password`.
 
@@ -311,7 +312,7 @@ npm run db:seed
 
 The seed script automatically creates a default admin user:
 - **Username**: `admin`
-- **Password**: `admin`
+- **Password**: `admin123`
 
 #### 4) Start the API
 
@@ -354,7 +355,7 @@ UI listens on `http://localhost:5173`.
 
 **Default credentials (created automatically on first run):**
 - **Username**: `admin`
-- **Password**: `admin`
+- **Password**: `admin123`
 
 ⚠️ **Important**: Change the default password after first login!
 
@@ -495,11 +496,11 @@ Segmentra now includes several advanced features for production-ready firewall m
 
 ### Policy Expiry
 - **Time-Limited Deployments**: Optionally set an expiry date when creating deployments (e.g., temporary vendor access for 30 days)
-- **Expiry Actions**: Choose what happens when the policy expires — Notify Only, Remove (rollback rules), or Revert (restore previous version)
+- **Expiry Actions**: Choose what happens when the policy expires — Notify Only (rules stay active), Remove (notifies for manual rollback), or Revert (notifies for manual redeploy)
 - **Automatic Alerts**: 24-hour advance warnings and expiry notifications via configured channels
 
 ### Notification System
-- **Multi-Channel Alerts**: Send notifications via Slack webhooks, generic webhooks, or email
+- **Multi-Channel Alerts**: Send notifications via Slack webhooks, generic webhooks, or email (email is currently a preview/stub requiring SMTP configuration; Slack and webhook channels are fully functional)
 - **Event Subscriptions**: Subscribe channels to specific events — policy approvals, deployment failures, compliance drift, policy expiry, security audit findings
 - **Notification Log**: Full history of all sent notifications with delivery status tracking
 

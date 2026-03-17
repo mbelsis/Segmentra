@@ -1164,11 +1164,15 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
               <tbody>
                 {tags.map((t) => (
                   <tr key={t.id}>
-                    <td><strong>{t.name}</strong></td>
+                    <td>
+                      <strong>{t.name}</strong>
+                      {t.is_system && <span style={{ marginLeft: 8, fontSize: '10px', padding: '1px 6px', borderRadius: 4, background: '#f0ebe2', color: '#8b6914', fontWeight: 600, verticalAlign: 'middle' }}>SYSTEM</span>}
+                    </td>
                     <td>{t.description || '-'}</td>
                     <td>
                       <button onClick={() => editTag(t)} className="btn-small btn-secondary" style={{ marginRight: 8 }}>Edit</button>
-                      <button onClick={() => deleteTag(t.id)} className="btn-small btn-danger">Delete</button>
+                      {!t.is_system && <button onClick={() => deleteTag(t.id)} className="btn-small btn-danger">Delete</button>}
+                      {t.is_system && <span style={{ fontSize: '11px', color: '#97846c' }}>Protected</span>}
                     </td>
                   </tr>
                 ))}

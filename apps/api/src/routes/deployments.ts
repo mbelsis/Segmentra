@@ -761,18 +761,27 @@ async function generateBundle(deploymentId: string) {
   return { bundleDir, hostPolicyHashes };
 }
 
-deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
-  const deploymentId = req.params.deploymentId;
-
-  try {
+/**
+ * Core deployment start logic, extracted so it can be called from both the
+ * POST /start route handler and the scheduled-deployment background job.
+ *
+ * Returns { ok, exitCode, executionId } on success.
+ * Throws on failure (caller is responsible for error handling).
+ *
+ * @param ipAddress - optional IP of the requesting user (for audit trail)
+ */
+export async function executeDeploymentStart(
+  deploymentId: string,
+  ipAddress?: string
+): Promise<{ ok: boolean; exitCode: number; executionId: string }> {
     // Check for and timeout stale hosts before starting
     await checkAndTimeoutStaleHosts();
 
     // Mark disabled hosts as SKIPPED before starting
     await pool.query(
-    `UPDATE deployment_hosts 
+    `UPDATE deployment_hosts
      SET status='SKIPPED', finished_at=now(), message='Host is disabled'
-     WHERE deployment_id=$1 
+     WHERE deployment_id=$1
      AND host_id IN (SELECT id FROM hosts WHERE enabled=false)
      AND status='PENDING'`,
     [deploymentId]
@@ -781,9 +790,9 @@ deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
     await pool.query(`UPDATE deployments SET status='RUNNING', started_at=now() WHERE id=$1`, [deploymentId]);
     // Only mark enabled hosts as RUNNING
     await pool.query(
-    `UPDATE deployment_hosts 
-     SET status='RUNNING', started_at=now() 
-     WHERE deployment_id=$1 
+    `UPDATE deployment_hosts
+     SET status='RUNNING', started_at=now()
+     WHERE deployment_id=$1
      AND host_id IN (SELECT id FROM hosts WHERE enabled=true)
      AND status='PENDING'`,
       [deploymentId]
@@ -822,7 +831,7 @@ deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
     if (!cred) {
       await pool.query(`UPDATE execution_runs SET status='DONE', finished_at=now() WHERE id=$1`, [executionId]);
       await pool.query(`UPDATE deployments SET status='FAILED', finished_at=now() WHERE id=$1`, [deploymentId]);
-      return res.status(400).json({ error: 'missing_ssh_credential' });
+      throw new Error('missing_ssh_credential');
     }
 
     const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
@@ -843,7 +852,7 @@ deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
       const backend = h.firewall_backend === 'iptables' ? 'iptables' : 'nftables';
       const ext = backend === 'nftables' ? 'nft' : 'iptables';
       const policyFilePath = path.join(bundleDir, 'host_rules', `${h.hostname}.${ext}`);
-      
+
       if (fs.existsSync(policyFilePath)) {
         sshHosts.push({
           hostname: h.hostname,
@@ -950,17 +959,17 @@ deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
        GROUP BY status`,
       [deploymentId]
     );
-    
+
     const statusCounts: Record<string, number> = {};
     for (const row of hostStatusRes.rows) {
       statusCounts[row.status] = parseInt(row.count, 10);
     }
-    
+
     const succeededCount = statusCounts['SUCCEEDED'] || 0;
     const failedCount = statusCounts['FAILED'] || 0;
     const skippedCount = statusCounts['SKIPPED'] || 0;
     const total = succeededCount + failedCount + skippedCount;
-    
+
     // Determine final status
     let finalStatus: string;
     if (failedCount > 0 && succeededCount > 0) {
@@ -991,17 +1000,17 @@ deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
     // Resolve target names for audit
     const targetQuery = dep.target_query || {};
     const targetNames: { tags: string[]; vlans: string[]; hosts: string[] } = { tags: [], vlans: [], hosts: [] };
-    
+
     if (targetQuery.tags && Array.isArray(targetQuery.tags) && targetQuery.tags.length > 0) {
       const tagRes = await pool.query(`SELECT name FROM tags WHERE id = ANY($1::uuid[])`, [targetQuery.tags]);
       targetNames.tags = tagRes.rows.map((r: any) => r.name);
     }
-    
+
     if (targetQuery.vlans && Array.isArray(targetQuery.vlans) && targetQuery.vlans.length > 0) {
       const vlanRes = await pool.query(`SELECT name FROM vlans WHERE id = ANY($1::uuid[])`, [targetQuery.vlans]);
       targetNames.vlans = vlanRes.rows.map((r: any) => r.name);
     }
-    
+
     if (targetQuery.hosts && Array.isArray(targetQuery.hosts) && targetQuery.hosts.length > 0) {
       const hostRes = await pool.query(`SELECT hostname FROM hosts WHERE id = ANY($1::uuid[])`, [targetQuery.hosts]);
       targetNames.hosts = hostRes.rows.map((r: any) => r.hostname);
@@ -1019,7 +1028,7 @@ deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
       action: 'DEPLOYMENT_FINISHED',
       entityType: 'DEPLOYMENT',
       entityId: deploymentId,
-      ipAddress: req.ip,
+      ipAddress: ipAddress,
       metadata: {
         policySetName: dep.policy_set_name || 'Unknown',
         policyVersionNumber: dep.version_number || null,
@@ -1042,32 +1051,40 @@ deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
     });
     }
 
-    res.json({ ok, exitCode, executionId });
+    return { ok, exitCode, executionId: executionId! };
+}
+
+deploymentsRouter.post('/deployments/:deploymentId/start', async (req, res) => {
+  const deploymentId = req.params.deploymentId;
+
+  try {
+    const result = await executeDeploymentStart(deploymentId, req.ip);
+    res.json(result);
   } catch (error: any) {
     // eslint-disable-next-line no-console
     console.error('[Deployment Start Error]', error);
-    
+
     // Update deployment status to FAILED if it was set to RUNNING
     await pool.query(
       `UPDATE deployments SET status='FAILED', finished_at=now() WHERE id=$1 AND status='RUNNING'`,
       [deploymentId]
     );
-    
+
     // Update all RUNNING hosts to FAILED
     await pool.query(
       `UPDATE deployment_hosts SET status='FAILED', finished_at=now(), message=$2 WHERE deployment_id=$1 AND status='RUNNING'`,
       [deploymentId, error.message || 'Deployment start failed']
     );
-    
+
     // Return appropriate error response
     if (error.message === 'missing_ssh_credential') {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: 'missing_ssh_credential',
         message: 'SSH credentials are required to start a deployment. Please configure SSH credentials in Admin → SSH Credentials.'
       });
     }
-    
-    res.status(500).json({ 
+
+    res.status(500).json({
       error: 'deployment_start_failed',
       message: error.message || 'Failed to start deployment'
     });
@@ -1172,7 +1189,7 @@ deploymentsRouter.post('/deployments/:deploymentId/retry-failed', async (req, re
  */
 export async function processScheduledDeployments(): Promise<number> {
   const now = new Date();
-  
+
   // Find deployments that are QUEUED and scheduled_at <= now
   const scheduledRes = await pool.query(
     `SELECT id FROM deployments
@@ -1184,13 +1201,32 @@ export async function processScheduledDeployments(): Promise<number> {
 
   let processedCount = 0;
   for (const row of scheduledRes.rows) {
-    // Update status to mark as ready (scheduled_at cleared)
-    // The actual deployment will be started by calling the /start endpoint
-    // For now, we just mark them as ready to start
+    // Clear scheduled_at so this deployment is not picked up again
     await pool.query(
       `UPDATE deployments SET scheduled_at=NULL WHERE id=$1`,
       [row.id]
     );
+
+    // Actually start the deployment using the shared execution logic
+    try {
+      const result = await executeDeploymentStart(row.id, undefined);
+      // eslint-disable-next-line no-console
+      console.log(`[Scheduled Deployments] Auto-started deployment ${row.id} — ok=${result.ok}, exitCode=${result.exitCode}`);
+    } catch (error: any) {
+      // eslint-disable-next-line no-console
+      console.error(`[Scheduled Deployments] Failed to auto-start deployment ${row.id}:`, error.message);
+
+      // Mark the deployment as FAILED so it doesn't remain in a stuck state
+      await pool.query(
+        `UPDATE deployments SET status='FAILED', finished_at=now() WHERE id=$1 AND status IN ('QUEUED', 'RUNNING')`,
+        [row.id]
+      );
+      await pool.query(
+        `UPDATE deployment_hosts SET status='FAILED', finished_at=now(), message=$2 WHERE deployment_id=$1 AND status IN ('PENDING', 'RUNNING')`,
+        [row.id, error.message || 'Scheduled deployment start failed']
+      );
+    }
+
     processedCount++;
   }
 

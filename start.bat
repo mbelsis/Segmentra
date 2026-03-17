@@ -149,7 +149,7 @@ echo [segmentra] ========================================
 echo [segmentra] Default Login Credentials
 echo [segmentra] ========================================
 echo [segmentra] Username: admin
-echo [segmentra] Password: admin
+echo [segmentra] Password: admin123
 echo.
 echo [segmentra] IMPORTANT: Change the default password after first login!
 echo [segmentra] You can change it in the UI or via API endpoint.

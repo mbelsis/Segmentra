@@ -584,10 +584,15 @@ Agentless Kubernetes NetworkPolicy management via K8s API. Discover namespaces/p
 **API**: Cluster management, workload discovery, policy deployment under `/api/k8s`.
 
 ## 13.8 OT/IoT Microsegmentation
-Passive traffic discovery + upstream enforcement for devices that can't run agents. Discover assets via NetFlow/sFlow/SPAN, fingerprint protocols, enforce via switch ACLs or gateway firewalls over SSH.
+Upstream enforcement for devices that can't run agents (PLCs, HMIs, sensors, cameras, HVAC, medical). IoT devices are registered in a separate asset inventory and assigned to **gateway firewalls** — regular Linux hosts from the main inventory tagged `iot-gateway`. Policies are deployed to gateways using the normal SSH/Ansible pipeline. OT zones are defined as VLANs in the Inventory.
 
-**Tables**: `iot_assets`, `iot_asset_tags`, `flow_collectors`, `iot_observed_flows`, `enforcement_points`, `enforcement_acls`.
-**API**: Asset management under `/api/iot-assets`, collectors under `/api/flow-collectors`, enforcement under `/api/enforcement-points`.
+**Model**: IoT assets → assigned to gateway hosts (tagged `iot-gateway`) → policies scoped to TAG `iot-gateway` → deployed via normal SSH/Ansible.
+**Traffic discovery**: Run Firewall Learning on the gateway host (Troubleshoot page) to capture IoT traffic.
+**Zones**: Defined as VLANs in the Inventory page (e.g., "OT Level 1 - PLCs", "Building Systems").
+**Tables**: `iot_assets`, `iot_asset_gateways` (asset → host mapping), `iot_asset_tags`. Legacy tables `enforcement_points`, `enforcement_acls`, `flow_collectors` are deprecated.
+**API**: Asset management under `/api/iot-assets`, gateway views under `/api/iot-assets/gateways/list` and `/api/iot-assets/gateways/:hostId`.
+**System tags**: `iot-gateway` and `bastion` are protected system tags (cannot be deleted).
+**Deployment warning**: When deploying to hosts tagged `iot-gateway`, the UI warns that changes affect all IoT devices behind the gateways.
 
 ---
 
@@ -600,7 +605,7 @@ In addition to the original pages (Section 12), v2 adds:
 - **Policy Testing** (`/policy-testing`) — Test session management, analysis report (color-coded: green=matched, yellow=unmatched, red=blocked)
 - **Integrations** (`/integrations`) — Integration catalog, config forms per type, sync status, event log, threat intel dashboard
 - **Kubernetes** (`/kubernetes`) — Cluster management, workload browser, label-to-tag mapping, network policy status
-- **OT/IoT** (`/iot`) — Asset inventory with OT-specific fields, flow collectors, enforcement points, traffic baseline
+- **OT/IoT** (`/iot`) — IoT asset inventory (2 tabs: Assets with gateway assignment, Gateways with deployed policy status). Zones = VLANs. Traffic discovery via Firewall Learning on gateway hosts.
 
 ---
 

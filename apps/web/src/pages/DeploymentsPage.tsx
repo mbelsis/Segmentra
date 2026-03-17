@@ -477,6 +477,28 @@ export function DeploymentsPage() {
               </div>
             )}
 
+            {/* IoT Gateway Warning */}
+            {(() => {
+              // Check if any selected targets include hosts tagged "iot-gateway"
+              const selectedHosts = formTargetType === 'HOST' ? hosts.filter(h => formHostIds.includes(h.id)) : [];
+              const selectedTagNames = formTargetType === 'TAG' ? tags.filter(t => formTagIds.includes(t.id)).map(t => t.name) : [];
+              const isIotGateway = selectedHosts.some((h: any) => h.tags?.some((t: any) => t.name === 'iot-gateway'))
+                || selectedTagNames.includes('iot-gateway');
+              if (!isIotGateway) return null;
+              return (
+                <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                  <div style={{ padding: 12, background: '#fdf6ec', border: '1px solid #e8d5a8', borderRadius: 8 }}>
+                    <strong style={{ color: '#8b6914' }}>IoT/OT Gateway Deployment</strong>
+                    <p style={{ margin: '8px 0 0', color: '#5c4633', fontSize: '13.5px' }}>
+                      This deployment targets one or more <strong>IoT/OT gateways</strong>. Changes to gateway firewall rules
+                      will affect all IoT devices protected by these gateways. Review the rules carefully before deploying —
+                      incorrect rules may isolate OT/IoT devices from their controllers or monitoring systems.
+                    </p>
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* Safety Check Warnings */}
             {safetyCheck && (
               <div className="form-group" style={{ gridColumn: '1 / -1' }}>

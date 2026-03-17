@@ -3,7 +3,7 @@ import { z } from 'zod';
 
 import { pool } from '../db/pool.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
-import { sendNotification } from '../services/notifications.js';
+import { sendNotification, sendTestToChannel } from '../services/notifications.js';
 
 export const notificationsRouter = Router();
 notificationsRouter.use(requireAuth);
@@ -147,24 +147,20 @@ notificationsRouter.get('/log', requireRole('admin'), async (req, res) => {
   res.json({ log: rows });
 });
 
-// Test channel (send a test notification)
+// Test channel (send directly to this specific channel, bypassing rule matching)
 notificationsRouter.post('/channels/:id/test', requireRole('admin'), async (req, res) => {
   const { rows } = await pool.query(`SELECT * FROM notification_channels WHERE id = $1`, [req.params.id]);
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
 
   try {
-    // Temporarily create a rule for this test, send, then remove
-    await sendNotification({
-      eventType: 'DEPLOYMENT_COMPLETED',
-      subject: 'Segmentra Test Notification',
-      body: {
-        message: 'This is a test notification from Segmentra.',
-        channel: rows[0].name,
-        timestamp: new Date().toISOString(),
-      },
+    await sendTestToChannel({
+      id: rows[0].id,
+      type: rows[0].type,
+      config: rows[0].config,
+      name: rows[0].name,
     });
-    res.json({ success: true, message: 'Test notification sent' });
+    res.json({ success: true, message: `Test notification sent to ${rows[0].name} (${rows[0].type})` });
   } catch (e: any) {
-    res.status(500).json({ error: 'test_failed', message: e.message });
+    res.status(500).json({ error: 'test_failed', message: `Failed to send to ${rows[0].name}: ${e.message}` });
   }
 });

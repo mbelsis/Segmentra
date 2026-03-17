@@ -1,277 +1,371 @@
-# Installation & running Segmentra
-
-This document covers:
-- Running Segmentra in a **developer environment** (API + UI + Postgres)
-- Installing Segmentra in a **production environment** (Docker Compose)
-- How to **access the UI without LDAP** (bootstrap token flow)
+# Segmentra Installation Guide
 
 ---
 
-## Dev environment (local)
+## Quick Start
+
+### Automated Installation
+
+**Linux/macOS:**
+```bash
+# Development
+./install.sh --development
+
+# Production
+./install.sh --production
+```
+
+**Windows (PowerShell):**
+```powershell
+# Development
+.\install.ps1 --development
+
+# Production
+.\install.ps1 --production
+```
+
+### Running the Application
+
+**Linux/macOS:**
+```bash
+./run.sh --start --development    # Start dev environment
+./run.sh --stop --development     # Stop dev environment
+./run.sh --start --production     # Start production
+./run.sh --stop --production      # Stop production
+./run.sh --status --development   # Check service status
+```
+
+**Windows (PowerShell):**
+```powershell
+.\run.ps1 -start -development
+.\run.ps1 -stop -development
+.\run.ps1 -start -production
+.\run.ps1 -stop -production
+.\run.ps1 -status -development
+```
+
+### Default Login
+
+- **Username:** `admin`
+- **Password:** `admin123`
+
+---
+
+## Development Installation (Manual Steps)
+
+For developers who want to understand each step or customize the setup.
 
 ### Prerequisites
-- **Node.js 20+**
-- **Docker Desktop**
-- Shell: **PowerShell** (Windows) or any terminal (macOS/Linux)
 
-### 1) Install dependencies
-From repo root:
+- **Node.js 20+** — [https://nodejs.org](https://nodejs.org)
+- **Docker Desktop** — For PostgreSQL (and optionally Ansible runner)
+- **npm** — Included with Node.js
+
+### Step 1: Install Dependencies
 
 ```bash
 npm install
 ```
 
-### 2) Start PostgreSQL (Docker)
-From repo root:
+### Step 2: Start PostgreSQL
 
 ```bash
 docker compose up -d segmentra-db
 ```
 
-### 3) Run DB migrations + seed roles
-Set `DATABASE_URL` and run:
+This starts PostgreSQL on port **15432** with persistent storage.
 
-**PowerShell (Windows):**
-```powershell
-$env:DATABASE_URL="postgres://segmentra:segmentra@127.0.0.1:15432/segmentra"
-npm run db:migrate
-npm run db:seed
+### Step 3: Build Workspaces
+
+```bash
+npm run build
 ```
 
-**bash (macOS/Linux):**
+### Step 4: Run Database Migrations
+
+**Linux/macOS:**
 ```bash
 export DATABASE_URL="postgres://segmentra:segmentra@127.0.0.1:15432/segmentra"
 npm run db:migrate
+```
+
+**Windows (PowerShell):**
+```powershell
+$env:DATABASE_URL = "postgres://segmentra:segmentra@127.0.0.1:15432/segmentra"
+npm run db:migrate
+```
+
+### Step 5: Seed Default Data
+
+```bash
 npm run db:seed
 ```
 
-### 4) Start the API
-The API listens on port **8080** by default.
+This creates:
+- The four RBAC roles (viewer, operator, approver, admin)
+- A default admin user: **admin / admin123**
 
-**PowerShell:**
-```powershell
-$env:JWT_SECRET="change-me-to-a-long-random-string"
-# optional, used for UI access without LDAP (see below)
-$env:SEGMENTRA_BOOTSTRAP_TOKEN="dev-bootstrap-token"
+### Step 6: Start the API
 
-npm run build -ws
+**Linux/macOS:**
+```bash
+export DATABASE_URL="postgres://segmentra:segmentra@127.0.0.1:15432/segmentra"
+export JWT_SECRET="change-me-to-a-long-random-string"
 npm run dev -w apps/api
 ```
 
-Verify:
-- `http://localhost:8080/api/health`
+**Windows (PowerShell):**
+```powershell
+$env:DATABASE_URL = "postgres://segmentra:segmentra@127.0.0.1:15432/segmentra"
+$env:JWT_SECRET = "change-me-to-a-long-random-string"
+npm run dev -w apps/api
+```
 
-### 5) Start the UI
-The UI is a Vite dev server (usually port **5173**).
+API listens on **http://localhost:8080**.
+
+### Step 7: Start the UI
 
 ```bash
 cd apps/web
-
-# Optional: only needed if your API is not on localhost:8080
-# PowerShell: $env:VITE_API_URL="http://localhost:8080/api"
-# bash: export VITE_API_URL="http://localhost:8080/api"
-
 npm run dev
 ```
 
-Open the Vite URL printed in the terminal (commonly `http://localhost:5173`).
+UI listens on **http://localhost:5173**.
+
+### Step 8 (Optional): Import Demo Data
+
+```bash
+node demo-data/seed-demo-data.js
+```
+
+This creates 27 hosts, 6 VLANs, 15 tags, 4 firewall policies, 3 SSH credentials, 13 IoT assets, 2 K8s clusters, and 2 topology views. See `demo-data/README.md` for details.
+
+### Step 9 (Optional): Start Ansible Runner
+
+The default deployment executor is **Ansible**, which requires the Ansible runner container. If you plan to test deployments:
+
+```bash
+docker compose up -d segmentra-ansible-runner
+```
+
+Alternatively, switch to **SSH Direct** executor in the UI: **Admin → Deployment Executor → SSH**.
 
 ---
 
-## Access the UI without LDAP (dev bootstrap)
-
-The login page is LDAP-based. For dev/bring-up, you can bypass LDAP by using the **bootstrap admin token** to mint a JWT.
-
-### Step A — Enable bootstrap in the API
-Set `SEGMENTRA_BOOTSTRAP_TOKEN` in the API environment before starting the API:
-
-```powershell
-$env:SEGMENTRA_BOOTSTRAP_TOKEN="dev-bootstrap-token"
-```
-
-### Step B — Create the first admin and get a JWT
-Call the bootstrap endpoint:
-
-**PowerShell:**
-```powershell
-$body = @{ token="dev-bootstrap-token"; username="bootstrap_admin" } | ConvertTo-Json
-Invoke-RestMethod -Method Post `
-  -Uri "http://localhost:8080/api/admin/bootstrap" `
-  -ContentType "application/json" `
-  -Body $body
-```
-
-Copy the returned `token`.
-
-### Step C — Store the token in the browser
-In the UI (browser), open DevTools Console and run:
-
-```js
-localStorage.setItem('segmentra_token', 'PASTE_THE_TOKEN_HERE')
-location.reload()
-```
-
-You should now be authenticated in the UI.
-
-### Important notes
-- `POST /api/admin/bootstrap` is **one-time**: it refuses to run if any users already exist.
-- In production, **disable** bootstrap by **removing** `SEGMENTRA_BOOTSTRAP_TOKEN` after initial setup.
-
----
-
-## Production installation (Docker Compose)
+## Production Installation
 
 ### Prerequisites
-- Linux host (recommended) with **Docker Engine** + **docker compose**
-- Persistent storage for PostgreSQL and deployment bundles
-- Network access from Segmentra to managed hosts (SSH) if you will run deployments
 
-### 1) Create production env vars
-At minimum, set these for the `segmentra-app` container:
-- `DATABASE_URL` (points to `segmentra-db` if using compose DB, or an external Postgres)
-- `JWT_SECRET` (long random secret)
-- `SEGMENTRA_KEK_B64` (recommended: base64 of a **32-byte** key for AES-256-GCM encryption)
-- `BUNDLES_DIR` (inside container; defaults to `./data/bundles` when running locally, but in container we use `/bundles`)
-      - `ANSIBLE_RUNNER_CONTAINER` (default `segmentra-ansible-runner`) — only needed if using Ansible executor
+- **Docker Engine** + **docker compose** (v2)
+- Linux host recommended
+- Network access from Segmentra to managed hosts (SSH, port 22)
 
-**Example (generate a KEK):**
-```bash
-# 32 random bytes -> base64
-python - << 'PY'
-import os, base64
-print(base64.b64encode(os.urandom(32)).decode())
-PY
+### Docker Architecture
+
+Production runs 4 containers:
+
+| Container | Purpose | Port |
+|-----------|---------|------|
+| `segmentra-web` | Nginx serving the React UI + API proxy | **80** |
+| `segmentra-app` | Express API (Node.js) | 8080 (internal) |
+| `segmentra-db` | PostgreSQL 16 | 15432 |
+| `segmentra-ansible-runner` | Ansible playbook executor | — (no port) |
+
+```
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│  Browser     │────►│ segmentra-web│────►│ segmentra-app│
+│              │ :80 │ (nginx)      │/api/│ (Express API)│
+└──────────────┘     └──────────────┘     └──────┬───────┘
+                                                  │
+                                    ┌─────────────┼──────────────┐
+                                    │             │              │
+                              ┌─────▼─────┐ ┌────▼─────┐ ┌─────▼──────┐
+                              │segmentra- │ │segmentra-│ │  Target    │
+                              │db         │ │ansible-  │ │  Hosts     │
+                              │(postgres) │ │runner    │ │  (SSH)     │
+                              └───────────┘ └──────────┘ └────────────┘
 ```
 
-### 2) Start services
-From repo root on the production host:
+### Step 1: Configure Environment
+
+Create a `.env` file in the project root (optional — defaults work for basic setup):
+
+```env
+# Required for production
+JWT_SECRET=your-long-random-secret-here-minimum-32-characters
+
+# Optional: encryption key for SSH keys and secrets (recommended)
+# Generate: python3 -c "import os,base64; print(base64.b64encode(os.urandom(32)).decode())"
+SEGMENTRA_KEK_B64=
+
+# Optional: override default ports
+# API_PORT=8080
+# WEB_PORT=80
+# DB_PORT=15432
+```
+
+### Step 2: Build and Start
 
 ```bash
+docker compose up -d --build
+```
+
+This builds all 4 images and starts the services.
+
+### Step 3: Run Migrations
+
+```bash
+docker compose exec -T segmentra-app sh -c \
+  "DATABASE_URL=postgres://segmentra:segmentra@segmentra-db:5432/segmentra \
+   node node_modules/.bin/node-pg-migrate up -m packages/db/migrations"
+```
+
+### Step 4: Create Admin User
+
+```bash
+docker compose exec -T segmentra-app sh -c \
+  "DATABASE_URL=postgres://segmentra:segmentra@segmentra-db:5432/segmentra \
+   node packages/db/scripts/seed-roles.js"
+```
+
+### Step 5: Access the UI
+
+Open **http://localhost** (port 80) and login with:
+- **Username:** `admin`
+- **Password:** `admin123`
+
+The nginx container proxies `/api/*` requests to the backend automatically.
+
+### Step 6 (Optional): Import Demo Data
+
+```bash
+docker compose exec -T segmentra-app sh -c \
+  "DATABASE_URL=postgres://segmentra:segmentra@segmentra-db:5432/segmentra \
+   node demo-data/seed-demo-data.js"
+```
+
+---
+
+## Managing Services
+
+### Start/Stop
+
+```bash
+# Start all production services
 docker compose up -d
+
+# Stop all services (data persists)
+docker compose stop
+
+# Stop and remove containers (data persists in volumes)
+docker compose down
+
+# Stop and delete all data (destructive!)
+docker compose down -v
 ```
 
-This starts:
-- `segmentra-db` (PostgreSQL) — exposed on host port `15432`
-- `segmentra-ansible-runner` (ansible-core + playbooks) — only needed if using Ansible executor
-- `segmentra-app` (API + UI) — API on port `8080`, UI served from `apps/web/dist`
-
-### 3) Run migrations + seed roles (required)
-Run these on the host (or in a one-off container) with `DATABASE_URL` pointing at the production DB:
+### View Logs
 
 ```bash
-export DATABASE_URL="postgres://segmentra:segmentra@127.0.0.1:15432/segmentra"
-npm install
-npm run db:migrate
-npm run db:seed
+# All services
+docker compose logs -f
+
+# Specific service
+docker compose logs -f segmentra-app
+docker compose logs -f segmentra-web
 ```
 
-> Note: v1 expects migrations to be run out-of-band. If you want “auto-migrate on startup”, we can add it.
+### Database Backup
 
-### 4) First admin / LDAP configuration
-You have two options:
+```bash
+# Backup
+docker compose exec -T segmentra-db pg_dump -U segmentra segmentra > backup.sql
 
-- **Preferred**: configure LDAP settings + AD group mappings (so admins/operators can login normally).
-- **Bootstrap**: temporarily set `SEGMENTRA_BOOTSTRAP_TOKEN`, call `/api/admin/bootstrap`, then remove the token.
+# Restore
+docker compose exec -T segmentra-db psql -U segmentra segmentra < backup.sql
+```
 
-### 5) Accessing the UI in production
-The UI build artifacts are included in the `segmentra-app` container. The API serves the UI at the root path (`/`) and API endpoints under `/api/*`.
+### Reset Database
 
-For production, a reverse proxy (nginx) is recommended:
-- Serve static files from `apps/web/dist`
-- Proxy `/api/*` requests to the API container on port 8080
-
-Alternatively, you can access the UI directly from the API container, but a reverse proxy provides better security and performance.
+```bash
+docker compose down -v
+docker compose up -d segmentra-db
+# Wait a few seconds, then re-run migrations and seed
+```
 
 ---
 
-## Deployment Executors
+## Configuration Reference
 
-Segmentra supports two deployment executors, selectable in Admin → Deployment Executor:
+### Environment Variables
 
-### Ansible (Default, Recommended)
-- Uses Ansible playbook for deployments
-- Better error handling and automatic rollback
-- Parallel execution across hosts
-- Requires Ansible container (`segmentra-ansible-runner`)
-- Uses `become: true` (sudo) for all privileged operations
-- Requires Docker socket mounting (`/var/run/docker.sock`)
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `DATABASE_URL` | Yes | — | PostgreSQL connection string |
+| `JWT_SECRET` | Yes | — | JWT signing secret (min 16 chars) |
+| `PORT` | No | `8080` | API server port |
+| `SEGMENTRA_KEK_B64` | No | — | Base64 key for AES-256-GCM encryption of secrets |
+| `BUNDLES_DIR` | No | `./data/bundles` | Directory for deployment bundles |
+| `ANSIBLE_RUNNER_CONTAINER` | No | `segmentra-ansible-runner` | Docker container name for Ansible executor |
 
-### SSH Direct
-- Lightweight direct SSH/SCP execution
-- No Ansible dependency
-- Requires `ssh` and `scp` commands on the API host (included in container)
-- Uses `sudo` prefix for all privileged operations
-- Runs sequentially (one host at a time)
-- Suitable for simpler environments or when Ansible is not available
+### Deployment Executors
 
-Both executors:
-- Support sudo-capable accounts (not root)
-- Create backups before applying rules
-- Attempt rollback on failure
-- Work with nftables and iptables
+Segmentra supports two executors for deploying firewall rules to hosts:
 
-## Security / operational notes (prod)
+| Executor | Setup | Best For |
+|----------|-------|----------|
+| **Ansible** (default) | Requires `segmentra-ansible-runner` container | Production — parallel execution, better rollback |
+| **SSH Direct** | No extra dependencies | Development — simpler, no Docker-in-Docker |
 
-- **Do not keep** `SEGMENTRA_BOOTSTRAP_TOKEN` enabled after initial setup.
-- Set a strong `JWT_SECRET` and store it securely.
-- Set a stable `SEGMENTRA_KEK_B64` (if you rotate it without re-encrypting, encrypted secrets become unreadable).
-- Back up Postgres volume (`segmentra_pgdata`) regularly.
-- **SSH Credentials**: Use sudo-capable accounts (not root). Most modern Linux distributions disable root SSH login. Ensure passwordless sudo is configured for firewall commands (`nft`, `iptables`, `iptables-restore`).
-- **Ansible Executor**: Requires Docker socket mounting (`/var/run/docker.sock`). Treat the API container as **high trust**.
-- **SSH Direct Executor**: No Docker socket needed, but requires `ssh` and `scp` commands (included in container).
+Switch in: **Admin → Deployment Executor**
+
+For development without Ansible, either:
+- Switch to SSH Direct in the UI
+- Or start the runner: `docker compose up -d segmentra-ansible-runner`
+
+### SSH Credentials
+
+Configure in: **Admin → SSH Credentials**
+
+- Use a **sudo-capable account** (not root)
+- The account needs passwordless sudo for: `nft`, `iptables`, `iptables-save`, `iptables-restore`
+- Private keys are encrypted at rest with AES-256-GCM
 
 ---
 
-## Database Migrations (v2 Capabilities)
+## Security Notes
 
-When upgrading to v2, run migrations to add the new tables:
+- Change the default admin password immediately after first login
+- Set a strong `JWT_SECRET` (32+ random characters)
+- Set `SEGMENTRA_KEK_B64` for secret encryption (SSH keys, LDAP passwords)
+- Back up the PostgreSQL volume (`segmentra_pgdata`) regularly
+- The Ansible executor requires Docker socket access — treat the API container as high-trust
+- In production, consider placing an additional reverse proxy (with TLS) in front of the nginx container
 
-```bash
-npm run db:migrate
+---
+
+## Troubleshooting
+
+### Port Conflicts
+
+If port 80, 8080, or 15432 is already in use, modify `docker-compose.yml`:
+```yaml
+ports:
+  - "3000:80"    # Change 80 to 3000
+  - "9090:8080"  # Change 8080 to 9090
 ```
 
-This will apply migrations 009 through 016:
-- `009_add_tag_rules` — Auto-tagging rule engine
-- `010_add_policy_templates` — Template-driven policies
-- `011_add_visual_topologies` — Visual topology design
-- `012_add_policy_recommendations` — Policy auto-recommendations
-- `013_add_integrations` — SIEM/SOAR/Vulnerability/Threat Intel framework
-- `014_add_policy_test_sessions` — On-device policy testing
-- `015_add_kubernetes_clusters` — Kubernetes microsegmentation
-- `016_add_ot_iot` — OT/IoT asset management and flow collection
-- `017_add_policy_expiry` — Time-limited deployments with optional expiry
-- `018_add_notifications` — Notification channels, rules, and delivery log
+### Database Connection Errors
 
-All migrations are additive (new tables and columns only) — no existing data is modified.
+Verify PostgreSQL is running:
+```bash
+docker compose ps segmentra-db
+docker compose logs segmentra-db
+```
 
-## New Navigation Links
+### Deployment Failures
 
-After upgrading, the sidebar will show 6 new pages:
-- **Templates** — Policy template management
-- **Topology** — Visual policy design
-- **Policy Testing** — Pre-enforcement validation
-- **Integrations** — External tool connections
-- **Kubernetes** — K8s cluster and NetworkPolicy management
-- **OT/IoT** — IoT asset inventory and enforcement
-- **Security Audit** — Excessive rules detection and compliance risk scanning
-- **Notifications** — Alert channel management and event subscriptions
-
-## Kubernetes Setup (Optional)
-
-To use Kubernetes microsegmentation:
-1. Go to **Kubernetes** in the sidebar
-2. Add a cluster with its API server URL and authentication method
-3. Store credentials (kubeconfig/service account token) in SSH Credentials / Secrets
-4. Use **Sync** to discover workloads
-5. Map K8s labels to Segmentra tags for unified policy management
-
-## OT/IoT Setup (Optional)
-
-To use OT/IoT microsegmentation:
-1. Go to **OT/IoT** in the sidebar
-2. Add IoT assets manually or via bulk import
-3. (Optional) Configure flow collectors for passive traffic discovery
-4. Configure enforcement points (managed switches/gateways) with SSH credentials
-5. Use **Baseline** to snapshot current traffic as the allowed baseline
-
-
+1. Check SSH credentials are configured: **Admin → SSH Credentials**
+2. Verify executor setting: **Admin → Deployment Executor**
+3. If using Ansible, verify runner is running: `docker compose ps segmentra-ansible-runner`
+4. Check execution logs in: **Deployments → (select deployment) → View Logs**

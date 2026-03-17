@@ -351,8 +351,8 @@ hostsRouter.post('/bulk/delete', requireRole('operator', 'admin'), async (req, r
 
   await pool.query(
     `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
-     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
-    [req.auth!.username, 'HOST_BULK_DELETE', 'host', 'bulk', JSON.stringify({ count: rowCount, hostIds: parsed.data.hostIds })]
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, uuid_generate_v4(), $4)`,
+    [req.auth!.username, 'HOST_BULK_DELETE', 'host', JSON.stringify({ count: rowCount, hostIds: parsed.data.hostIds })]
   );
 
   res.json({ ok: true, deleted: rowCount });
@@ -371,8 +371,8 @@ hostsRouter.post('/bulk/assign-vlan', requireRole('operator', 'admin'), async (r
 
   await pool.query(
     `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
-     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
-    [req.auth!.username, 'HOST_BULK_ASSIGN_VLAN', 'host', 'bulk', JSON.stringify({ count: rowCount, vlanId: parsed.data.vlanId })]
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, uuid_generate_v4(), $4)`,
+    [req.auth!.username, 'HOST_BULK_ASSIGN_VLAN', 'host', JSON.stringify({ count: rowCount, vlanId: parsed.data.vlanId })]
   );
 
   res.json({ ok: true, updated: rowCount });
@@ -399,8 +399,8 @@ hostsRouter.post('/bulk/assign-tag', requireRole('operator', 'admin'), async (re
 
     await pool.query(
       `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
-       VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
-      [req.auth!.username, 'HOST_BULK_ASSIGN_TAG', 'host', 'bulk', JSON.stringify({ count: added, tagId: parsed.data.tagId })]
+       VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, uuid_generate_v4(), $4)`,
+      [req.auth!.username, 'HOST_BULK_ASSIGN_TAG', 'host', JSON.stringify({ count: added, tagId: parsed.data.tagId })]
     );
 
     res.json({ ok: true, added });
@@ -585,8 +585,8 @@ hostsRouter.post('/bulk/import', requireRole('operator', 'admin'), async (req, r
 
     await pool.query(
       `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
-       VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
-      [req.auth!.username, 'HOST_BULK_IMPORT', 'host', 'bulk', JSON.stringify({ imported, failed })]
+       VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, uuid_generate_v4(), $4)`,
+      [req.auth!.username, 'HOST_BULK_IMPORT', 'host', JSON.stringify({ imported, failed })]
     );
 
     res.json({
@@ -617,8 +617,8 @@ hostsRouter.post('/bulk/set-enabled', requireRole('operator', 'admin'), async (r
 
   await pool.query(
     `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
-     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
-    [req.auth!.username, 'HOST_BULK_SET_ENABLED', 'host', 'bulk', JSON.stringify({ count: rowCount, enabled: parsed.data.enabled })]
+     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, uuid_generate_v4(), $4)`,
+    [req.auth!.username, 'HOST_BULK_SET_ENABLED', 'host', JSON.stringify({ count: rowCount, enabled: parsed.data.enabled })]
   );
 
   res.json({ ok: true, updated: rowCount });

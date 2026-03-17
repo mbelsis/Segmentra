@@ -41,48 +41,49 @@ export function LoginPage() {
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
-      background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+      background: 'linear-gradient(145deg, #3d2e1e 0%, #5c4633 40%, #78644e 100%)',
       padding: '20px',
       position: 'relative',
       overflow: 'hidden'
     }}>
-      {/* Decorative background elements */}
+      {/* Subtle texture overlay */}
       <div style={{
         position: 'absolute',
-        top: '-50%',
-        right: '-50%',
-        width: '200%',
-        height: '200%',
-        background: 'radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%)',
-        animation: 'pulse 20s ease-in-out infinite'
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        background: 'radial-gradient(ellipse at 30% 20%, rgba(139, 105, 20, 0.15) 0%, transparent 60%), radial-gradient(ellipse at 70% 80%, rgba(90, 122, 58, 0.1) 0%, transparent 50%)',
+        pointerEvents: 'none'
       }} />
-      
+
       <div style={{
         width: '100%',
         maxWidth: '440px',
-        background: 'white',
-        borderRadius: '20px',
-        boxShadow: '0 20px 60px rgba(0, 0, 0, 0.3)',
+        background: '#fdfcf9',
+        borderRadius: '16px',
+        boxShadow: '0 24px 80px rgba(41, 32, 24, 0.5), 0 8px 24px rgba(41, 32, 24, 0.3)',
         padding: '48px',
         position: 'relative',
-        zIndex: 1
+        zIndex: 1,
+        border: '1px solid rgba(232, 224, 212, 0.5)'
       }}>
         {/* Logo */}
         <div style={{ textAlign: 'center', marginBottom: '32px' }}>
-          <img 
-            src="/segmentra.png" 
-            alt="Segmentra" 
-            style={{ 
-              maxWidth: '180px', 
+          <img
+            src="/segmentra.png"
+            alt="Segmentra"
+            style={{
+              maxWidth: '240px',
               height: 'auto',
               marginBottom: '8px'
-            }} 
+            }}
           />
           <h1 style={{
             margin: '16px 0 8px 0',
-            fontSize: '28px',
+            fontSize: '26px',
             fontWeight: '700',
-            color: '#1a1a1a',
+            color: '#292018',
             letterSpacing: '-0.5px'
           }}>
             Welcome Back
@@ -90,7 +91,7 @@ export function LoginPage() {
           <p style={{
             margin: 0,
             fontSize: '14px',
-            color: '#666',
+            color: '#78644e',
             fontWeight: '400'
           }}>
             Sign in to continue to Segmentra
@@ -103,9 +104,10 @@ export function LoginPage() {
             <label style={{
               display: 'block',
               marginBottom: '8px',
-              fontSize: '14px',
+              fontSize: '13px',
               fontWeight: '600',
-              color: '#333'
+              color: '#5c4633',
+              letterSpacing: '0.01em'
             }}>
               Username
             </label>
@@ -118,21 +120,23 @@ export function LoginPage() {
               disabled={loading}
               style={{
                 width: '100%',
-                padding: '14px 16px',
-                fontSize: '15px',
-                border: '2px solid #e0e0e0',
+                padding: '12px 16px',
+                fontSize: '14px',
+                border: '1.5px solid #d4c9b8',
                 borderRadius: '10px',
-                transition: 'all 0.2s',
+                transition: 'all 0.15s',
                 boxSizing: 'border-box',
                 outline: 'none',
-                fontFamily: 'inherit'
+                fontFamily: 'inherit',
+                background: '#fff',
+                color: '#3d2e1e'
               }}
               onFocus={(e) => {
-                e.target.style.borderColor = '#667eea';
-                e.target.style.boxShadow = '0 0 0 3px rgba(102, 126, 234, 0.1)';
+                e.target.style.borderColor = '#8b6914';
+                e.target.style.boxShadow = '0 0 0 3px rgba(139, 105, 20, 0.12)';
               }}
               onBlur={(e) => {
-                e.target.style.borderColor = '#e0e0e0';
+                e.target.style.borderColor = '#d4c9b8';
                 e.target.style.boxShadow = 'none';
               }}
             />
@@ -142,9 +146,10 @@ export function LoginPage() {
             <label style={{
               display: 'block',
               marginBottom: '8px',
-              fontSize: '14px',
+              fontSize: '13px',
               fontWeight: '600',
-              color: '#333'
+              color: '#5c4633',
+              letterSpacing: '0.01em'
             }}>
               Password
             </label>
@@ -157,21 +162,23 @@ export function LoginPage() {
               disabled={loading}
               style={{
                 width: '100%',
-                padding: '14px 16px',
-                fontSize: '15px',
-                border: '2px solid #e0e0e0',
+                padding: '12px 16px',
+                fontSize: '14px',
+                border: '1.5px solid #d4c9b8',
                 borderRadius: '10px',
-                transition: 'all 0.2s',
+                transition: 'all 0.15s',
                 boxSizing: 'border-box',
                 outline: 'none',
-                fontFamily: 'inherit'
+                fontFamily: 'inherit',
+                background: '#fff',
+                color: '#3d2e1e'
               }}
               onFocus={(e) => {
-                e.target.style.borderColor = '#667eea';
-                e.target.style.boxShadow = '0 0 0 3px rgba(102, 126, 234, 0.1)';
+                e.target.style.borderColor = '#8b6914';
+                e.target.style.boxShadow = '0 0 0 3px rgba(139, 105, 20, 0.12)';
               }}
               onBlur={(e) => {
-                e.target.style.borderColor = '#e0e0e0';
+                e.target.style.borderColor = '#d4c9b8';
                 e.target.style.boxShadow = 'none';
               }}
             />
@@ -180,17 +187,14 @@ export function LoginPage() {
           {error && (
             <div style={{
               padding: '12px 16px',
-              background: '#fee',
-              border: '1px solid #fcc',
+              background: '#faf0ee',
+              border: '1px solid #e8c4bf',
               borderRadius: '8px',
-              color: '#c33',
-              fontSize: '14px',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px'
+              color: '#a63d2f',
+              fontSize: '13.5px',
+              borderLeft: '4px solid #a63d2f'
             }}>
-              <span>⚠️</span>
-              <span>{error}</span>
+              {error}
             </div>
           )}
 
@@ -199,28 +203,30 @@ export function LoginPage() {
             disabled={loading || !username || !password}
             style={{
               width: '100%',
-              padding: '14px',
-              fontSize: '16px',
+              padding: '13px',
+              fontSize: '15px',
               fontWeight: '600',
-              color: 'white',
-              background: loading ? '#999' : 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+              color: '#fdfcf9',
+              background: loading ? '#b8a890' : '#8b6914',
               border: 'none',
               borderRadius: '10px',
               cursor: loading || !username || !password ? 'not-allowed' : 'pointer',
-              transition: 'all 0.2s',
-              boxShadow: loading || !username || !password ? 'none' : '0 4px 12px rgba(102, 126, 234, 0.4)',
-              opacity: loading || !username || !password ? 0.6 : 1
+              transition: 'all 0.15s',
+              boxShadow: loading || !username || !password ? 'none' : '0 4px 12px rgba(139, 105, 20, 0.3)',
+              opacity: loading || !username || !password ? 0.6 : 1,
+              fontFamily: 'inherit',
+              letterSpacing: '0.01em'
             }}
             onMouseEnter={(e) => {
               if (!loading && username && password) {
-                e.currentTarget.style.transform = 'translateY(-1px)';
-                e.currentTarget.style.boxShadow = '0 6px 16px rgba(102, 126, 234, 0.5)';
+                e.currentTarget.style.background = '#725710';
+                e.currentTarget.style.boxShadow = '0 6px 20px rgba(139, 105, 20, 0.4)';
               }
             }}
             onMouseLeave={(e) => {
               if (!loading && username && password) {
-                e.currentTarget.style.transform = 'translateY(0)';
-                e.currentTarget.style.boxShadow = '0 4px 12px rgba(102, 126, 234, 0.4)';
+                e.currentTarget.style.background = '#8b6914';
+                e.currentTarget.style.boxShadow = '0 4px 12px rgba(139, 105, 20, 0.3)';
               }
             }}
           >
@@ -228,25 +234,25 @@ export function LoginPage() {
           </button>
         </form>
 
-        {/* Footer links */}
+        {/* Footer */}
         <div style={{
-          marginTop: '24px',
-          paddingTop: '24px',
-          borderTop: '1px solid #e0e0e0',
+          marginTop: '28px',
+          paddingTop: '20px',
+          borderTop: '1px solid #e8e0d4',
           fontSize: '12px',
-          color: '#666',
+          color: '#97846c',
           textAlign: 'center'
         }}>
           <div style={{ marginBottom: '8px' }}>
             Already have a token?{' '}
-            <a 
-              href="/" 
-              onClick={(e) => { 
-                e.preventDefault(); 
-                navigate('/'); 
+            <a
+              href="/"
+              onClick={(e) => {
+                e.preventDefault();
+                navigate('/');
               }}
               style={{
-                color: '#667eea',
+                color: '#8b6914',
                 textDecoration: 'none',
                 fontWeight: '600'
               }}
@@ -260,27 +266,19 @@ export function LoginPage() {
               Go to Dashboard
             </a>
           </div>
-          <div style={{ fontSize: '11px', opacity: 0.7 }}>
-            API: <code style={{ 
-              background: '#f5f5f5', 
-              padding: '2px 6px', 
+          <div style={{ fontSize: '11px', color: '#b8a890' }}>
+            API: <code style={{
+              background: '#f0ebe2',
+              padding: '2px 6px',
               borderRadius: '4px',
-              fontSize: '11px'
+              fontSize: '11px',
+              color: '#78644e'
             }}>
               {(import.meta as any).env?.VITE_API_URL ?? 'http://localhost:8080/api'}
             </code>
           </div>
         </div>
       </div>
-
-      <style>{`
-        @keyframes pulse {
-          0%, 100% { transform: scale(1) rotate(0deg); }
-          50% { transform: scale(1.1) rotate(180deg); }
-        }
-      `}</style>
     </div>
   );
 }
-
-

@@ -33,7 +33,7 @@ for (const r of roles) {
 // Create default admin/admin user if it doesn't exist
 const adminCheck = await client.query('SELECT id FROM users WHERE username=$1', ['admin']);
 if (adminCheck.rows.length === 0) {
-  const passwordHash = await bcrypt.hash('admin', 10);
+  const passwordHash = await bcrypt.hash('admin123', 10);
   const adminRole = await client.query('SELECT id FROM roles WHERE name=$1', ['admin']);
   
   if (adminRole.rows.length > 0) {
@@ -51,9 +51,26 @@ if (adminCheck.rows.length === 0) {
     );
     
     // eslint-disable-next-line no-console
-    console.log('Created default admin user (username: admin, password: admin)');
+    console.log('Created default admin user (username: admin, password: admin123)');
   }
 }
+
+// Seed system tags (protected from deletion)
+const systemTags = [
+  { name: 'iot-gateway', description: 'IoT/OT gateway firewall hosts' },
+  { name: 'bastion', description: 'SSH jump hosts for secure access' },
+];
+
+for (const t of systemTags) {
+  await client.query(
+    `INSERT INTO tags (name, description, is_system)
+     VALUES ($1, $2, true)
+     ON CONFLICT (name) DO UPDATE SET is_system = true, description = EXCLUDED.description`,
+    [t.name, t.description]
+  );
+}
+// eslint-disable-next-line no-console
+console.log('Seeded system tags: ' + systemTags.map(t => t.name).join(', '));
 
 await client.end();
 

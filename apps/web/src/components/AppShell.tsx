@@ -2,36 +2,63 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 
 import { clearToken } from '../lib/auth';
 
+const sectionLabel = (text: string) => (
+  <div style={{
+    fontSize: '10px',
+    fontWeight: 700,
+    textTransform: 'uppercase',
+    letterSpacing: '0.06em',
+    color: '#97846c',
+    padding: '12px 12px 4px',
+    marginTop: 4,
+    borderTop: '1px solid #e8e0d4',
+  }}>
+    {text}
+  </div>
+);
+
 export function AppShell() {
   const navigate = useNavigate();
   return (
     <div className="appShell">
       <nav className="nav">
-        <div style={{ marginBottom: 16, textAlign: 'center' }}>
-          <img src="/segmentra.png" alt="Segmentra" style={{ maxWidth: '115%', height: 'auto', marginBottom: 8, marginLeft: '-7.5%' }} />
+        <div style={{ marginBottom: 12, textAlign: 'center' }}>
+          <img src="/segmentra.png" alt="Segmentra" style={{ maxWidth: '115%', height: 'auto', marginBottom: 4, marginLeft: '-7.5%' }} />
         </div>
-        <NavLink to="/" end>
-          Dashboard
-        </NavLink>
-        <NavLink to="/inventory">Inventory</NavLink>
+
+        <NavLink to="/" end>Dashboard</NavLink>
+
+        {sectionLabel('Policies')}
         <NavLink to="/policies">Policy Sets</NavLink>
         <NavLink to="/policy-templates">Templates</NavLink>
-        <NavLink to="/topology">Topology</NavLink>
         <NavLink to="/approvals">Approvals</NavLink>
         <NavLink to="/deployments">Deployments</NavLink>
-        <NavLink to="/policy-testing">Policy Testing</NavLink>
+
+        {sectionLabel('Infrastructure')}
+        <NavLink to="/inventory">Inventory</NavLink>
+        <NavLink to="/topology">Topology</NavLink>
+
+        {sectionLabel('Analysis')}
         <NavLink to="/troubleshoot">Troubleshoot</NavLink>
-        <NavLink to="/integrations">Integrations</NavLink>
+        <NavLink to="/policy-testing">Policy Testing</NavLink>
+
+        {sectionLabel('Extended')}
         <NavLink to="/kubernetes">Kubernetes</NavLink>
         <NavLink to="/iot">OT/IoT</NavLink>
+
+        {sectionLabel('Compliance')}
         <NavLink to="/security-audit">Security Audit</NavLink>
+
+        {sectionLabel('Settings')}
+        <NavLink to="/integrations">Integrations</NavLink>
         <NavLink to="/notifications">Notifications</NavLink>
         <NavLink to="/audit">Audit Log</NavLink>
         <NavLink to="/admin">Admin</NavLink>
-        <div style={{ 
-          marginTop: 'auto', 
-          paddingTop: 16, 
-          borderTop: '1px solid #e0e0e0'
+
+        <div style={{
+          marginTop: 'auto',
+          paddingTop: 16,
+          borderTop: '1px solid #e8e0d4'
         }}>
           <div style={{ marginBottom: 12 }}>
             <button
@@ -43,10 +70,10 @@ export function AppShell() {
               Logout
             </button>
           </div>
-          <div style={{ 
-            textAlign: 'center', 
-            fontSize: '0.75em', 
-            color: '#666'
+          <div style={{
+            textAlign: 'center',
+            fontSize: '0.7em',
+            color: '#97846c'
           }}>
             © Belsis Meletis
           </div>
@@ -58,6 +85,3 @@ export function AppShell() {
     </div>
   );
 }
-
-
-

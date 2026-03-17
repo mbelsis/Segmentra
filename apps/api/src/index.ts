@@ -159,31 +159,75 @@ app.listen(env.PORT, () => {
       );
 
       for (const dep of expired) {
-        // Mark as expired
-        await pool.query(`UPDATE deployments SET expired = true WHERE id = $1`, [dep.id]);
+        const expiryAction: string = dep.expiry_action || 'NOTIFY_ONLY';
+
+        // Mark as expired and update status to EXPIRED
+        await pool.query(
+          `UPDATE deployments SET expired = true, status = 'EXPIRED' WHERE id = $1`,
+          [dep.id]
+        );
+
+        // Build notification subject and body based on expiry action
+        let notificationSubject: string;
+        let notificationBody: Record<string, unknown>;
+
+        if (expiryAction === 'REMOVE') {
+          notificationSubject = `POLICY EXPIRED - Manual rollback required: ${dep.policy_set_name} v${dep.version_number}`;
+          notificationBody = {
+            deploymentId: dep.id,
+            policySetName: dep.policy_set_name,
+            versionNumber: dep.version_number,
+            expiryAction,
+            expiredAt: dep.expires_at,
+            actionRequired: 'The deployed firewall rules should be manually removed from all target hosts. Full automated rollback is planned for a future release.',
+          };
+          // eslint-disable-next-line no-console
+          console.log(`[Policy Expiry] Deployment ${dep.id} expired with REMOVE action — manual rollback required (${dep.policy_set_name} v${dep.version_number})`);
+        } else if (expiryAction === 'REVERT') {
+          notificationSubject = `POLICY EXPIRED - Previous version should be redeployed: ${dep.policy_set_name} v${dep.version_number}`;
+          notificationBody = {
+            deploymentId: dep.id,
+            policySetName: dep.policy_set_name,
+            versionNumber: dep.version_number,
+            expiryAction,
+            expiredAt: dep.expires_at,
+            actionRequired: 'The previous policy version should be manually redeployed to all target hosts. Full automated revert is planned for a future release.',
+          };
+          // eslint-disable-next-line no-console
+          console.log(`[Policy Expiry] Deployment ${dep.id} expired with REVERT action — previous version should be redeployed (${dep.policy_set_name} v${dep.version_number})`);
+        } else {
+          // NOTIFY_ONLY or any other value
+          notificationSubject = `Policy expired: ${dep.policy_set_name} v${dep.version_number}`;
+          notificationBody = {
+            deploymentId: dep.id,
+            policySetName: dep.policy_set_name,
+            versionNumber: dep.version_number,
+            expiryAction,
+            expiredAt: dep.expires_at,
+          };
+          // eslint-disable-next-line no-console
+          console.log(`[Policy Expiry] Deployment ${dep.id} expired (${dep.policy_set_name} v${dep.version_number}, action: ${expiryAction})`);
+        }
 
         // Send notification
         await sendNotification({
           eventType: 'POLICY_EXPIRED',
-          subject: `Policy expired: ${dep.policy_set_name} v${dep.version_number}`,
-          body: {
-            deploymentId: dep.id,
-            policySetName: dep.policy_set_name,
-            versionNumber: dep.version_number,
-            expiryAction: dep.expiry_action,
-            expiredAt: dep.expires_at,
-          },
+          subject: notificationSubject,
+          body: notificationBody,
         });
 
-        // Log audit event
+        // Log audit event with action-specific metadata
         await pool.query(
           `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
            VALUES (NULL, 'POLICY_EXPIRED', 'deployment', $1, $2)`,
-          [dep.id, JSON.stringify({ policySetName: dep.policy_set_name, versionNumber: dep.version_number, expiryAction: dep.expiry_action })]
+          [dep.id, JSON.stringify({
+            policySetName: dep.policy_set_name,
+            versionNumber: dep.version_number,
+            expiryAction,
+            ...(expiryAction === 'REMOVE' ? { actionRequired: 'Manual rollback required' } : {}),
+            ...(expiryAction === 'REVERT' ? { actionRequired: 'Previous version should be redeployed' } : {}),
+          })]
         );
-
-        // eslint-disable-next-line no-console
-        console.log(`[Policy Expiry] Deployment ${dep.id} expired (${dep.policy_set_name} v${dep.version_number}, action: ${dep.expiry_action})`);
       }
 
       // Send "expiring soon" warnings (24 hours before expiry)

@@ -38,6 +38,13 @@ tagsRouter.post('/', requireRole('operator', 'admin'), async (req, res) => {
 tagsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = tagSchema.partial().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
+
+  // Prevent renaming system tags
+  const { rows: existing } = await pool.query(`SELECT is_system, name FROM tags WHERE id=$1`, [req.params.id]);
+  if (existing[0]?.is_system && parsed.data.name && parsed.data.name !== existing[0].name) {
+    return res.status(400).json({ error: 'cannot_rename_system_tag', message: `The tag "${existing[0].name}" is a system tag and cannot be renamed.` });
+  }
+
   const { rows } = await pool.query(
     `UPDATE tags
      SET name = COALESCE($2, name),
@@ -58,6 +65,12 @@ tagsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
 });
 
 tagsRouter.delete('/:id', requireRole('operator', 'admin'), async (req, res) => {
+  // Prevent deleting system tags
+  const { rows: existing } = await pool.query(`SELECT is_system, name FROM tags WHERE id=$1`, [req.params.id]);
+  if (existing[0]?.is_system) {
+    return res.status(400).json({ error: 'cannot_delete_system_tag', message: `The tag "${existing[0].name}" is a system tag required for platform operation and cannot be deleted.` });
+  }
+
   const { rowCount } = await pool.query(`DELETE FROM tags WHERE id=$1`, [req.params.id]);
   if (!rowCount) return res.status(404).json({ error: 'not_found' });
 

@@ -135,6 +135,47 @@ async function sendWebhook(config: any, payload: NotificationPayload): Promise<v
   if (!resp.ok) throw new Error(`Webhook returned ${resp.status}`);
 }
 
+/**
+ * Send a test notification directly to a specific channel, bypassing rule matching.
+ * This actually tests the channel's connectivity and configuration.
+ */
+export async function sendTestToChannel(channel: { id: string; type: string; config: any; name: string }): Promise<void> {
+  const payload: NotificationPayload = {
+    eventType: 'DEPLOYMENT_COMPLETED',
+    subject: 'Segmentra Test Notification',
+    body: {
+      message: 'This is a test notification from Segmentra.',
+      channel: channel.name,
+      timestamp: new Date().toISOString(),
+    },
+  };
+
+  const logId = await createLogEntry(channel.id, payload);
+
+  try {
+    if (channel.type === 'slack') {
+      await sendSlack(channel.config, payload);
+    } else if (channel.type === 'email') {
+      await sendEmail(channel.config, payload);
+    } else if (channel.type === 'webhook') {
+      await sendWebhook(channel.config, payload);
+    } else {
+      throw new Error(`Unknown channel type: ${channel.type}`);
+    }
+
+    await pool.query(
+      `UPDATE notification_log SET status = 'SENT', sent_at = now() WHERE id = $1`,
+      [logId]
+    );
+  } catch (e: any) {
+    await pool.query(
+      `UPDATE notification_log SET status = 'FAILED', error_message = $2 WHERE id = $1`,
+      [logId, e.message]
+    );
+    throw e; // Re-throw so caller knows it failed
+  }
+}
+
 function formatBody(body: Record<string, any>): string {
   return Object.entries(body)
     .filter(([, v]) => v !== null && v !== undefined)

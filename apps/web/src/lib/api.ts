@@ -478,15 +478,16 @@ export const api = {
 
   // === Capability 8: OT/IoT ===
   iot: {
-    assets: (params?: { assetType?: string; zone?: string; vlanId?: string }) => {
+    assets: (params?: { assetType?: string; zone?: string; vlanId?: string; gatewayId?: string }) => {
       const q = new URLSearchParams();
       if (params?.assetType) q.append('assetType', params.assetType);
       if (params?.zone) q.append('zone', params.zone);
       if (params?.vlanId) q.append('vlanId', params.vlanId);
+      if (params?.gatewayId) q.append('gatewayId', params.gatewayId);
       const qs = q.toString();
       return request<{ assets: any[] }>(`/iot-assets${qs ? `?${qs}` : ''}`);
     },
-    asset: (id: string) => request<{ asset: any; observedFlows: any[]; tags: any[] }>(`/iot-assets/${id}`),
+    asset: (id: string) => request<{ asset: any; gateways: any[]; observedFlows: any[]; tags: any[] }>(`/iot-assets/${id}`),
     createAsset: (b: any) => request<{ asset: any }>('/iot-assets', { method: 'POST', body: JSON.stringify(b) }),
     updateAsset: (id: string, b: any) => request<{ asset: any }>(`/iot-assets/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
     deleteAsset: (id: string) => request<{ ok: boolean }>(`/iot-assets/${id}`, { method: 'DELETE' }),
@@ -495,21 +496,11 @@ export const api = {
     removeTag: (assetId: string, tagId: string) => request<{ ok: boolean }>(`/iot-assets/${assetId}/tags/${tagId}`, { method: 'DELETE' }),
     flows: (assetId: string) => request<{ flows: any[] }>(`/iot-assets/${assetId}/flows`),
     baseline: (assetId: string) => request<{ ok: boolean; baselineFlows: number }>(`/iot-assets/${assetId}/baseline`, { method: 'POST' }),
-    // Flow Collectors
-    collectors: () => request<{ collectors: any[] }>('/flow-collectors'),
-    collector: (id: string) => request<{ collector: any; recentFlows: any[] }>(`/flow-collectors/${id}`),
-    createCollector: (b: any) => request<{ collector: any }>('/flow-collectors', { method: 'POST', body: JSON.stringify(b) }),
-    updateCollector: (id: string, b: any) => request<{ collector: any }>(`/flow-collectors/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
-    deleteCollector: (id: string) => request<{ ok: boolean }>(`/flow-collectors/${id}`, { method: 'DELETE' }),
-    collectorFlows: (id: string) => request<{ flows: any[] }>(`/flow-collectors/${id}/flows`),
-    // Enforcement Points
-    enforcementPoints: () => request<{ enforcementPoints: any[] }>('/enforcement-points'),
-    enforcementPoint: (id: string) => request<{ enforcementPoint: any; acls: any[] }>(`/enforcement-points/${id}`),
-    createEnforcementPoint: (b: any) => request<{ enforcementPoint: any }>('/enforcement-points', { method: 'POST', body: JSON.stringify(b) }),
-    updateEnforcementPoint: (id: string, b: any) => request<{ enforcementPoint: any }>(`/enforcement-points/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
-    deleteEnforcementPoint: (id: string) => request<{ ok: boolean }>(`/enforcement-points/${id}`, { method: 'DELETE' }),
-    deployAcl: (epId: string, b: any) => request<{ acl: any }>(`/enforcement-points/${epId}/deploy-acl`, { method: 'POST', body: JSON.stringify(b) }),
-    listAcls: (epId: string) => request<{ acls: any[] }>(`/enforcement-points/${epId}/acls`),
+    assignGateways: (assetId: string, gatewayIds: string[]) => request<{ ok: boolean }>(`/iot-assets/${assetId}/gateways`, { method: 'POST', body: JSON.stringify({ gatewayIds }) }),
+    removeGateway: (assetId: string, hostId: string) => request<{ ok: boolean }>(`/iot-assets/${assetId}/gateways/${hostId}`, { method: 'DELETE' }),
+    // Gateway views
+    gateways: () => request<{ gateways: any[] }>('/iot-assets/gateways/list'),
+    gateway: (hostId: string) => request<{ gateway: any; protectedAssets: any[]; recentDeployments: any[] }>(`/iot-assets/gateways/${hostId}`),
   },
 
   // === Notifications ===

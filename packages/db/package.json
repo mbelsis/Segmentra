@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "echo \"@segmentra/db has no TS build\"",
+    "lint": "echo \"@segmentra/db has no lint\"",
     "migrate": "node-pg-migrate --help",
     "migrate:up": "node-pg-migrate up -m ./migrations",
     "migrate:down": "node-pg-migrate down -m ./migrations",

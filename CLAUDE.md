@@ -82,4 +82,4 @@ Four roles: `viewer`, `operator`, `approver`, `admin`. Policy versions follow a 
 - API: http://localhost:8080
 - Web UI: http://localhost:5173
 - PostgreSQL: localhost:15432
-- Default credentials: admin/admin (auto-created by start script)
+- Default credentials: admin/admin123 (auto-created by start script)

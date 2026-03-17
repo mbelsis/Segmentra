@@ -16,7 +16,7 @@ securityAuditRouter.get('/scan', async (req, res) => {
     // Log audit event
     await pool.query(
       `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
-       VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), 'SECURITY_AUDIT_RUN', 'security_audit', 'scan', $2)`,
+       VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), 'SECURITY_AUDIT_RUN', 'security_audit', uuid_generate_v4(), $2)`,
       [req.auth!.username, JSON.stringify({ summary: result.summary })]
     );
 
