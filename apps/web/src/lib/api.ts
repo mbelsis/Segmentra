@@ -543,7 +543,9 @@ export const api = {
 
   // === Security Audit ===
   securityAudit: {
-    scan: () => request<{ findings: any[]; summary: any }>('/security-audit/scan'),
+    scan: () => request<{ findings: any[]; summary: any; scanId: string; scannedAt: string }>('/security-audit/scan'),
+    latest: () => request<{ findings: any[]; summary: any; scanId?: string; scannedAt?: string; triggeredBy?: string }>('/security-audit/latest'),
+    history: () => request<{ history: any[] }>('/security-audit/history'),
     summary: () => request<{ summary: any }>('/security-audit/summary'),
   },
 };

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { api } from '../lib/api';
 
 const SEVERITY_COLORS: Record<string, string> = {
@@ -19,8 +19,19 @@ const SEVERITY_BG: Record<string, string> = {
 export function SecurityAuditPage() {
   const [result, setResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
+  const [initialLoading, setInitialLoading] = useState(true);
   const [error, setError] = useState('');
   const [filterSeverity, setFilterSeverity] = useState('');
+
+  // Load latest scan results on mount
+  useEffect(() => {
+    api.securityAudit.latest()
+      .then(res => {
+        if (res.scannedAt) setResult(res);
+      })
+      .catch(() => {})
+      .finally(() => setInitialLoading(false));
+  }, []);
 
   const runScan = async () => {
     setLoading(true);
@@ -44,11 +55,19 @@ export function SecurityAuditPage() {
 
       {error && <div style={{ color: '#a63d2f', marginBottom: 12, padding: 10, background: '#faf0ee', borderRadius: 8, borderLeft: '4px solid #a63d2f' }}>{error}</div>}
 
-      <div style={{ marginBottom: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 20 }}>
         <button onClick={runScan} disabled={loading} className="btn-primary" style={{ minWidth: 160 }}>
-          {loading ? 'Scanning...' : 'Run Security Scan'}
+          {loading ? 'Scanning...' : result ? 'Run New Scan' : 'Run Security Scan'}
         </button>
+        {result?.scannedAt && (
+          <span style={{ fontSize: '13px', color: '#78644e' }}>
+            Last scan: {new Date(result.scannedAt).toLocaleString()}
+            {result.triggeredBy && <span> by <strong>{result.triggeredBy}</strong></span>}
+          </span>
+        )}
       </div>
+
+      {initialLoading && <div style={{ color: '#97846c', padding: 20 }}>Loading last scan results...</div>}
 
       {result && (
         <>
@@ -133,7 +152,7 @@ export function SecurityAuditPage() {
         </>
       )}
 
-      {!result && !loading && (
+      {!result && !loading && !initialLoading && (
         <div style={{ textAlign: 'center', padding: '48px 24px', background: '#f7f4ef', borderRadius: 10, border: '1px solid #e8e0d4' }}>
           <p style={{ color: '#5c4633', fontSize: '14px', marginBottom: 16 }}>
             Click <strong>Run Security Scan</strong> to analyze all deployed policies for excessive permissions and compliance risks.
