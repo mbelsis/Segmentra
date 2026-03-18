@@ -148,6 +148,59 @@ dashboardRouter.get('/dashboard/stats', async (_req, res) => {
     running: parseInt(r.running || 0, 10)
   }));
 
+  // === Additional stats ===
+
+  // Total managed hosts
+  const hostsRes = await pool.query(`SELECT COUNT(*)::int as total, COUNT(*) FILTER (WHERE enabled = true)::int as enabled FROM hosts`);
+  const totalHosts = hostsRes.rows[0].total;
+  const enabledHosts = hostsRes.rows[0].enabled;
+
+  // Total IoT assets
+  const iotRes = await pool.query(`SELECT COUNT(*)::int as total FROM iot_assets`);
+  const totalIotAssets = iotRes.rows[0].total;
+
+  // Total policy sets and versions
+  const policyCountRes = await pool.query(`SELECT COUNT(*)::int as sets FROM policy_sets`);
+  const totalPolicySets = policyCountRes.rows[0].sets;
+
+  // Most deployed policy set (by number of successful deployments)
+  const mostDeployedRes = await pool.query(
+    `SELECT ps.name, COUNT(d.id)::int as deploy_count
+     FROM deployments d
+     JOIN policy_versions pv ON pv.id = d.policy_version_id
+     JOIN policy_sets ps ON ps.id = pv.policy_set_id
+     WHERE d.status = 'SUCCEEDED'
+     GROUP BY ps.name
+     ORDER BY deploy_count DESC
+     LIMIT 1`
+  );
+  const mostDeployedPolicy = mostDeployedRes.rows[0] ? { name: mostDeployedRes.rows[0].name, deployCount: mostDeployedRes.rows[0].deploy_count } : null;
+
+  // Last security audit
+  const lastAuditRes = await pool.query(
+    `SELECT metadata, timestamp FROM audit_events
+     WHERE action = 'SECURITY_AUDIT_RUN'
+     ORDER BY timestamp DESC LIMIT 1`
+  );
+  const lastSecurityAudit = lastAuditRes.rows[0] ? {
+    timestamp: lastAuditRes.rows[0].timestamp,
+    summary: typeof lastAuditRes.rows[0].metadata === 'string' ? JSON.parse(lastAuditRes.rows[0].metadata)?.summary : lastAuditRes.rows[0].metadata?.summary,
+  } : null;
+
+  // Pending approvals count
+  const pendingApprovalsRes = await pool.query(
+    `SELECT COUNT(*)::int as count FROM policy_versions WHERE status = 'PENDING_APPROVAL'`
+  );
+  const pendingApprovals = pendingApprovalsRes.rows[0].count;
+
+  // Expiring deployments (within 7 days)
+  const expiringRes = await pool.query(
+    `SELECT COUNT(*)::int as count FROM deployments
+     WHERE expires_at IS NOT NULL AND expires_at <= now() + interval '7 days' AND expired = false
+     AND status IN ('SUCCEEDED', 'PARTIAL')`
+  );
+  const expiringDeployments = expiringRes.rows[0].count;
+
   res.json({
     totalDeployments,
     runningDeployments,
@@ -156,7 +209,16 @@ dashboardRouter.get('/dashboard/stats', async (_req, res) => {
     topDeployers,
     recentDeployments: recentRes.rows,
     currentDeployments,
-    deploymentActivity
+    deploymentActivity,
+    // New stats
+    totalHosts,
+    enabledHosts,
+    totalIotAssets,
+    totalPolicySets,
+    mostDeployedPolicy,
+    lastSecurityAudit,
+    pendingApprovals,
+    expiringDeployments,
   });
 });
 
