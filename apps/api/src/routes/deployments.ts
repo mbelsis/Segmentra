@@ -1092,6 +1092,16 @@ export async function executeDeploymentStart(
     });
     }
 
+    // Clean up SSH key from bundle after deployment completes
+    try {
+      const sshKeyPath = path.join(bundleDir, 'ssh_key');
+      if (fs.existsSync(sshKeyPath)) {
+        fs.unlinkSync(sshKeyPath);
+      }
+    } catch {
+      // Best-effort cleanup — don't fail the deployment
+    }
+
     return { ok, exitCode, executionId: executionId! };
 }
 
@@ -1231,10 +1241,10 @@ deploymentsRouter.post('/deployments/:deploymentId/retry-failed', requireRole('o
 export async function processScheduledDeployments(): Promise<number> {
   const now = new Date();
 
-  // Find deployments that are QUEUED and scheduled_at <= now
+  // Find deployments that are SCHEDULED and due to start
   const scheduledRes = await pool.query(
     `SELECT id FROM deployments
-     WHERE status='QUEUED' AND scheduled_at IS NOT NULL AND scheduled_at <= $1
+     WHERE status IN ('SCHEDULED', 'QUEUED') AND scheduled_at IS NOT NULL AND scheduled_at <= $1
      ORDER BY scheduled_at ASC
      LIMIT 10`,
     [now]
@@ -1242,9 +1252,9 @@ export async function processScheduledDeployments(): Promise<number> {
 
   let processedCount = 0;
   for (const row of scheduledRes.rows) {
-    // Clear scheduled_at so this deployment is not picked up again
+    // Clear scheduled_at and set status to QUEUED so it can be started
     await pool.query(
-      `UPDATE deployments SET scheduled_at=NULL WHERE id=$1`,
+      `UPDATE deployments SET scheduled_at=NULL, status='QUEUED' WHERE id=$1`,
       [row.id]
     );
 

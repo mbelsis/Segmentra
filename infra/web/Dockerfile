@@ -7,6 +7,9 @@ COPY apps/web /app/apps/web
 COPY packages/shared /app/packages/shared
 
 RUN npm install --workspaces --include-workspace-root
+
+# Set API URL to empty so the browser uses relative /api/ paths (proxied by nginx)
+ENV VITE_API_URL=/api
 RUN npm run build -w apps/web
 
 FROM nginx:alpine

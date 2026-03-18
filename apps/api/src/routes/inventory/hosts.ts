@@ -123,7 +123,7 @@ hostsRouter.get('/', requireRole('viewer', 'operator', 'approver', 'admin'), asy
 });
 
 const createHostSchema = z.object({
-  hostname: z.string().min(1),
+  hostname: z.string().min(1).max(255).regex(/^[a-zA-Z0-9._-]+$/, 'Hostname can only contain letters, numbers, dots, hyphens, and underscores'),
   mgmtIp: z.string().optional(),
   sshPort: z.number().int().min(1).max(65535).optional(),
   environment: z.string().optional(),

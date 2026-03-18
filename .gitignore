@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+apps/api/dist/
+packages/*/dist/
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+.dev-admin-jwt.txt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Deployment bundles (contain SSH keys)
+data/bundles/
+
+# Temp files
+*.tmp
