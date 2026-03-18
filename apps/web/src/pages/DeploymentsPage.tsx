@@ -240,8 +240,10 @@ export function DeploymentsPage() {
           <h3>Create Deployment</h3>
           <div style={{ padding: '10px 14px', background: '#fdf6ec', border: '1px solid #e8d5a8', borderRadius: 8, marginBottom: 16, fontSize: '13px', color: '#5c4633' }}>
             <strong>Important:</strong> Deploying a policy will <strong>completely replace</strong> all existing firewall rules on the target hosts.
-            The current ruleset is backed up automatically before deployment. If you need to add rules to an existing policy,
-            create a new version of the policy set that includes both the existing and new rules.
+            The current ruleset is backed up automatically before deployment to <code style={{ background: '#f5ebe0', padding: '1px 4px', borderRadius: 3 }}>/var/backups/segmentra/</code> on each host
+            (e.g., <code style={{ background: '#f5ebe0', padding: '1px 4px', borderRadius: 3 }}>nft.ruleset.2026-03-18T11-46</code> for nftables
+            or <code style={{ background: '#f5ebe0', padding: '1px 4px', borderRadius: 3 }}>iptables.2026-03-18T11-46</code> for iptables).
+            If you need to add rules to an existing policy, create a new version of the policy set that includes both the existing and new rules.
           </div>
           <div className="form-grid">
             <div className="form-group">
@@ -459,7 +461,7 @@ export function DeploymentsPage() {
                 onChange={(e) => setFormExpiresAt(e.target.value)}
               />
               <small style={{ color: '#666', fontSize: '0.85em' }}>
-                Leave empty for no expiry. Set a date to create a time-limited deployment (e.g., temporary vendor access, maintenance window).
+                Leave empty for no expiry. Set a date to create a time-limited deployment (e.g., temporary vendor access, maintenance window). Upon expiration, the user will be notified to manually restore to another policy.
               </small>
             </div>
 
@@ -475,9 +477,24 @@ export function DeploymentsPage() {
                   <option value="REVERT">Revert — notify to manually re-deploy the previous policy</option>
                 </select>
                 <small style={{ color: '#666', fontSize: '0.85em' }}>
-                  {formExpiryAction === 'NOTIFY_ONLY' && 'A notification will be sent when the policy expires. The deployed rules remain active on hosts until you manually remove or replace them.'}
-                  {formExpiryAction === 'REMOVE' && 'The deployment will be marked as expired and a notification sent requesting manual rollback. The backup of the previous ruleset exists on each host at /var/backups/segmentra/.'}
-                  {formExpiryAction === 'REVERT' && 'The deployment will be marked as expired and a notification sent requesting you to re-deploy the previous policy version. Create a new deployment with the prior version to restore.'}
+                  {formExpiryAction === 'NOTIFY_ONLY' && (<span>
+                    A notification will be sent when the policy expires. The deployed rules remain active on hosts until you manually remove or replace them.
+                    <br /><br />To restore the previous ruleset, SSH into the host and run:
+                    <br /><strong>nftables:</strong> <code style={{ background: '#f5ebe0', padding: '1px 4px', borderRadius: 3, fontSize: '0.9em' }}>sudo nft -f /var/backups/segmentra/nft.ruleset.&lt;timestamp&gt;</code>
+                    <br /><strong>iptables:</strong> <code style={{ background: '#f5ebe0', padding: '1px 4px', borderRadius: 3, fontSize: '0.9em' }}>sudo iptables-restore &lt; /var/backups/segmentra/iptables.&lt;timestamp&gt;</code>
+                  </span>)}
+                  {formExpiryAction === 'REMOVE' && (<span>
+                    The deployment will be marked as expired and a notification sent requesting manual rollback.
+                    <br /><br />To restore the previous ruleset from the backup on each host:
+                    <br /><strong>nftables:</strong> <code style={{ background: '#f5ebe0', padding: '1px 4px', borderRadius: 3, fontSize: '0.9em' }}>sudo nft -f /var/backups/segmentra/nft.ruleset.&lt;timestamp&gt;</code>
+                    <br /><strong>iptables:</strong> <code style={{ background: '#f5ebe0', padding: '1px 4px', borderRadius: 3, fontSize: '0.9em' }}>sudo iptables-restore &lt; /var/backups/segmentra/iptables.&lt;timestamp&gt;</code>
+                  </span>)}
+                  {formExpiryAction === 'REVERT' && (<span>
+                    The deployment will be marked as expired and a notification sent requesting you to re-deploy the previous policy version. Create a new deployment with the prior version to restore.
+                    <br /><br />For immediate rollback via SSH:
+                    <br /><strong>nftables:</strong> <code style={{ background: '#f5ebe0', padding: '1px 4px', borderRadius: 3, fontSize: '0.9em' }}>sudo nft -f /var/backups/segmentra/nft.ruleset.&lt;timestamp&gt;</code>
+                    <br /><strong>iptables:</strong> <code style={{ background: '#f5ebe0', padding: '1px 4px', borderRadius: 3, fontSize: '0.9em' }}>sudo iptables-restore &lt; /var/backups/segmentra/iptables.&lt;timestamp&gt;</code>
+                  </span>)}
                 </small>
               </div>
             )}

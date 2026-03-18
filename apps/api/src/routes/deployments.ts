@@ -190,8 +190,8 @@ const createDeploymentSchema = z.object({
   }),
   canarySize: z.number().int().min(1).optional(),
   batchSize: z.number().int().min(1).optional(),
-  scheduledAt: z.string().datetime().optional(), // ISO 8601 datetime string
-  expiresAt: z.string().datetime().optional(), // ISO 8601 datetime string — when the deployment should expire
+  scheduledAt: z.string().min(1).optional(), // datetime string from browser (e.g. "2026-03-18T11:46")
+  expiresAt: z.string().min(1).optional(), // datetime string from browser
   expiryAction: z.enum(['NOTIFY_ONLY', 'REMOVE', 'REVERT']).optional().default('NOTIFY_ONLY'), // What to do on expiry
 });
 
@@ -343,6 +343,12 @@ deploymentsRouter.post('/deployments', requireRole('operator', 'admin'), async (
 
   const scheduledAt = b.scheduledAt ? new Date(b.scheduledAt) : null;
   const expiresAt = b.expiresAt ? new Date(b.expiresAt) : null;
+  if (scheduledAt && isNaN(scheduledAt.getTime())) {
+    return res.status(400).json({ error: 'invalid_scheduled_at', message: 'Invalid scheduled date' });
+  }
+  if (expiresAt && isNaN(expiresAt.getTime())) {
+    return res.status(400).json({ error: 'invalid_expires_at', message: 'Invalid expiry date' });
+  }
   const expiryAction = b.expiryAction ?? 'NOTIFY_ONLY';
   const status = scheduledAt && scheduledAt > new Date() ? 'SCHEDULED' : 'QUEUED';
 
@@ -503,7 +509,13 @@ deploymentsRouter.get('/deployments', requireRole('viewer', 'operator', 'approve
 });
 
 deploymentsRouter.get('/deployments/:deploymentId', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
-  const { rows } = await pool.query(`SELECT * FROM deployments WHERE id=$1`, [req.params.deploymentId]);
+  const { rows } = await pool.query(
+    `SELECT d.*, u.username AS created_by_username, u.display_name AS created_by_display_name
+     FROM deployments d
+     LEFT JOIN users u ON u.id = d.created_by
+     WHERE d.id=$1`,
+    [req.params.deploymentId]
+  );
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
   res.json({ deployment: rows[0] });
 });

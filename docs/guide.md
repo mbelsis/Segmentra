@@ -839,6 +839,111 @@ Full automated rollback/redeploy is planned for a future release.
 - **At expiry**: The deployment is marked expired and a `POLICY_EXPIRED` notification is sent to subscribed channels
 - **Audit trail**: Both the warning and expiry are logged in audit events
 
+### What Does NOT Happen Automatically
+
+Segmentra does **not** automatically remove or rollback firewall rules on the target hosts when a deployment expires. The deployed rules remain active on each host until you manually intervene. This is by design — automatic rollback of firewall rules in production carries significant risk (connectivity loss, security gaps during the transition, partial failures across a fleet).
+
+### Manually Restoring the Previous Ruleset
+
+When a deployment was created, the existing firewall rules on each host were backed up to `/var/backups/segmentra/` before the new policy was applied. To restore the previous ruleset after expiry:
+
+**Step 1: Find the backup file on the host**
+
+SSH into the host and list the available backups:
+
+```bash
+ls -lt /var/backups/segmentra/
+```
+
+You'll see timestamped backup files:
+```
+-rw------- 1 root root 2048 Mar 18 11:46 nft.ruleset.2026-03-18T11-46
+-rw------- 1 root root 1892 Mar 15 09:00 nft.ruleset.2026-03-15T09-00
+```
+
+The most recent backup before the deployment is the one you want.
+
+**Step 2: Restore the backup**
+
+For **nftables** hosts:
+```bash
+# Preview the backup first
+sudo cat /var/backups/segmentra/nft.ruleset.2026-03-18T11-46
+
+# Restore the previous ruleset
+sudo nft flush ruleset
+sudo nft -f /var/backups/segmentra/nft.ruleset.2026-03-18T11-46
+```
+
+For **iptables** hosts:
+```bash
+# Preview the backup first
+sudo cat /var/backups/segmentra/iptables.2026-03-18T11-46
+
+# Restore the previous ruleset
+sudo iptables-restore < /var/backups/segmentra/iptables.2026-03-18T11-46
+```
+
+**Step 3: Verify the restore**
+
+```bash
+# For nftables
+sudo nft list ruleset
+
+# For iptables
+sudo iptables -L -n -v
+```
+
+### Restoring at Scale
+
+If the expired deployment targeted many hosts, you can script the restore across your fleet:
+
+```bash
+#!/bin/bash
+# restore-previous-policy.sh
+# Usage: ./restore-previous-policy.sh <hosts-file> <ssh-user> <backup-timestamp>
+#
+# hosts-file: one IP/hostname per line
+# backup-timestamp: e.g., 2026-03-18T11-46
+
+HOSTS_FILE=$1
+SSH_USER=$2
+TIMESTAMP=$3
+BACKUP_DIR="/var/backups/segmentra"
+
+while read -r HOST; do
+  echo "=== Restoring $HOST ==="
+
+  # Detect backend
+  BACKEND=$(ssh "$SSH_USER@$HOST" "command -v nft > /dev/null 2>&1 && echo nft || echo iptables")
+
+  if [ "$BACKEND" = "nft" ]; then
+    BACKUP_FILE="$BACKUP_DIR/nft.ruleset.$TIMESTAMP"
+    ssh "$SSH_USER@$HOST" "sudo nft flush ruleset && sudo nft -f $BACKUP_FILE"
+  else
+    BACKUP_FILE="$BACKUP_DIR/iptables.$TIMESTAMP"
+    ssh "$SSH_USER@$HOST" "sudo iptables-restore < $BACKUP_FILE"
+  fi
+
+  if [ $? -eq 0 ]; then
+    echo "  ✓ Restored successfully"
+  else
+    echo "  ✗ FAILED — check manually"
+  fi
+done < "$HOSTS_FILE"
+```
+
+### Alternative: Deploy the Previous Policy Version via Segmentra
+
+Instead of manually restoring backups, you can create a new deployment in Segmentra using the previous policy version:
+
+1. Go to **Deployments** → **+ Create Deployment**
+2. Select the **previous policy version** (the one that was active before the expired deployment)
+3. Target the same hosts
+4. This creates a clean, audited redeployment through the normal approval workflow
+
+This is the recommended approach for production environments as it maintains the full audit trail.
+
 ---
 
 ## 21. Notifications

@@ -108,7 +108,12 @@ function evaluateCondition(condition: TagRuleCondition, host: HostData): boolean
       return fieldValue.toLowerCase() !== value.toLowerCase();
     case 'matches':
       try {
-        return new RegExp(value, 'i').test(fieldValue);
+        // Limit regex length to prevent ReDoS
+        if (value.length > 200) return false;
+        const regex = new RegExp(value, 'i');
+        // Test with a timeout by limiting input length
+        const testValue = fieldValue.length > 1000 ? fieldValue.slice(0, 1000) : fieldValue;
+        return regex.test(testValue);
       } catch {
         return false;
       }

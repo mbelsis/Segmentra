@@ -158,7 +158,7 @@ export function PolicyTestPage() {
       {statusMessage && <div style={{ color: '#1565C0', marginBottom: 8, padding: 8, background: '#E3F2FD', borderRadius: 4 }}>{statusMessage}</div>}
 
       <div style={{ marginBottom: 16 }}>
-        <button onClick={() => { setShowStart(true); loadPolicyVersions(); }}>+ Start Policy Test</button>
+        <button onClick={() => { setShowStart(true); loadPolicyVersions(); }} className="btn-primary">+ Start Policy Test</button>
       </div>
 
       {showStart && (
@@ -250,34 +250,38 @@ export function PolicyTestPage() {
       <div style={{ display: 'flex', gap: 24 }}>
         {/* Sessions list */}
         <div style={{ flex: 1 }}>
-          <table style={{ width: '100%' }}>
-            <thead><tr><th>Host</th><th>Policy</th><th>Status</th><th>Duration</th><th>Started</th><th>Actions</th></tr></thead>
-            <tbody>
-              {sessions.map(s => (
-                <tr key={s.id} onClick={() => selectSession(s)} style={{ cursor: 'pointer', background: selectedSession?.id === s.id ? '#e8f0fe' : undefined }}>
-                  <td>{s.hostname}</td>
-                  <td>{s.policy_set_name} v{s.version_number}</td>
-                  <td><span style={{ color: STATUS_COLORS[s.status] || '#000', fontWeight: 'bold' }}>{s.status}</span></td>
-                  <td>{s.duration_minutes}m</td>
-                  <td>{s.started_at ? new Date(s.started_at).toLocaleString() : '-'}</td>
-                  <td onClick={e => e.stopPropagation()}>
-                    {s.status === 'RUNNING' && (
-                      <>
-                        <button onClick={() => collectLogs(s.id)} disabled={actionLoading} style={{ fontSize: '0.85em' }}>Peek Logs</button>
-                        <button onClick={() => stopSession(s.id)} disabled={actionLoading} style={{ marginLeft: 4, fontSize: '0.85em' }}>Stop & Collect</button>
-                      </>
-                    )}
-                    {s.status === 'COLLECTING' && (
-                      <button onClick={() => analyzeSession(s.id)} disabled={actionLoading} style={{ fontSize: '0.85em', background: '#4CAF50', color: 'white', border: 'none', padding: '4px 12px', borderRadius: 4, cursor: 'pointer' }}>
-                        Analyze
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-              {sessions.length === 0 && <tr><td colSpan={6} style={{ textAlign: 'center', color: '#666' }}>No test sessions. Click "+ Start Policy Test" to begin.</td></tr>}
-            </tbody>
-          </table>
+          <div className="card">
+            <h4 style={{ margin: '0 0 8px', color: '#5c4633' }}>Test Sessions</h4>
+            <p style={{ fontSize: '12.5px', color: '#97846c', margin: '0 0 12px' }}>Click a row to view details and analysis results.</p>
+            <table className="data-table">
+              <thead><tr><th>Host</th><th>Policy</th><th>Status</th><th>Duration</th><th>Started</th><th>Actions</th></tr></thead>
+              <tbody>
+                {sessions.map(s => (
+                  <tr key={s.id} onClick={() => selectSession(s)} style={{ cursor: 'pointer', background: selectedSession?.id === s.id ? '#f0ebe2' : undefined }}>
+                    <td><strong>{s.hostname}</strong></td>
+                    <td style={{ fontSize: '13px' }}>{s.policy_set_name} v{s.version_number}</td>
+                    <td><span style={{ color: STATUS_COLORS[s.status] || '#000', fontWeight: 600, fontSize: '12.5px' }}>{s.status}</span></td>
+                    <td>{s.duration_minutes}m</td>
+                    <td style={{ fontSize: '12.5px', color: '#78644e' }}>{s.started_at ? new Date(s.started_at).toLocaleString() : '-'}</td>
+                    <td onClick={e => e.stopPropagation()}>
+                      {s.status === 'RUNNING' && (
+                        <>
+                          <button onClick={() => collectLogs(s.id)} disabled={actionLoading} className="btn-small btn-secondary">Peek Logs</button>
+                          <button onClick={() => stopSession(s.id)} disabled={actionLoading} className="btn-small btn-secondary" style={{ marginLeft: 4 }}>Stop & Collect</button>
+                        </>
+                      )}
+                      {s.status === 'COLLECTING' && (
+                        <button onClick={() => analyzeSession(s.id)} disabled={actionLoading} className="btn-small" style={{ background: '#5a7a3a', color: '#fdfcf9', border: 'none' }}>
+                          Analyze
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+                {sessions.length === 0 && <tr><td colSpan={6} className="empty-state">No test sessions. Click "+ Start Policy Test" to begin.</td></tr>}
+              </tbody>
+            </table>
+          </div>
         </div>
 
         {/* Session detail panel */}

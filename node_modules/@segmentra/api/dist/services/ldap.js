@@ -1,8 +1,17 @@
 import { Client } from 'ldapts';
 import { pool } from '../db/pool.js';
 import { readSecretPlaintext } from './secrets.js';
+/** Escape special characters for LDAP filter injection prevention */
+function escapeLdapFilter(value) {
+    return value
+        .replace(/\\/g, '\\5c')
+        .replace(/\*/g, '\\2a')
+        .replace(/\(/g, '\\28')
+        .replace(/\)/g, '\\29')
+        .replace(/\0/g, '\\00');
+}
 function interpolate(template, vars) {
-    return template.replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] ?? '');
+    return template.replace(/\{\{(\w+)\}\}/g, (_, k) => escapeLdapFilter(vars[k] ?? ''));
 }
 export async function ldapLogin(params) {
     const settingsRes = await pool.query(`SELECT enabled, url, use_ldaps, bind_dn, bind_password_secret_id, base_dn, user_filter, group_filter

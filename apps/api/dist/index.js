@@ -25,7 +25,9 @@ import { enforcementPointsRouter } from './routes/enforcement-points.js';
 import { notificationsRouter } from './routes/notifications.js';
 import { securityAuditRouter } from './routes/security-audit.js';
 const app = express();
-app.use(cors());
+// CORS: restrict origins in production via CORS_ORIGIN env var
+const corsOrigin = process.env.CORS_ORIGIN;
+app.use(cors(corsOrigin ? { origin: corsOrigin.split(',').map(s => s.trim()), credentials: true } : {}));
 app.use(express.json({ limit: '1mb' }));
 app.use('/api/health', healthRouter);
 app.use('/api/auth', authRouter);

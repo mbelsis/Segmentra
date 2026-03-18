@@ -128,46 +128,82 @@ export function DashboardPage() {
         </div>
       </div>
 
-      {/* Stats Cards */}
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-          gap: 16
-        }}
-      >
-        <div className="card" style={{ padding: 20 }}>
-          <div style={{ fontSize: 12, color: '#666', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-            Total Deployments
-          </div>
-          <div style={{ fontSize: 32, fontWeight: 'bold', color: '#2196F3' }}>{stats.totalDeployments}</div>
+      {/* Stats Cards - Row 1: Deployments */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginBottom: 12 }}>
+        <div className="card" style={{ padding: 16 }}>
+          <div style={{ fontSize: 11, color: '#97846c', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Total Deployments</div>
+          <div style={{ fontSize: 28, fontWeight: 700, color: '#8b6914' }}>{stats.totalDeployments}</div>
         </div>
-
-        <div className="card" style={{ padding: 20 }}>
-          <div style={{ fontSize: 12, color: '#666', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-            Running
-          </div>
-          <div style={{ fontSize: 32, fontWeight: 'bold', color: stats.runningDeployments > 0 ? '#FF9800' : '#757575' }}>
-            {stats.runningDeployments}
-          </div>
+        <div className="card" style={{ padding: 16 }}>
+          <div style={{ fontSize: 11, color: '#97846c', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Running</div>
+          <div style={{ fontSize: 28, fontWeight: 700, color: stats.runningDeployments > 0 ? '#c47a1a' : '#b8a890' }}>{stats.runningDeployments}</div>
         </div>
-
-        <div className="card" style={{ padding: 20 }}>
-          <div style={{ fontSize: 12, color: '#666', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-            Success Rate
-          </div>
-          <div style={{ fontSize: 32, fontWeight: 'bold', color: stats.successRate >= 90 ? '#4CAF50' : stats.successRate >= 70 ? '#FF9800' : '#f44336' }}>
-            {stats.successRate}%
-          </div>
+        <div className="card" style={{ padding: 16 }}>
+          <div style={{ fontSize: 11, color: '#97846c', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Success Rate</div>
+          <div style={{ fontSize: 28, fontWeight: 700, color: stats.successRate >= 90 ? '#5a7a3a' : stats.successRate >= 70 ? '#c47a1a' : '#a63d2f' }}>{stats.successRate}%</div>
         </div>
+        <div className="card" style={{ padding: 16 }}>
+          <div style={{ fontSize: 11, color: '#97846c', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Succeeded</div>
+          <div style={{ fontSize: 28, fontWeight: 700, color: '#5a7a3a' }}>{stats.statusBreakdown.find((s) => s.status === 'SUCCEEDED')?.count || 0}</div>
+        </div>
+      </div>
 
-        <div className="card" style={{ padding: 20 }}>
-          <div style={{ fontSize: 12, color: '#666', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-            Finished
-          </div>
-          <div style={{ fontSize: 32, fontWeight: 'bold', color: '#757575' }}>
-            {stats.statusBreakdown.find((s) => s.status === 'SUCCEEDED')?.count || 0}
-          </div>
+      {/* Stats Cards - Row 2: Infrastructure */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginBottom: 12 }}>
+        <div className="card" style={{ padding: 16 }}>
+          <div style={{ fontSize: 11, color: '#97846c', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Managed Hosts</div>
+          <div style={{ fontSize: 28, fontWeight: 700, color: '#5c4633' }}>{(stats as any).enabledHosts ?? '-'}<span style={{ fontSize: 14, fontWeight: 400, color: '#97846c' }}> / {(stats as any).totalHosts ?? '-'}</span></div>
+          <div style={{ fontSize: 11, color: '#97846c', marginTop: 2 }}>enabled / total</div>
+        </div>
+        <div className="card" style={{ padding: 16 }}>
+          <div style={{ fontSize: 11, color: '#97846c', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Policy Sets</div>
+          <div style={{ fontSize: 28, fontWeight: 700, color: '#5c4633' }}>{(stats as any).totalPolicySets ?? '-'}</div>
+        </div>
+        <div className="card" style={{ padding: 16 }}>
+          <div style={{ fontSize: 11, color: '#97846c', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>IoT/OT Assets</div>
+          <div style={{ fontSize: 28, fontWeight: 700, color: '#5c4633' }}>{(stats as any).totalIotAssets ?? 0}</div>
+        </div>
+        <div className="card" style={{ padding: 16 }}>
+          <div style={{ fontSize: 11, color: '#97846c', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Pending Approvals</div>
+          <div style={{ fontSize: 28, fontWeight: 700, color: (stats as any).pendingApprovals > 0 ? '#c47a1a' : '#5a7a3a' }}>{(stats as any).pendingApprovals ?? 0}</div>
+        </div>
+      </div>
+
+      {/* Stats Cards - Row 3: Security & Intelligence */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: 12 }}>
+        <div className="card" style={{ padding: 16 }}>
+          <div style={{ fontSize: 11, color: '#97846c', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Most Deployed Policy</div>
+          {(stats as any).mostDeployedPolicy ? (
+            <>
+              <div style={{ fontSize: 16, fontWeight: 600, color: '#3d2e1e' }}>{(stats as any).mostDeployedPolicy.name}</div>
+              <div style={{ fontSize: 12, color: '#78644e', marginTop: 2 }}>{(stats as any).mostDeployedPolicy.deployCount} successful deployment(s)</div>
+            </>
+          ) : (
+            <div style={{ fontSize: 14, color: '#b8a890' }}>No deployments yet</div>
+          )}
+        </div>
+        <div className="card" style={{ padding: 16 }}>
+          <div style={{ fontSize: 11, color: '#97846c', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Last Security Audit</div>
+          {(stats as any).lastSecurityAudit ? (
+            <>
+              <div style={{ fontSize: 13, color: '#3d2e1e' }}>{new Date((stats as any).lastSecurityAudit.timestamp).toLocaleString()}</div>
+              {(stats as any).lastSecurityAudit.summary && (
+                <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                  {(stats as any).lastSecurityAudit.summary.critical > 0 && <span style={{ padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600, background: '#faf0ee', color: '#a63d2f' }}>{(stats as any).lastSecurityAudit.summary.critical} critical</span>}
+                  {(stats as any).lastSecurityAudit.summary.high > 0 && <span style={{ padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600, background: '#fdf6ec', color: '#c47a1a' }}>{(stats as any).lastSecurityAudit.summary.high} high</span>}
+                  {(stats as any).lastSecurityAudit.summary.medium > 0 && <span style={{ padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600, background: '#f7f4ef', color: '#8b6914' }}>{(stats as any).lastSecurityAudit.summary.medium} medium</span>}
+                  {(stats as any).lastSecurityAudit.summary.critical === 0 && (stats as any).lastSecurityAudit.summary.high === 0 && <span style={{ padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600, background: '#eef4e8', color: '#5a7a3a' }}>Clean</span>}
+                </div>
+              )}
+            </>
+          ) : (
+            <div style={{ fontSize: 14, color: '#b8a890' }}>No audit run yet</div>
+          )}
+        </div>
+        <div className="card" style={{ padding: 16 }}>
+          <div style={{ fontSize: 11, color: '#97846c', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Expiring Deployments</div>
+          <div style={{ fontSize: 28, fontWeight: 700, color: (stats as any).expiringDeployments > 0 ? '#c47a1a' : '#5a7a3a' }}>{(stats as any).expiringDeployments ?? 0}</div>
+          <div style={{ fontSize: 11, color: '#97846c', marginTop: 2 }}>within 7 days</div>
         </div>
       </div>
 

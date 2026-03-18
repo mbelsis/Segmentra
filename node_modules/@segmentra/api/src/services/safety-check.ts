@@ -120,7 +120,7 @@ export async function checkDeploymentSafety(params: {
         hostname: host.hostname,
         mgmtIp: host.mgmt_ip ? String(host.mgmt_ip) : null,
         firewallBackend: host.firewall_backend === 'iptables' ? 'iptables' : 'nftables',
-        interfaces: JSON.parse(host.interfaces || '[]')
+        interfaces: typeof host.interfaces === 'string' ? JSON.parse(host.interfaces) : (host.interfaces || [])
       },
       policyInterfaceScope,
       rules,

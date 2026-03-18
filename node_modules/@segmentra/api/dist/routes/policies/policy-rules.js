@@ -14,7 +14,7 @@ const ruleSchema = z.object({
     direction: z.enum(['IN', 'OUT', 'BOTH']).default('IN'),
     action: z.enum(['ALLOW', 'DENY']),
     protocol: z.enum(['tcp', 'udp', 'icmp', 'any']),
-    ports: z.string().optional().nullable(),
+    ports: z.string().regex(/^(\d{1,5}(-\d{1,5})?(,\d{1,5}(-\d{1,5})?)*)$/, 'Invalid port format. Use: 80, 80,443, or 8000-9000').optional().nullable().or(z.literal('')).or(z.null()),
     sourceType: z.enum(['CIDR', 'TAG', 'VLAN', 'HOST']),
     sourceValue: z.string().min(1),
     logMode: z.enum(['NONE', 'LOG', 'LOG_RATE_LIMITED']).default('NONE'),

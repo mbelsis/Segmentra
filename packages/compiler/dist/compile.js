@@ -2,6 +2,11 @@ import crypto from 'node:crypto';
 function sha256(text) {
     return crypto.createHash('sha256').update(text, 'utf8').digest('hex');
 }
+/** Sanitize a CIDR/IP value to prevent injection into nftables/iptables rules */
+function sanitizeCidr(value) {
+    // Only allow: digits, dots, colons (IPv6), slashes (CIDR), and commas
+    return value.replace(/[^0-9a-fA-F.:\/,]/g, '');
+}
 function resolveInterfaceNames(host, scope) {
     if (scope.type === 'ALL_INTERFACES')
         return [];
@@ -23,9 +28,11 @@ export function compileHostPolicy(input) {
         const inputPolicy = logOnly ? 'accept' : 'drop';
         lines.push(`  chain input { type filter hook input priority 0; policy ${inputPolicy}; }`);
         lines.push('  chain output { type filter hook output priority 0; policy accept; }');
-        // address sets (resolved by API)
+        // address sets (resolved by API) — skip empty sets
         for (const [name, elements] of Object.entries(input.sets)) {
-            const elems = elements.join(', ');
+            if (elements.length === 0)
+                continue; // Skip empty sets to avoid invalid nftables syntax
+            const elems = elements.map(e => sanitizeCidr(e)).join(', ');
             lines.push(`  set ${name} { type ipv4_addr; elements = { ${elems} } }`);
         }
         lines.push('}');
@@ -45,13 +52,9 @@ export function compileHostPolicy(input) {
                 lines.push(`add rule inet segmentra input ip saddr ${cidr} tcp dport 22 accept comment \"mgmt_ssh\"`);
             }
         }
-        // Policy rules (very v1: source resolution is performed by API; here we treat sourceValue as cidr/ipset name)
+        // Policy rules — emitted in user-defined order_index order (no reordering)
         const policyScopeNames = resolveInterfaceNames(input.host, input.policyInterfaceScope);
-        const rulesSorted = [...input.rules].sort((a, b) => {
-            if (a.action !== b.action)
-                return a.action === 'ALLOW' ? -1 : 1;
-            return a.orderIndex - b.orderIndex;
-        });
+        const rulesSorted = [...input.rules].sort((a, b) => a.orderIndex - b.orderIndex);
         for (const r of rulesSorted) {
             const scope = r.usePolicyInterfaceScope ? input.policyInterfaceScope : r.interfaceScope ?? input.policyInterfaceScope;
             const iifs = resolveInterfaceNames(input.host, scope);
@@ -68,8 +71,8 @@ export function compileHostPolicy(input) {
             const oifExpr = scope.type === 'ALL_INTERFACES' || iifs.length === 0
                 ? ''
                 : `oifname { ${iifs.map((n) => `"${n}"`).join(', ')} }`;
-            const remoteIn = r.remote.kind === 'SET' ? `ip saddr @${r.remote.setName}` : `ip saddr ${r.sourceValue}`;
-            const remoteOut = r.remote.kind === 'SET' ? `ip daddr @${r.remote.setName}` : `ip daddr ${r.sourceValue}`;
+            const remoteIn = r.remote.kind === 'SET' ? `ip saddr @${r.remote.setName}` : `ip saddr ${sanitizeCidr(r.sourceValue)}`;
+            const remoteOut = r.remote.kind === 'SET' ? `ip daddr @${r.remote.setName}` : `ip daddr ${sanitizeCidr(r.sourceValue)}`;
             const comment = r.comment ? ` comment \"${r.comment.replace(/\"/g, '')}\"` : '';
             const emit = (chain) => {
                 const ifExpr = chain === 'input' ? iifExpr : oifExpr;
@@ -127,39 +130,47 @@ export function compileHostPolicy(input) {
                 lines.push(`-A INPUT -p tcp -s ${cidr} --dport 22 -j ACCEPT`);
             }
         }
-        const rulesSorted = [...input.rules].sort((a, b) => {
-            if (a.action !== b.action)
-                return a.action === 'ALLOW' ? -1 : 1;
-            return a.orderIndex - b.orderIndex;
-        });
+        // iptables rules — emitted in user-defined order_index order (no reordering)
+        const rulesSorted = [...input.rules].sort((a, b) => a.orderIndex - b.orderIndex);
         for (const r of rulesSorted) {
             const scope = r.usePolicyInterfaceScope ? input.policyInterfaceScope : r.interfaceScope ?? input.policyInterfaceScope;
             const ifNames = resolveInterfaceNames(input.host, scope);
             const action = r.action === 'ALLOW' ? 'ACCEPT' : 'DROP';
             const proto = r.protocol === 'any' ? '' : `-p ${r.protocol}`;
-            const ports = r.protocol === 'tcp' || r.protocol === 'udp'
-                ? r.ports
-                    ? `--dport ${r.ports}`
-                    : ''
-                : '';
-            const inIface = scope.type === 'ALL_INTERFACES' || ifNames.length === 0 ? '' : `-i ${ifNames[0]}`; // v1: pick first
-            const outIface = scope.type === 'ALL_INTERFACES' || ifNames.length === 0 ? '' : `-o ${ifNames[0]}`;
+            // Handle ports for iptables:
+            // - Comma-separated (80,443): -m multiport --dports 80,443
+            // - Ranges (8000-9000): --dport 8000:9000 (iptables uses colon for ranges)
+            // - Single port (22): --dport 22
+            // - Comma + range mix (80,443,8000-9000): -m multiport --dports 80,443,8000:9000
+            let ports = '';
+            if ((r.protocol === 'tcp' || r.protocol === 'udp') && r.ports) {
+                // Normalize dash ranges to colon ranges for iptables
+                const normalizedPorts = r.ports.replace(/(\d+)-(\d+)/g, '$1:$2');
+                if (normalizedPorts.includes(',')) {
+                    ports = `-m multiport --dports ${normalizedPorts}`;
+                }
+                else {
+                    ports = `--dport ${normalizedPorts}`;
+                }
+            }
+            // Emit rules for ALL matching interfaces (not just the first)
+            const ifaceList = scope.type === 'ALL_INTERFACES' || ifNames.length === 0 ? [''] : ifNames;
             const elements = r.remote.kind === 'SET' ? input.sets[r.remote.setName] ?? [] : [r.sourceValue];
             const emit = (chain) => {
-                for (const elem of elements) {
-                    const remote = chain === 'INPUT' ? `-s ${elem}` : `-d ${elem}`;
-                    const iface = chain === 'INPUT' ? inIface : outIface;
-                    if (logOnly) {
-                        // In log-only mode, log then accept
-                        const logPrefix = `-j LOG --log-prefix "FW-AUDIT: ${r.action} ${r.comment ? r.comment.replace(/"/g, '') : 'rule'}: "`;
-                        const logLine = `-A ${chain} ${iface} ${proto} ${remote} ${ports} ${logPrefix}`.replace(/\s+/g, ' ').trim();
-                        lines.push(logLine);
-                        const acceptLine = `-A ${chain} ${iface} ${proto} ${remote} ${ports} -j ACCEPT`.replace(/\s+/g, ' ').trim();
-                        lines.push(acceptLine);
-                    }
-                    else {
-                        // Normal mode
-                        lines.push(`-A ${chain} ${iface} ${proto} ${remote} ${ports} -j ${action}`.replace(/\s+/g, ' ').trim());
+                for (const iface of ifaceList) {
+                    const ifaceFlag = iface ? (chain === 'INPUT' ? `-i ${iface}` : `-o ${iface}`) : '';
+                    for (const elem of elements) {
+                        const remote = chain === 'INPUT' ? `-s ${sanitizeCidr(elem)}` : `-d ${sanitizeCidr(elem)}`;
+                        if (logOnly) {
+                            const logPrefix = `-j LOG --log-prefix "FW-AUDIT: ${r.action} ${r.comment ? r.comment.replace(/"/g, '') : 'rule'}: "`;
+                            const logLine = `-A ${chain} ${ifaceFlag} ${proto} ${remote} ${ports} ${logPrefix}`.replace(/\s+/g, ' ').trim();
+                            lines.push(logLine);
+                            const acceptLine = `-A ${chain} ${ifaceFlag} ${proto} ${remote} ${ports} -j ACCEPT`.replace(/\s+/g, ' ').trim();
+                            lines.push(acceptLine);
+                        }
+                        else {
+                            lines.push(`-A ${chain} ${ifaceFlag} ${proto} ${remote} ${ports} -j ${action}`.replace(/\s+/g, ' ').trim());
+                        }
                     }
                 }
             };

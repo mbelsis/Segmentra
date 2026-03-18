@@ -109,26 +109,12 @@ policyVersionsRouter.post('/policy-versions/:versionId/approve', requireRole('ap
     if (!vRes.rows[0])
         return res.status(404).json({ error: 'not_found' });
     const isHighRisk = vRes.rows[0].is_high_risk === true;
-    const isAdmin = req.auth?.roles?.includes('admin') ?? false;
-    // Check if approver is the creator - allow admin override for local development
+    // Separation of duties: approver must be different from creator
     if (vRes.rows[0].created_by && vRes.rows[0].created_by === approverId) {
-        if (!isAdmin) {
-            // eslint-disable-next-line no-console
-            console.log(`[DEBUG] User ${req.auth?.username} attempting self-approval. Roles:`, req.auth?.roles);
-            return res.status(400).json({
-                error: 'approver_must_differ',
-                message: 'You cannot approve a policy version that you created. If you are an admin, try logging out and logging back in to refresh your session. Otherwise, please have another approver review it.'
-            });
-        }
-        // Admin can self-approve (for local development), but not for high-risk policies
-        if (isHighRisk) {
-            return res.status(400).json({
-                error: 'high_risk_requires_different_approver',
-                message: 'High-risk policy versions cannot be self-approved, even by admins. Please have another approver or admin review this policy version.'
-            });
-        }
-        // eslint-disable-next-line no-console
-        console.log(`[DEBUG] Admin ${req.auth?.username} self-approving policy version ${req.params.versionId}`);
+        return res.status(400).json({
+            error: 'approver_must_differ',
+            message: 'You cannot approve a policy version that you created. A different approver is required for separation of duties.'
+        });
     }
     const { rows } = await pool.query(`UPDATE policy_versions
        SET status='APPROVED', approved_by=$2, approved_at=now()

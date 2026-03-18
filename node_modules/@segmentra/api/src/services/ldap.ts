@@ -14,8 +14,18 @@ type LdapSettingsRow = {
   group_filter: string | null;
 };
 
+/** Escape special characters for LDAP filter injection prevention */
+function escapeLdapFilter(value: string): string {
+  return value
+    .replace(/\\/g, '\\5c')
+    .replace(/\*/g, '\\2a')
+    .replace(/\(/g, '\\28')
+    .replace(/\)/g, '\\29')
+    .replace(/\0/g, '\\00');
+}
+
 function interpolate(template: string, vars: Record<string, string>): string {
-  return template.replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] ?? '');
+  return template.replace(/\{\{(\w+)\}\}/g, (_, k) => escapeLdapFilter(vars[k] ?? ''));
 }
 
 export async function ldapLogin(params: { username: string; password: string }) {

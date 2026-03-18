@@ -121,7 +121,7 @@ export function PolicyTemplatesPage() {
           <option value="">All Categories</option>
           {categories.map(c => <option key={c} value={c}>{c}</option>)}
         </select>
-        <button onClick={() => setShowCreate(true)}>+ New Template</button>
+        <button onClick={() => setShowCreate(true)} className="btn-primary">+ New Template</button>
       </div>
 
       {showCreate && (

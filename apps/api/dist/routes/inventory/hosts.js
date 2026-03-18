@@ -106,7 +106,7 @@ hostsRouter.get('/', requireRole('viewer', 'operator', 'approver', 'admin'), asy
     });
 });
 const createHostSchema = z.object({
-    hostname: z.string().min(1),
+    hostname: z.string().min(1).max(255).regex(/^[a-zA-Z0-9._-]+$/, 'Hostname can only contain letters, numbers, dots, hyphens, and underscores'),
     mgmtIp: z.string().optional(),
     sshPort: z.number().int().min(1).max(65535).optional(),
     environment: z.string().optional(),
@@ -392,6 +392,11 @@ hostsRouter.post('/bulk/import', requireRole('operator', 'admin'), async (req, r
             const hostname = row[hostnameIdx]?.trim();
             if (!hostname) {
                 results.push({ hostname: `Row ${i + 2}`, success: false, error: 'Missing hostname' });
+                continue;
+            }
+            // Validate hostname format (same as single host creation)
+            if (!/^[a-zA-Z0-9._-]+$/.test(hostname) || hostname.length > 255) {
+                results.push({ hostname, success: false, error: 'Invalid hostname. Only letters, numbers, dots, hyphens, and underscores allowed (max 255 chars).' });
                 continue;
             }
             try {

@@ -267,15 +267,7 @@ export function LoginPage() {
             </a>
           </div>
           <div style={{ fontSize: '11px', color: '#b8a890' }}>
-            API: <code style={{
-              background: '#f0ebe2',
-              padding: '2px 6px',
-              borderRadius: '4px',
-              fontSize: '11px',
-              color: '#78644e'
-            }}>
-              {(import.meta as any).env?.VITE_API_URL ?? 'http://localhost:8080/api'}
-            </code>
+            Segmentra Fleet Firewall Management
           </div>
         </div>
       </div>

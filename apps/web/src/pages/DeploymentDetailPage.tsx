@@ -153,9 +153,47 @@ export function DeploymentDetailPage() {
             <div>{deployment.target_count} host(s)</div>
           </div>
           <div className="form-group">
+            <label>Created By</label>
+            <div>{deployment.created_by_display_name || deployment.created_by_username || '—'}</div>
+          </div>
+          <div className="form-group">
             <label>Created</label>
             <div>{new Date(deployment.created_at).toLocaleString()}</div>
           </div>
+          {deployment.scheduled_at && (
+            <div className="form-group">
+              <label>Scheduled For</label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ color: new Date(deployment.scheduled_at) > new Date() ? '#8b6914' : '#5a7a3a', fontWeight: 600 }}>
+                  {new Date(deployment.scheduled_at).toLocaleString()}
+                </span>
+                {new Date(deployment.scheduled_at) > new Date() && (
+                  <span style={{ fontSize: '0.8em', padding: '2px 6px', background: '#fdf6ec', border: '1px solid #e8d5a8', borderRadius: 4, color: '#8b6914' }}>Pending</span>
+                )}
+              </div>
+            </div>
+          )}
+          {deployment.expires_at && (
+            <div className="form-group">
+              <label>Expires At</label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ color: new Date(deployment.expires_at) < new Date() ? '#a63d2f' : '#78644e', fontWeight: 600 }}>
+                  {new Date(deployment.expires_at).toLocaleString()}
+                </span>
+                {new Date(deployment.expires_at) < new Date() ? (
+                  <span style={{ fontSize: '0.8em', padding: '2px 6px', background: '#faf0ee', border: '1px solid #e8c4bf', borderRadius: 4, color: '#a63d2f' }}>Expired</span>
+                ) : (
+                  <span style={{ fontSize: '0.8em', padding: '2px 6px', background: '#f0f5eb', border: '1px solid #c5d4b3', borderRadius: 4, color: '#5a7a3a' }}>Active</span>
+                )}
+              </div>
+            </div>
+          )}
+          {deployment.expiry_action && deployment.expires_at && (
+            <div className="form-group">
+              <label>Expiry Action</label>
+              <div>{deployment.expiry_action === 'NOTIFY_ONLY' ? 'Notify Only' : deployment.expiry_action === 'REMOVE' ? 'Remove (manual rollback)' : deployment.expiry_action === 'REVERT' ? 'Revert (re-deploy previous)' : deployment.expiry_action}</div>
+            </div>
+          )}
           {deployment.started_at && (
             <div className="form-group">
               <label>Started</label>

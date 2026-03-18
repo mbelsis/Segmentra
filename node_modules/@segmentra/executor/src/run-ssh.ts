@@ -1,10 +1,8 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
-import path from 'node:path';
 import { promisify } from 'node:util';
 
 const writeFile = promisify(fs.writeFile);
-const chmod = promisify(fs.chmod);
 
 export interface SshHost {
   hostname: string;
@@ -22,29 +20,93 @@ export interface SshExecutionResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+  skipped?: boolean; // true if skipped due to cancellation
 }
 
 /**
- * Execute SSH commands directly on a host to apply firewall rules.
- * Uses sudo for all privileged operations.
+ * Build SSH options array. Uses a known_hosts file if provided,
+ * otherwise falls back to StrictHostKeyChecking=no.
+ */
+function buildSshOptions(host: { ip: string; port: number; username: string; privateKeyPath: string }, knownHostsPath?: string): string[] {
+  const opts: string[] = [];
+  if (knownHostsPath && fs.existsSync(knownHostsPath)) {
+    opts.push('-o', `UserKnownHostsFile=${knownHostsPath}`);
+    opts.push('-o', 'StrictHostKeyChecking=yes');
+  } else {
+    opts.push('-o', 'StrictHostKeyChecking=no');
+    opts.push('-o', 'UserKnownHostsFile=/dev/null');
+  }
+  opts.push(
+    '-o', 'LogLevel=ERROR',
+    '-o', 'ConnectTimeout=30',
+    '-i', host.privateKeyPath,
+    '-p', String(host.port),
+    `${host.username}@${host.ip}`
+  );
+  return opts;
+}
+
+function buildScpOptions(host: { ip: string; port: number; username: string; privateKeyPath: string }, knownHostsPath?: string): string[] {
+  const opts: string[] = [];
+  if (knownHostsPath && fs.existsSync(knownHostsPath)) {
+    opts.push('-o', `UserKnownHostsFile=${knownHostsPath}`);
+    opts.push('-o', 'StrictHostKeyChecking=yes');
+  } else {
+    opts.push('-o', 'StrictHostKeyChecking=no');
+    opts.push('-o', 'UserKnownHostsFile=/dev/null');
+  }
+  opts.push(
+    '-o', 'LogLevel=ERROR',
+    '-o', 'ConnectTimeout=30',
+    '-i', host.privateKeyPath,
+    '-P', String(host.port)
+  );
+  return opts;
+}
+
+/**
+ * Execute SSH deployment to multiple hosts.
+ *
+ * @param shouldContinue - Optional callback checked between hosts. Return false to stop.
+ *                         This allows the deployment to be cancelled/stopped mid-execution.
+ * @param knownHostsPath - Optional path to a known_hosts file for SSH host key verification.
  */
 export async function runSshDeployment(params: {
   hosts: SshHost[];
-  stdoutPath?: string; // host filesystem path for combined stdout
-  stderrPath?: string; // host filesystem path for combined stderr
+  stdoutPath?: string;
+  stderrPath?: string;
+  shouldContinue?: () => Promise<boolean>;
+  knownHostsPath?: string;
 }): Promise<SshExecutionResult[]> {
   const results: SshExecutionResult[] = [];
   const allStdout: string[] = [];
   const allStderr: string[] = [];
 
   for (const host of params.hosts) {
-    const result = await deployToHost(host);
+    // Check if we should continue before each host
+    if (params.shouldContinue) {
+      const cont = await params.shouldContinue();
+      if (!cont) {
+        // Mark remaining hosts as skipped
+        results.push({
+          hostname: host.hostname,
+          success: false,
+          exitCode: 0,
+          stdout: 'Skipped: deployment was stopped before this host was processed',
+          stderr: '',
+          skipped: true,
+        });
+        allStdout.push(`=== ${host.hostname} ===\nSkipped (deployment stopped)\n`);
+        continue;
+      }
+    }
+
+    const result = await deployToHost(host, params.knownHostsPath);
     results.push(result);
     allStdout.push(`=== ${host.hostname} ===\n${result.stdout}\n`);
     allStderr.push(`=== ${host.hostname} ===\n${result.stderr}\n`);
   }
 
-  // Write combined logs if paths provided
   if (params.stdoutPath) {
     await writeFile(params.stdoutPath, allStdout.join('\n'), 'utf8');
   }
@@ -55,25 +117,16 @@ export async function runSshDeployment(params: {
   return results;
 }
 
-async function deployToHost(host: SshHost): Promise<SshExecutionResult> {
+async function deployToHost(host: SshHost, knownHostsPath?: string): Promise<SshExecutionResult> {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
   const backupDir = '/var/backups/segmentra';
   const remotePolicyPath = '/tmp/segmentra.policy';
   const ext = host.backend === 'nftables' ? 'nft' : 'iptables';
 
-  // SSH options
-  const sshOptions = [
-    '-o', 'StrictHostKeyChecking=no',
-    '-o', 'UserKnownHostsFile=/dev/null',
-    '-o', 'LogLevel=ERROR',
-    '-i', host.privateKeyPath,
-    '-p', String(host.port),
-    `${host.username}@${host.ip}`
-  ];
+  const sshOptions = buildSshOptions(host, knownHostsPath);
 
   let stdout = '';
   let stderr = '';
-  let exitCode = 0;
 
   try {
     // Step 1: Ensure backup directory exists
@@ -110,24 +163,17 @@ async function deployToHost(host: SshHost): Promise<SshExecutionResult> {
     }
 
     // Step 4: Copy policy file to remote host
-    const scpOptions = [
-      '-o', 'StrictHostKeyChecking=no',
-      '-o', 'UserKnownHostsFile=/dev/null',
-      '-o', 'LogLevel=ERROR',
-      '-i', host.privateKeyPath,
-      '-P', String(host.port),
-      host.policyFilePath,
-      `${host.username}@${host.ip}:${remotePolicyPath}`
-    ];
-    
-    const scpResult = await execScp(scpOptions);
+    const scpOpts = buildScpOptions(host, knownHostsPath);
+    scpOpts.push(host.policyFilePath, `${host.username}@${host.ip}:${remotePolicyPath}`);
+
+    const scpResult = await execScp(scpOpts);
     stdout += scpResult.stdout;
     stderr += scpResult.stderr;
     if (scpResult.exitCode !== 0) {
       return { hostname: host.hostname, success: false, exitCode: scpResult.exitCode, stdout, stderr };
     }
 
-    // Step 5: Move policy file to secure location and set permissions
+    // Step 5: Move policy file to secure location
     const setupCmd = `sudo mv ${remotePolicyPath} /etc/segmentra.policy && sudo chmod 600 /etc/segmentra.policy`;
     const setupResult = await execSsh(sshOptions, setupCmd);
     stdout += setupResult.stdout;
@@ -209,21 +255,10 @@ function execSsh(sshOptions: string[], command: string): Promise<{ exitCode: num
     let stdout = '';
     let stderr = '';
 
-    child.stdout.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    child.stderr.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    child.on('close', (code) => {
-      resolve({ exitCode: code ?? 1, stdout, stderr });
-    });
-
-    child.on('error', (error) => {
-      resolve({ exitCode: 1, stdout, stderr: stderr + error.message });
-    });
+    child.stdout.on('data', (data) => { stdout += data.toString(); });
+    child.stderr.on('data', (data) => { stderr += data.toString(); });
+    child.on('close', (code) => { resolve({ exitCode: code ?? 1, stdout, stderr }); });
+    child.on('error', (error) => { resolve({ exitCode: 1, stdout, stderr: stderr + error.message }); });
   });
 }
 
@@ -233,21 +268,9 @@ function execScp(scpOptions: string[]): Promise<{ exitCode: number; stdout: stri
     let stdout = '';
     let stderr = '';
 
-    child.stdout.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    child.stderr.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    child.on('close', (code) => {
-      resolve({ exitCode: code ?? 1, stdout, stderr });
-    });
-
-    child.on('error', (error) => {
-      resolve({ exitCode: 1, stdout, stderr: stderr + error.message });
-    });
+    child.stdout.on('data', (data) => { stdout += data.toString(); });
+    child.stderr.on('data', (data) => { stderr += data.toString(); });
+    child.on('close', (code) => { resolve({ exitCode: code ?? 1, stdout, stderr }); });
+    child.on('error', (error) => { resolve({ exitCode: 1, stdout, stderr: stderr + error.message }); });
   });
 }
-

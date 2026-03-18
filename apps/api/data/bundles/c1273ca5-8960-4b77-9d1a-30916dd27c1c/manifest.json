@@ -1,0 +1,11 @@
+{
+  "deployment_id": "c1273ca5-8960-4b77-9d1a-30916dd27c1c",
+  "policy_version_id": "12beccf8-0cff-4ba9-9a77-ed19ec5818f3",
+  "interface_scope": {
+    "type": "INTERFACE_ROLE",
+    "roles": [
+      "data"
+    ]
+  },
+  "target_count": 5
+}

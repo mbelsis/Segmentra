@@ -701,6 +701,16 @@ troubleshootRouter.post('/audit/start', requireRole('operator', 'admin'), async 
     const tempKeyPath = path.join(os.tmpdir(), `audit_key_${host.id}_${Date.now()}`);
     const logFilePath = `/var/log/segmentra-audit-${host.hostname}-${Date.now()}.log`;
 
+    // Create DB record FIRST so the scheduler can restore on failure
+    const sessionRes = await pool.query(
+      `INSERT INTO firewall_audit_sessions
+       (host_id, status, duration_minutes, started_at, scheduled_restore_at, backup_path, log_file_path, created_by)
+       VALUES ($1, 'PENDING', $2, now(), $3, NULL, $4, $5)
+       RETURNING *`,
+      [host.id, durationMinutes, scheduledRestoreAt, logFilePath, userId]
+    );
+    const sessionId = sessionRes.rows[0].id;
+
     try {
       fs.writeFileSync(tempKeyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
 
@@ -715,14 +725,16 @@ troubleshootRouter.post('/audit/start', requireRole('operator', 'admin'), async 
 
       // Start audit session (backup rules, configure logging)
       const startResult = await startAuditSession(auditHost, logFilePath);
-      
+
       if (!startResult.success) {
         throw new Error(`Failed to start audit: ${startResult.stderr}`);
       }
 
-      // Create empty policy rules for log-only mode (we want to log everything)
-      const emptyRules: any[] = [];
-      const policyInterfaceScope = { type: 'ALL_INTERFACES' as const };
+      // Update session with backup path
+      await pool.query(
+        `UPDATE firewall_audit_sessions SET backup_path = $2 WHERE id = $1`,
+        [sessionId, startResult.backupPath]
+      );
 
       // Compile log-only policy
       const compiled = compileHostPolicy({
@@ -737,8 +749,8 @@ troubleshootRouter.post('/audit/start', requireRole('operator', 'admin'), async 
             enabled: i.enabled
           }))
         },
-        policyInterfaceScope,
-        rules: emptyRules,
+        policyInterfaceScope: { type: 'ALL_INTERFACES' as const },
+        rules: [],
         sets: {},
         baseline: { mgmtSshCidrs },
         logOnlyMode: true
@@ -752,31 +764,57 @@ troubleshootRouter.post('/audit/start', requireRole('operator', 'admin'), async 
         throw new Error(`Failed to deploy log-only policy: ${deployResult.stderr}`);
       }
 
-      // Create database record
-      const sessionRes = await pool.query(
-        `INSERT INTO firewall_audit_sessions 
-         (host_id, status, duration_minutes, started_at, scheduled_restore_at, backup_path, log_file_path, created_by)
-         VALUES ($1, $2, $3, now(), $4, $5, $6, $7)
-         RETURNING *`,
-        [host.id, 'RUNNING', durationMinutes, scheduledRestoreAt, startResult.backupPath, logFilePath, userId]
+      // Success — mark session as RUNNING
+      await pool.query(
+        `UPDATE firewall_audit_sessions SET status = 'RUNNING' WHERE id = $1`,
+        [sessionId]
       );
 
-      sessions.push(sessionRes.rows[0]);
+      sessions.push({ ...sessionRes.rows[0], status: 'RUNNING', backup_path: startResult.backupPath });
 
       // Clean up temp files
       if (fs.existsSync(tempKeyPath)) fs.unlinkSync(tempKeyPath);
       if (fs.existsSync(policyFilePath)) fs.unlinkSync(policyFilePath);
 
     } catch (error: any) {
-      // Clean up temp files on error
-      const tempKeyPath = path.join(os.tmpdir(), `audit_key_${host.id}_${Date.now()}`);
+      // On failure, try to restore the host if we have a backup
+      try {
+        if (fs.existsSync(tempKeyPath)) {
+          const backupRes = await pool.query(`SELECT backup_path FROM firewall_audit_sessions WHERE id = $1`, [sessionId]);
+          const backupPath = backupRes.rows[0]?.backup_path;
+          if (backupPath) {
+            const auditHost: AuditSshHost = {
+              hostname: host.hostname,
+              ip: String(host.mgmt_ip),
+              port: host.ssh_port || 22,
+              username: cred.username,
+              privateKeyPath: tempKeyPath,
+              backend: (host.firewall_backend === 'iptables' ? 'iptables' : 'nftables') as 'nftables' | 'iptables'
+            };
+            await restoreAuditSession(auditHost, backupPath);
+            // eslint-disable-next-line no-console
+            console.log(`[Audit] Restored ${host.hostname} after failure`);
+          }
+        }
+      } catch (restoreErr: any) {
+        // eslint-disable-next-line no-console
+        console.error(`[Audit] Failed to restore ${host.hostname}:`, restoreErr.message);
+      }
+
+      // Mark session as FAILED in DB
+      await pool.query(
+        `UPDATE firewall_audit_sessions SET status = 'FAILED' WHERE id = $1`,
+        [sessionId]
+      );
+
+      // Clean up temp key
       if (fs.existsSync(tempKeyPath)) {
         try { fs.unlinkSync(tempKeyPath); } catch {}
       }
 
       return res.status(500).json({
         error: 'audit_start_failed',
-        message: `Failed to start audit for ${host.hostname}: ${error.message}`
+        message: `Failed to start audit for ${host.hostname}: ${error.message}. Host has been restored.`
       });
     }
   }

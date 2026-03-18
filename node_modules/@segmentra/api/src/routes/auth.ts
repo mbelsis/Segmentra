@@ -15,9 +15,34 @@ const loginSchema = z.object({
   password: z.string().min(1)
 });
 
+// Simple in-memory rate limiter for login attempts (per IP)
+const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+const MAX_LOGIN_ATTEMPTS = 10; // per window
+const LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+
+function checkRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const entry = loginAttempts.get(ip);
+  if (!entry || now > entry.resetAt) {
+    loginAttempts.set(ip, { count: 1, resetAt: now + LOGIN_WINDOW_MS });
+    return true;
+  }
+  entry.count++;
+  return entry.count <= MAX_LOGIN_ATTEMPTS;
+}
+
+// Generic error message to prevent username/account enumeration
+const GENERIC_LOGIN_ERROR = 'Invalid username or password';
+
 authRouter.post('/login', async (req, res) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
+
+  // Rate limiting
+  const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
+  if (!checkRateLimit(clientIp)) {
+    return res.status(429).json({ error: 'too_many_attempts', message: 'Too many login attempts. Please try again in 15 minutes.' });
+  }
 
   const { username, password } = parsed.data;
 
@@ -31,13 +56,15 @@ authRouter.post('/login', async (req, res) => {
 
   if (localUserRes.rows.length > 0) {
     const user = localUserRes.rows[0];
+
+    // All failure cases return the same generic error to prevent enumeration
     if (!user.is_active) {
-      return res.status(403).json({ error: 'account_disabled' });
+      return res.status(401).json({ error: 'invalid_credentials', message: GENERIC_LOGIN_ERROR });
     }
 
     const passwordValid = await verifyPassword(password, user.password_hash);
     if (!passwordValid) {
-      return res.status(401).json({ error: 'invalid_credentials' });
+      return res.status(401).json({ error: 'invalid_credentials', message: GENERIC_LOGIN_ERROR });
     }
 
     // Update last login
@@ -53,7 +80,8 @@ authRouter.post('/login', async (req, res) => {
     );
     const roles = roleRows.rows.map((r) => r.name);
     if (roles.length === 0) {
-      return res.status(403).json({ error: 'no_roles_assigned' });
+      // No roles = can't use the app, but don't reveal account exists
+      return res.status(401).json({ error: 'invalid_credentials', message: GENERIC_LOGIN_ERROR });
     }
 
     const token = signJwt({ sub: username, roles });
@@ -73,7 +101,10 @@ authRouter.post('/login', async (req, res) => {
       [ldap.groups]
     );
     const roles = roleRows.map((r) => r.name);
-    if (roles.length === 0) return res.status(403).json({ error: 'no_mapped_roles' });
+    if (roles.length === 0) {
+      // No mapped roles — generic error
+      return res.status(401).json({ error: 'invalid_credentials', message: GENERIC_LOGIN_ERROR });
+    }
 
     // Upsert user
     const userRes = await pool.query(
@@ -103,12 +134,10 @@ authRouter.post('/login', async (req, res) => {
     const token = signJwt({ sub: username, roles });
     return res.json({ token, user: userRes.rows[0], roles });
   } catch (e: any) {
-    const msg = String(e?.message ?? e);
-    if (msg === 'ldap_not_configured') return res.status(503).json({ error: 'ldap_not_configured' });
-    if (msg === 'invalid_credentials') return res.status(401).json({ error: 'invalid_credentials' });
+    // All LDAP failures return generic error — no enumeration
     // eslint-disable-next-line no-console
-    console.error(e);
-    return res.status(500).json({ error: 'login_failed' });
+    console.error('[Auth] Login failed:', e.message);
+    return res.status(401).json({ error: 'invalid_credentials', message: GENERIC_LOGIN_ERROR });
   }
 });
 
