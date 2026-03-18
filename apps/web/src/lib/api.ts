@@ -1,6 +1,6 @@
 import { getToken } from './auth';
 
-const API_BASE = (import.meta as any).env?.VITE_API_URL ?? 'http://localhost:8080/api';
+const API_BASE = (import.meta as any).env?.VITE_API_URL || '/api';
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = getToken();

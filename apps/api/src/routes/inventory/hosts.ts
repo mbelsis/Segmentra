@@ -500,6 +500,12 @@ hostsRouter.post('/bulk/import', requireRole('operator', 'admin'), async (req, r
         continue;
       }
 
+      // Validate hostname format (same as single host creation)
+      if (!/^[a-zA-Z0-9._-]+$/.test(hostname) || hostname.length > 255) {
+        results.push({ hostname, success: false, error: 'Invalid hostname. Only letters, numbers, dots, hyphens, and underscores allowed (max 255 chars).' });
+        continue;
+      }
+
       try {
         const mgmtIp = ipIdx >= 0 ? row[ipIdx]?.trim() || null : null;
         const sshPort = sshPortIdx >= 0 ? (row[sshPortIdx]?.trim() ? parseInt(row[sshPortIdx].trim(), 10) : 22) : 22;
