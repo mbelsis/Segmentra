@@ -162,6 +162,25 @@ export function DeploymentDetailPage() {
               <div>{new Date(deployment.started_at).toLocaleString()}</div>
             </div>
           )}
+          {/* Progress bar for running deployments */}
+          {deployment.progress && deployment.status === 'RUNNING' && (() => {
+            const p = typeof deployment.progress === 'string' ? JSON.parse(deployment.progress) : deployment.progress;
+            const phaseLabel = p.phase === 'checking' ? 'Pre-flight checks' : p.phase === 'deploying' ? 'Deploying rules' : p.phase === 'complete' ? 'Complete' : p.phase;
+            const total = p.totalToDeploy || 1;
+            const done = p.phase === 'checking' ? p.checked : p.phase === 'deploying' ? p.deployed : total;
+            const pct = Math.round((done / total) * 100);
+            return (
+              <div style={{ gridColumn: '1 / -1', marginTop: 8 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4, fontSize: '13px' }}>
+                  <span style={{ color: '#5c4633', fontWeight: 600 }}>{phaseLabel}</span>
+                  <span style={{ color: '#78644e' }}>{done} / {total} hosts ({pct}%){p.currentHost ? ` — ${p.currentHost}` : ''}</span>
+                </div>
+                <div style={{ height: 8, background: '#e8e0d4', borderRadius: 4, overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: `${pct}%`, background: p.phase === 'checking' ? '#8b6914' : '#5a7a3a', borderRadius: 4, transition: 'width 0.3s ease' }} />
+                </div>
+              </div>
+            );
+          })()}
           {deployment.finished_at && (
             <div className="form-group">
               <label>Finished</label>

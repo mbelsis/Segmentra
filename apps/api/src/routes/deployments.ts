@@ -659,10 +659,14 @@ async function generateBundle(deploymentId: string) {
   const inventoryLines: string[] = ['[all]'];
   const hostPolicyHashes: Map<string, string> = new Map(); // host_id -> policy hash
 
+  const totalHosts = hostRows.rows.length;
+  await updateProgress(deploymentId, { phase: 'checking', checked: 0, totalToCheck: totalHosts, deployed: 0, totalToDeploy: totalHosts, warnings: [] });
+
   try {
+    let checkedCount = 0;
     for (const h of hostRows.rows as any[]) {
       const ifsRes = await pool.query(`SELECT name, role, enabled FROM host_interfaces WHERE host_id=$1`, [h.id]);
-      
+
       // Auto-detect backend if set to 'auto' or null
       let backend: 'nftables' | 'iptables';
       if (h.firewall_backend === 'iptables') {
@@ -679,7 +683,7 @@ async function generateBundle(deploymentId: string) {
           };
           const readinessResult = await checkHostReadiness(sshHostInfo);
           backend = readinessResult.backend === 'iptables' ? 'iptables' : 'nftables';
-          
+
           // Update host's firewall_backend if auto-detected
           if (readinessResult.backend !== 'unknown') {
             await pool.query(
@@ -688,15 +692,16 @@ async function generateBundle(deploymentId: string) {
             );
           }
         } catch (detectionError: any) {
-          // If detection fails, default to nftables (as before)
           // eslint-disable-next-line no-console
           console.warn(`[Auto-detection failed for ${h.hostname}, defaulting to nftables]`, detectionError.message);
           backend = 'nftables';
         }
       } else {
-        // Explicitly set to nftables
         backend = 'nftables';
       }
+
+      checkedCount++;
+      await updateProgress(deploymentId, { phase: 'checking', checked: checkedCount, totalToCheck: totalHosts, deployed: 0, totalToDeploy: totalHosts, currentHost: h.hostname, warnings: [] });
 
       const rules = (rRes.rows as any[]).map((r) => {
         const ruleScope =
@@ -791,6 +796,10 @@ async function generateBundle(deploymentId: string) {
  *
  * @param ipAddress - optional IP of the requesting user (for audit trail)
  */
+async function updateProgress(deploymentId: string, progress: Record<string, any>) {
+  await pool.query(`UPDATE deployments SET progress = $2 WHERE id = $1`, [deploymentId, JSON.stringify(progress)]);
+}
+
 export async function executeDeploymentStart(
   deploymentId: string,
   ipAddress?: string
@@ -826,6 +835,10 @@ export async function executeDeploymentStart(
       `SELECT value FROM system_settings WHERE key='deployment_executor'`
     );
     const executor = executorRes.rows[0]?.value ?? 'ansible';
+
+    const hostCountRes = await pool.query(`SELECT COUNT(*)::int as c FROM deployment_hosts WHERE deployment_id=$1`, [deploymentId]);
+    const deployHostCount = hostCountRes.rows[0]?.c || 0;
+    await updateProgress(deploymentId, { phase: 'deploying', checked: deployHostCount, totalToCheck: deployHostCount, deployed: 0, totalToDeploy: deployHostCount, warnings: [] });
 
     const stdoutPath = path.join(bundleDir, executor === 'ssh' ? 'ssh.stdout.log' : 'ansible.stdout.log');
     const stderrPath = path.join(bundleDir, executor === 'ssh' ? 'ssh.stderr.log' : 'ansible.stderr.log');
@@ -1092,6 +1105,8 @@ export async function executeDeploymentStart(
     });
     }
 
+    await updateProgress(deploymentId, { phase: 'complete', checked: deployHostCount, totalToCheck: deployHostCount, deployed: deployHostCount, totalToDeploy: deployHostCount, warnings: [] });
+
     // Clean up SSH key from bundle after deployment completes
     try {
       const sshKeyPath = path.join(bundleDir, 'ssh_key');
@@ -1108,38 +1123,41 @@ export async function executeDeploymentStart(
 deploymentsRouter.post('/deployments/:deploymentId/start', requireRole('operator', 'admin'), async (req, res) => {
   const deploymentId = req.params.deploymentId;
 
-  try {
-    const result = await executeDeploymentStart(deploymentId, req.ip);
-    res.json(result);
-  } catch (error: any) {
-    // eslint-disable-next-line no-console
-    console.error('[Deployment Start Error]', error);
-
-    // Update deployment status to FAILED if it was set to RUNNING
-    await pool.query(
-      `UPDATE deployments SET status='FAILED', finished_at=now() WHERE id=$1 AND status='RUNNING'`,
-      [deploymentId]
-    );
-
-    // Update all RUNNING hosts to FAILED
-    await pool.query(
-      `UPDATE deployment_hosts SET status='FAILED', finished_at=now(), message=$2 WHERE deployment_id=$1 AND status='RUNNING'`,
-      [deploymentId, error.message || 'Deployment start failed']
-    );
-
-    // Return appropriate error response
-    if (error.message === 'missing_ssh_credential') {
-      return res.status(400).json({
-        error: 'missing_ssh_credential',
-        message: 'SSH credentials are required to start a deployment. Please configure SSH credentials in Admin → SSH Credentials.'
-      });
-    }
-
-    res.status(500).json({
-      error: 'deployment_start_failed',
-      message: error.message || 'Failed to start deployment'
-    });
+  // Validate deployment exists and is in a startable state
+  const depCheck = await pool.query(`SELECT status FROM deployments WHERE id=$1`, [deploymentId]);
+  if (!depCheck.rows[0]) return res.status(404).json({ error: 'not_found' });
+  if (!['QUEUED', 'SCHEDULED'].includes(depCheck.rows[0].status)) {
+    return res.status(400).json({ error: 'not_startable', message: `Deployment is ${depCheck.rows[0].status}, not QUEUED` });
   }
+
+  // Mark as RUNNING immediately and set initial progress
+  await pool.query(
+    `UPDATE deployments SET status='RUNNING', started_at=now(), progress=$2 WHERE id=$1`,
+    [deploymentId, JSON.stringify({ phase: 'starting', checked: 0, totalToCheck: 0, deployed: 0, totalToDeploy: 0, warnings: [] })]
+  );
+
+  // Return 202 Accepted immediately — execution happens in background
+  res.status(202).json({ ok: true, message: 'Deployment started. Monitor progress on the deployment detail page.', deploymentId });
+
+  // Run execution in background (non-blocking)
+  setTimeout(async () => {
+    try {
+      await executeDeploymentStart(deploymentId, req.ip);
+    } catch (error: any) {
+      // eslint-disable-next-line no-console
+      console.error('[Deployment Start Error]', error);
+
+      await pool.query(
+        `UPDATE deployments SET status='FAILED', finished_at=now(), progress=$2 WHERE id=$1 AND status='RUNNING'`,
+        [deploymentId, JSON.stringify({ phase: 'failed', error: error.message })]
+      );
+
+      await pool.query(
+        `UPDATE deployment_hosts SET status='FAILED', finished_at=now(), message=$2 WHERE deployment_id=$1 AND status IN ('RUNNING', 'PENDING')`,
+        [deploymentId, error.message || 'Deployment start failed']
+      );
+    }
+  }, 0);
 });
 
 deploymentsRouter.post('/deployments/:deploymentId/pause', requireRole('operator', 'admin'), async (req, res) => {
