@@ -325,10 +325,32 @@ In the policy version editor, click **Submit for Approval**. The system automati
 
 ### Step 2: Review and Approve
 
-Go to **Approvals** in the sidebar. Reviewers can:
-- View the full rule list
-- See the **Impact Analysis** (semantic diff showing new allows, removed allows, new denies, removed denies per host)
-- **Approve** or **Reject** with a reason
+Go to **Approvals** in the sidebar. The page displays a table of all pending approval versions automatically — no need to look up or paste version UUIDs.
+
+**Table columns:**
+
+| Column | Description |
+|--------|-------------|
+| **Policy Set** | Name of the parent policy set |
+| **Version** | Version number |
+| **Rules** | Number of rules in the version |
+| **Submitted By** | User who created and submitted the version |
+| **Submitted** | Submission date with relative time (e.g., "3 hours ago") |
+| **Change Summary** | Brief description of what changed |
+
+Versions flagged by the high-risk evaluator display a **HIGH RISK** badge.
+
+**Actions per row:**
+
+- **Approve** (green button) — approve the version
+- **Reject** — expands to reveal a textarea for entering a rejection reason
+- **View Rules** — links to the full version detail page
+
+**Expanded row detail:**
+
+Expanding a row shows two panels:
+- **Left:** Rejection reason form (required when rejecting)
+- **Right:** Optional impact analysis — compare the pending version against a previous approved or deployed version on sample hosts, showing a semantic diff of new allows, removed allows, new denies, and removed denies per host
 
 ### Approval Constraints
 

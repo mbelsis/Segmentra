@@ -162,38 +162,66 @@ export function PolicyTestPage() {
       </div>
 
       {showStart && (
-        <div style={{ border: '1px solid #ccc', padding: 16, marginBottom: 16, borderRadius: 4, background: '#FAFAFA' }}>
-          <h3>Start Policy Test</h3>
-          <p style={{ fontSize: '0.9em', color: '#666', marginBottom: 12 }}>
+        <div style={{ border: '1px solid #d4c9b8', padding: 20, marginBottom: 16, borderRadius: 8, background: '#fdfcf9' }}>
+          <h3 style={{ marginTop: 0, marginBottom: 8, color: '#292018' }}>Start Policy Test</h3>
+          <p style={{ fontSize: '0.9em', color: '#78644e', marginBottom: 16 }}>
             Select a policy version and a target host. Segmentra will SSH into the host, backup its current firewall rules,
             deploy your policy in <strong>log-only mode</strong> (all traffic logged, nothing blocked), wait for the specified duration
             to capture real traffic, then automatically restore the original rules and let you analyze the results.
           </p>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <div>
-              <label style={{ fontSize: '0.85em', fontWeight: 'bold' }}>Policy Version</label>
+              <label style={{ fontSize: '0.85em', fontWeight: 600, color: '#5c4633' }}>Policy Version</label>
               <select value={startForm.policyVersionId} onChange={e => setStartForm(f => ({ ...f, policyVersionId: e.target.value }))} style={{ width: '100%' }}>
                 <option value="">Select policy version...</option>
                 {policyVersions.map(v => <option key={v.id} value={v.id}>{v.policySetName} v{v.version_number} ({v.status})</option>)}
               </select>
             </div>
             <div>
-              <label style={{ fontSize: '0.85em', fontWeight: 'bold' }}>Target Host</label>
+              <label style={{ fontSize: '0.85em', fontWeight: 600, color: '#5c4633' }}>Target Host</label>
               <select value={startForm.hostId} onChange={e => setStartForm(f => ({ ...f, hostId: e.target.value }))} style={{ width: '100%' }}>
                 <option value="">Select host...</option>
                 {hosts.map(h => <option key={h.id} value={h.id}>{h.hostname} ({h.mgmt_ip})</option>)}
               </select>
             </div>
             <div>
-              <label style={{ fontSize: '0.85em', fontWeight: 'bold' }}>Duration (minutes)</label>
+              <label style={{ fontSize: '0.85em', fontWeight: 600, color: '#5c4633' }}>Duration (minutes)</label>
               <input type="number" value={startForm.durationMinutes} onChange={e => setStartForm(f => ({ ...f, durationMinutes: parseInt(e.target.value) || 30 }))} min={1} max={1440} style={{ width: '100%' }} />
             </div>
           </div>
-          <div style={{ marginTop: 12 }}>
-            <button onClick={startTest} disabled={!startForm.policyVersionId || !startForm.hostId || actionLoading}>
+          <div style={{ marginTop: 16, display: 'flex', gap: 8 }}>
+            <button
+              onClick={startTest}
+              disabled={!startForm.policyVersionId || !startForm.hostId || actionLoading}
+              style={{
+                padding: '9px 20px',
+                background: (!startForm.policyVersionId || !startForm.hostId || actionLoading) ? '#b8a890' : '#5a7a3a',
+                color: '#fdfcf9',
+                border: 'none',
+                borderRadius: 6,
+                fontWeight: 600,
+                fontSize: '14px',
+                cursor: (!startForm.policyVersionId || !startForm.hostId || actionLoading) ? 'not-allowed' : 'pointer',
+                opacity: (!startForm.policyVersionId || !startForm.hostId || actionLoading) ? 0.6 : 1,
+              }}
+            >
               {actionLoading ? 'Deploying...' : 'Start Test'}
             </button>
-            <button onClick={() => setShowStart(false)} style={{ marginLeft: 8 }}>Cancel</button>
+            <button
+              onClick={() => setShowStart(false)}
+              style={{
+                padding: '9px 20px',
+                background: 'transparent',
+                color: '#5c4633',
+                border: '1px solid #d4c9b8',
+                borderRadius: 6,
+                fontWeight: 500,
+                fontSize: '14px',
+                cursor: 'pointer',
+              }}
+            >
+              Cancel
+            </button>
           </div>
         </div>
       )}

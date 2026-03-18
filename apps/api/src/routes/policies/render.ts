@@ -6,9 +6,9 @@ import { pool } from '../../db/pool.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 
 export const policyRenderRouter = Router();
-policyRenderRouter.use(requireAuth, requireRole('operator', 'admin'));
+policyRenderRouter.use(requireAuth);
 
-policyRenderRouter.get('/policy-versions/:versionId/render/host/:hostId', async (req, res) => {
+policyRenderRouter.get('/policy-versions/:versionId/render/host/:hostId', requireRole('operator', 'admin'), async (req, res) => {
   const { versionId, hostId } = req.params;
 
   const [hostRes, ifRes, vRes, rRes] = await Promise.all([

@@ -221,6 +221,7 @@ Base URL: `http://localhost:8080/api`
 - `POST /policy-versions/:versionId/approve` — Approver/Admin role required; approver must differ from maker. High-risk policies cannot be self-approved (even by admins). Body: `{ changeSummary? }`
 - `POST /policy-versions/:versionId/reject` — Approver/Admin role required. Body: `{ reason }`
 - `POST /policy-versions/:versionId/clone` — Clone version as new DRAFT
+- `GET /policy-versions/pending-approval` — Returns all policy versions with `PENDING_APPROVAL` status. Approver/Admin role required.
 
 #### Policy Rules
 - `GET /policy-versions/:versionId/rules`
@@ -1244,7 +1245,7 @@ Before approving a policy version, reviewers can analyze the impact of changes.
 
 #### Usage
 
-- **In Approvals Screen**: When reviewing a policy version, select:
+- **In Approvals Screen**: Displays a table of all pending approval versions with: policy set name, version number, rule count, submitted by, submitted date, change summary, approve/reject buttons, and impact analysis. When reviewing a specific policy version, select:
   1. Current deployed version ID
   2. Sample hosts to analyze
   3. Click "Analyze Impact"
@@ -1645,7 +1646,7 @@ Segmentra enforces role-based access control at both the API level (backend) and
 
 | Action | Viewer | Operator | Approver | Admin |
 |--------|--------|----------|----------|-------|
-| **View** dashboard, inventory, policies, deployments | Yes | Yes | Yes | Yes |
+| **View** dashboard, inventory, policies, deployments, approvals | Yes | Yes | Yes | Yes |
 | **View** troubleshoot results, topology, IoT, K8s | Yes | Yes | Yes | Yes |
 | **View** security audit results | Yes | Yes | Yes | Yes |
 | **Create/edit** hosts, tags, VLANs, interfaces | - | Yes | - | Yes |

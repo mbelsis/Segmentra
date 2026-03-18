@@ -45,10 +45,10 @@ Segmentra treats “execution” as a pluggable adapter:
 - Map AD groups → Segmentra roles.
 
 ### 2.2 Roles (RBAC)
-- **Viewer**: read-only
+- **Viewer**: read-only access to dashboard, inventory, policies, deployments
 - **Operator**: manage inventory, create drafts, run simulations, create deployments
-- **Approver**: approve/reject policy versions, approve high-risk deployments
-- **Admin**: system settings, LDAP mappings, secret management, break-glass
+- **Approver**: read-only access to dashboard, inventory, policies, deployments; approve/reject policy versions via the Approvals page
+- **Admin**: all operator + approver permissions, plus system settings, LDAP mappings, user management, secret management, break-glass
 
 ### 2.3 Maker/Checker workflow
 - Policy versions move through statuses:

@@ -86,6 +86,7 @@ export const api = {
     request<{ ok: boolean }>(`/policy-rules/${ruleId}`, { method: 'DELETE' }),
   submitApproval: (versionId: string) =>
     request<{ version: any }>(`/policy-versions/${versionId}/submit-approval`, { method: 'POST' }),
+  pendingApprovals: () => request<{ versions: any[] }>(`/policy-versions/pending-approval`),
   approve: (versionId: string) => request<{ version: any }>(`/policy-versions/${versionId}/approve`, { method: 'POST' }),
   reject: (versionId: string, reason: string) =>
     request<{ version: any }>(`/policy-versions/${versionId}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),

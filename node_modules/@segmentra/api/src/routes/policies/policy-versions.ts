@@ -78,6 +78,29 @@ policyVersionsRouter.post('/policy-sets/:id/versions', requireRole('operator', '
   }
 });
 
+/**
+ * List all policy versions pending approval, with policy set and creator info.
+ * Must be defined BEFORE the :versionId param route to avoid shadowing.
+ */
+policyVersionsRouter.get('/policy-versions/pending-approval', requireRole('approver', 'admin'), async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT pv.id, pv.version_number, pv.status, pv.change_summary, pv.is_high_risk,
+            pv.created_at, pv.submitted_at,
+            pv.interface_scope_type, pv.interface_scope_roles, pv.interface_scope_names,
+            pv.policy_set_id,
+            ps.name AS policy_set_name, ps.scope_type AS policy_set_scope_type,
+            ps.scope_tag_id, ps.scope_vlan_id,
+            u.username AS created_by_username, u.display_name AS created_by_display_name,
+            (SELECT COUNT(*)::int FROM policy_rules pr WHERE pr.policy_version_id = pv.id) AS rule_count
+     FROM policy_versions pv
+     JOIN policy_sets ps ON ps.id = pv.policy_set_id
+     LEFT JOIN users u ON u.id = pv.created_by
+     WHERE pv.status = 'PENDING_APPROVAL'
+     ORDER BY pv.submitted_at ASC`
+  );
+  res.json({ versions: rows });
+});
+
 policyVersionsRouter.get('/policy-versions/:versionId', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const { rows } = await pool.query(`SELECT * FROM policy_versions WHERE id=$1`, [req.params.versionId]);
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });

@@ -18,8 +18,11 @@ export function requireRole(...roles) {
         if (!req.auth)
             return res.status(401).json({ error: 'missing_token' });
         const ok = req.auth.roles.some((r) => roles.includes(r));
-        if (!ok)
+        if (!ok) {
+            // eslint-disable-next-line no-console
+            console.warn(`[RBAC] Denied: user=${req.auth.username} roles=[${req.auth.roles}] needed=[${roles}] path=${req.method} ${req.originalUrl}`);
             return res.status(403).json({ error: 'forbidden' });
+        }
         return next();
     };
 }

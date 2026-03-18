@@ -4,7 +4,25 @@
 
 # Segmentra
 
-Segmentra is an on-prem, web-based **fleet firewall & microsegmentation management** tool for Linux servers. It lets security and infrastructure teams define **intent-based access policies** (allow/deny), deploy them safely at scale to **nftables/iptables** via SSH or Ansible, and extend enforcement to **Kubernetes containers** and **OT/IoT devices** through gateway firewalls — all with versioning, approvals, audit trails, and compliance monitoring.
+***Segmentra*** is an on-prem, web-based **fleet firewall & microsegmentation management** tool for Linux servers. It lets security and infrastructure teams centrally define **host firewall policies** (allow/deny), and deploy them at scale to nftables/iptables, via SSH or Ansible Playbook. It extends enforcement to **Kubernetes containers** and **OT/IoT devices** through gateway firewalls.
+
+The platform enables: 
+-**Intentory creation and Auto tagging**
+-**Policy Versioning**, 
+-**Policy Impact Analysis**
+-**Policy Troubleshooting**,
+-**Policy Canary Testing**, 
+-**Policy Templates and auto assigment**
+-**Duties Segrgation**, 
+-**Approvals tracking**, 
+-**audit trails**, 
+-**compliance monitoring**,
+-**Topology building**, 
+-**Default Access Rules for each Policy**,
+
+
+**Future plans** include integrations with Syslog, Threat Intelligence feeds, SOAR, and Policy Expiration and auto Rollback 
+ 
 
 ---
 

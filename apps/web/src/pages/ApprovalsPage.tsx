@@ -1,93 +1,113 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 
 import { api } from '../lib/api';
 
 export function ApprovalsPage() {
-  const [versionId, setVersionId] = useState('');
-  const [reason, setReason] = useState('');
-  const [version, setVersion] = useState<any>(null);
-  const [loading, setLoading] = useState(false);
+  const navigate = useNavigate();
+  const [pendingVersions, setPendingVersions] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>('');
   const [success, setSuccess] = useState<string>('');
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [rejectReasons, setRejectReasons] = useState<Record<string, string>>({});
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  // Impact diff state
+  const [diffVersionId, setDiffVersionId] = useState<string | null>(null);
   const [currentVersionId, setCurrentVersionId] = useState('');
-  const [impactDiff, setImpactDiff] = useState<any>(null);
-  const [loadingDiff, setLoadingDiff] = useState(false);
+  const [approvedVersions, setApprovedVersions] = useState<any[]>([]);
   const [sampleHostIds, setSampleHostIds] = useState<string[]>([]);
   const [hosts, setHosts] = useState<any[]>([]);
-  const [approvedVersions, setApprovedVersions] = useState<any[]>([]);
-  const [loadingVersions, setLoadingVersions] = useState(false);
+  const [impactDiff, setImpactDiff] = useState<any>(null);
+  const [loadingDiff, setLoadingDiff] = useState(false);
 
-  async function loadVersion() {
-    if (!versionId.trim()) {
-      setVersion(null);
-      setApprovedVersions([]);
-      setCurrentVersionId('');
-      return;
-    }
+  useEffect(() => {
+    loadPending();
+    loadHosts();
+  }, []);
+
+  async function loadPending() {
     setLoading(true);
     setError('');
-    setSuccess('');
     try {
-      const res = await api.version(versionId.trim());
-      setVersion(res.version);
-      
-      // Load approved versions from the same policy set for comparison
-      if (res.version.policy_set_id) {
-        await loadApprovedVersions(res.version.policy_set_id);
-      }
+      const res = await api.pendingApprovals();
+      setPendingVersions(res.versions || []);
     } catch (e: any) {
       setError(String(e.message || e));
-      setVersion(null);
-      setApprovedVersions([]);
     } finally {
       setLoading(false);
     }
   }
 
-  async function loadApprovedVersions(policySetId: string) {
-    setLoadingVersions(true);
+  async function loadHosts() {
     try {
-      const res = await api.versions(policySetId);
-      // Filter to only APPROVED versions and sort by version number descending
-      const approved = (res.versions || [])
-        .filter((v: any) => v.status === 'APPROVED')
-        .sort((a: any, b: any) => b.version_number - a.version_number);
-      setApprovedVersions(approved);
-    } catch (e: any) {
-      // Ignore errors, just don't show dropdown
-      setApprovedVersions([]);
-    } finally {
-      setLoadingVersions(false);
+      const res = await api.hosts();
+      setHosts(res.hosts || []);
+    } catch {
+      // Ignore
     }
   }
 
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      loadVersion();
-    }, 500);
-    return () => clearTimeout(timer);
-  }, [versionId]);
-
-  useEffect(() => {
-    async function loadHosts() {
-      try {
-        const res = await api.hosts();
-        setHosts(res.hosts || []);
-      } catch (e) {
-        // Ignore errors
-      }
+  async function loadApprovedVersions(policySetId: string) {
+    try {
+      const res = await api.versions(policySetId);
+      const approved = (res.versions || [])
+        .filter((v: any) => v.status === 'APPROVED' || v.status === 'DEPLOYED')
+        .sort((a: any, b: any) => b.version_number - a.version_number);
+      setApprovedVersions(approved);
+    } catch {
+      setApprovedVersions([]);
     }
-    loadHosts();
-  }, []);
+  }
 
-  async function loadImpactDiff() {
-    if (!versionId || !currentVersionId || sampleHostIds.length === 0) {
-      setImpactDiff(null);
+  async function handleApprove(versionId: string, versionLabel: string) {
+    setActionLoading(versionId);
+    setError('');
+    setSuccess('');
+    try {
+      await api.approve(versionId);
+      setSuccess(`Policy version ${versionLabel} approved successfully`);
+      loadPending();
+    } catch (e: any) {
+      const msg = e.message || String(e);
+      if (msg.includes('approver_must_differ')) {
+        setError('You cannot approve a policy version that you created. A different user with approver/admin role must review it.');
+      } else {
+        setError(msg);
+      }
+    } finally {
+      setActionLoading(null);
+    }
+  }
+
+  async function handleReject(versionId: string, versionLabel: string) {
+    const reason = rejectReasons[versionId]?.trim();
+    if (!reason) {
+      setError('Rejection reason is required');
       return;
     }
+    setActionLoading(versionId);
+    setError('');
+    setSuccess('');
+    try {
+      await api.reject(versionId, reason);
+      setSuccess(`Policy version ${versionLabel} rejected`);
+      setRejectReasons(prev => { const n = { ...prev }; delete n[versionId]; return n; });
+      setExpandedId(null);
+      loadPending();
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setActionLoading(null);
+    }
+  }
+
+  async function loadImpactDiff() {
+    if (!diffVersionId || !currentVersionId || sampleHostIds.length === 0) return;
     setLoadingDiff(true);
     try {
-      const result = await api.policyImpactDiff(versionId, currentVersionId, sampleHostIds);
+      const result = await api.policyImpactDiff(diffVersionId, currentVersionId, sampleHostIds);
       setImpactDiff(result.diff);
     } catch (e: any) {
       setError(`Failed to load impact diff: ${e.message}`);
@@ -97,298 +117,298 @@ export function ApprovalsPage() {
     }
   }
 
-  async function handleApprove() {
-    if (!versionId.trim()) return;
-    setLoading(true);
-    setError('');
-    setSuccess('');
-    try {
-      await api.approve(versionId.trim());
-      setSuccess(`Policy version ${version?.version_number || versionId} approved successfully`);
-      setVersionId('');
-      setVersion(null);
-    } catch (e: any) {
-      const errorMsg = e.message || String(e);
-      if (errorMsg.includes('approver_must_differ')) {
-        setError('You cannot approve a policy version that you created. If you are an admin, this should now work. If you still see this error, please have another user with approver role review it.');
-      } else {
-        setError(errorMsg);
-      }
-    } finally {
-      setLoading(false);
+  function toggleExpand(v: any) {
+    if (expandedId === v.id) {
+      setExpandedId(null);
+      setDiffVersionId(null);
+      setImpactDiff(null);
+    } else {
+      setExpandedId(v.id);
+      setDiffVersionId(v.id);
+      setCurrentVersionId('');
+      setImpactDiff(null);
+      setSampleHostIds([]);
+      loadApprovedVersions(v.policy_set_id);
     }
   }
 
-  async function handleReject() {
-    if (!versionId.trim() || !reason.trim()) {
-      setError('Rejection reason is required');
-      return;
-    }
-    setLoading(true);
-    setError('');
-    setSuccess('');
-    try {
-      await api.reject(versionId.trim(), reason.trim());
-      setSuccess(`Policy version ${version?.version_number || versionId} rejected`);
-      setVersionId('');
-      setReason('');
-      setVersion(null);
-    } catch (e: any) {
-      setError(String(e.message || e));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function getStatusBadge(status: string) {
-    const colors: Record<string, string> = {
-      DRAFT: '#888',
-      PENDING_APPROVAL: '#2196F3',
-      APPROVED: '#4CAF50',
-      REJECTED: '#F44336',
-      ARCHIVED: '#999'
-    };
-    return <span style={{ color: colors[status] || '#000', fontWeight: 'bold' }}>{status}</span>;
+  function timeAgo(dateStr: string) {
+    const diff = Date.now() - new Date(dateStr).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 60) return `${mins}m ago`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
   }
 
   return (
     <div className="page">
       <div className="page-header">
-        <h2>Policy Approvals</h2>
+        <div>
+          <h2>Policy Approvals</h2>
+          <p style={{ margin: 0, color: '#78644e', fontSize: '14px' }}>
+            Review and approve or reject policy versions submitted for approval.
+          </p>
+        </div>
+        <button onClick={loadPending} className="btn-secondary" disabled={loading}>
+          Refresh
+        </button>
       </div>
 
-      <div className="card">
-        <h3>Quick Approve/Reject</h3>
-        <p style={{ marginBottom: 20, color: '#666' }}>
-          Paste a <code>policy_version.id</code> to view details and approve or reject it.
-        </p>
-
-        <div className="form-group">
-          <label><strong>Policy Version ID</strong></label>
-          <input
-            type="text"
-            value={versionId}
-            onChange={(e) => setVersionId(e.target.value)}
-            placeholder="Enter UUID..."
-            style={{ fontFamily: 'monospace', fontSize: '13px' }}
-            disabled={loading}
-          />
+      {error && <div className="error-banner" style={{ marginBottom: 16 }}>{error} <button onClick={() => setError('')} style={{ marginLeft: 8, background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline', color: 'inherit' }}>dismiss</button></div>}
+      {success && (
+        <div style={{ background: '#e8f5e9', color: '#2e7d32', padding: 12, borderRadius: 8, marginBottom: 16, borderLeft: '4px solid #5a7a3a' }}>
+          {success}
+          <button onClick={() => setSuccess('')} style={{ marginLeft: 8, background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline', color: 'inherit' }}>dismiss</button>
         </div>
+      )}
 
-        {error && <div className="error-banner">{error}</div>}
-        {success && <div style={{ background: '#e8f5e9', color: '#2e7d32', padding: 12, borderRadius: 8, marginBottom: 20, borderLeft: '4px solid #4CAF50' }}>{success}</div>}
+      {/* Pending Approvals Table */}
+      <div className="card">
+        <h3 style={{ marginTop: 0 }}>
+          Pending Approvals
+          {!loading && (
+            <span style={{ fontSize: '14px', fontWeight: 400, color: '#78644e', marginLeft: 8 }}>
+              ({pendingVersions.length} {pendingVersions.length === 1 ? 'version' : 'versions'} awaiting review)
+            </span>
+          )}
+        </h3>
 
-        {loading && versionId && !version && (
-          <div style={{ padding: 20, textAlign: 'center', color: '#666' }}>Loading...</div>
+        {loading && (
+          <div style={{ padding: 30, textAlign: 'center', color: '#78644e' }}>Loading pending approvals...</div>
         )}
 
-        {version && (
-          <div style={{ marginTop: 24, padding: 20, background: '#f8f9fa', borderRadius: 8 }}>
-            <h4 style={{ marginTop: 0 }}>Policy Version Details</h4>
-            <div className="form-grid">
-              <div className="form-group">
-                <label><strong>Version</strong></label>
-                <div>v{version.version_number}</div>
-              </div>
-              <div className="form-group">
-                <label><strong>Status</strong></label>
-                <div>{getStatusBadge(version.status)}</div>
-              </div>
-              <div className="form-group">
-                <label><strong>Change Summary</strong></label>
-                <div>{version.change_summary || '-'}</div>
-              </div>
-              <div className="form-group">
-                <label><strong>Created</strong></label>
-                <div>{new Date(version.created_at).toLocaleString()}</div>
-              </div>
-              {version.submitted_at && (
-                <div className="form-group">
-                  <label><strong>Submitted</strong></label>
-                  <div>{new Date(version.submitted_at).toLocaleString()}</div>
-                </div>
-              )}
-              {version.interface_scope_type && (
-                <div className="form-group">
-                  <label><strong>Interface Scope</strong></label>
-                  <div>
-                    <code>{version.interface_scope_type}</code>
-                    {version.interface_scope_roles && version.interface_scope_roles.length > 0 && (
-                      <div style={{ fontSize: '0.85em', color: '#666', marginTop: 4 }}>
-                        Roles: {version.interface_scope_roles.join(', ')}
-                      </div>
-                    )}
-                    {version.interface_scope_names && version.interface_scope_names.length > 0 && (
-                      <div style={{ fontSize: '0.85em', color: '#666', marginTop: 4 }}>
-                        Names: {version.interface_scope_names.join(', ')}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
+        {!loading && pendingVersions.length === 0 && (
+          <div style={{ padding: 30, textAlign: 'center', color: '#97846c' }}>
+            No policy versions are currently awaiting approval.
+          </div>
+        )}
 
-            {/* Policy Impact Diff */}
-            {version && version.status === 'PENDING_APPROVAL' && (
-              <div style={{ marginTop: 24, paddingTop: 20, borderTop: '2px solid #e0e0e0' }}>
-                <h4>Policy Impact Analysis</h4>
-                <p style={{ color: '#666', fontSize: '0.9em', marginBottom: 16 }}>
-                  Compare this candidate version against the current deployed version to see what changes.
-                </p>
-                <div className="form-group">
-                  <label><strong>Current Version</strong> (to compare against)</label>
-                  {approvedVersions.length > 0 ? (
-                    <select
-                      value={currentVersionId}
-                      onChange={(e) => setCurrentVersionId(e.target.value)}
-                      style={{ width: '100%', padding: '8px', border: '1px solid #ddd', borderRadius: 4 }}
-                    >
-                      <option value="">Select a version...</option>
-                      {approvedVersions.map((v: any) => (
-                        <option key={v.id} value={v.id}>
-                          Version {v.version_number} {v.change_summary ? `- ${v.change_summary}` : ''} ({v.id.substring(0, 8)}...)
-                        </option>
-                      ))}
-                    </select>
-                  ) : loadingVersions ? (
-                    <div style={{ padding: '8px', color: '#666' }}>Loading approved versions...</div>
-                  ) : (
-                    <div>
-                      <input
-                        type="text"
-                        value={currentVersionId}
-                        onChange={(e) => setCurrentVersionId(e.target.value)}
-                        placeholder="Enter current deployed version UUID..."
-                        style={{ fontFamily: 'monospace', fontSize: '13px', width: '100%', padding: '8px', border: '1px solid #ddd', borderRadius: 4 }}
-                      />
-                      <small style={{ display: 'block', marginTop: 4, color: '#666' }}>
-                        No approved versions found for this policy set. Enter version UUID manually.
-                      </small>
-                    </div>
-                  )}
-                </div>
-                <div className="form-group">
-                  <label><strong>Sample Hosts</strong> (select 1-3 hosts to analyze)</label>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 8, maxHeight: '150px', overflowY: 'auto', border: '1px solid #ddd', padding: 8, borderRadius: 4 }}>
-                    {hosts.slice(0, 20).map((h) => (
-                      <label key={h.id} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <input
-                          type="checkbox"
-                          checked={sampleHostIds.includes(h.id)}
-                          onChange={(e) => {
-                            if (e.target.checked) {
-                              setSampleHostIds([...sampleHostIds, h.id].slice(0, 3));
-                            } else {
-                              setSampleHostIds(sampleHostIds.filter(id => id !== h.id));
-                            }
+        {!loading && pendingVersions.length > 0 && (
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Policy Set</th>
+                <th>Version</th>
+                <th>Rules</th>
+                <th>Submitted By</th>
+                <th>Submitted</th>
+                <th>Change Summary</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pendingVersions.map(v => (
+                <>
+                  <tr key={v.id} style={{ cursor: 'pointer', background: expandedId === v.id ? '#f0ebe2' : undefined }}
+                    onClick={() => toggleExpand(v)}>
+                    <td>
+                      <strong
+                        style={{ color: '#8b6914', cursor: 'pointer' }}
+                        onClick={(e) => { e.stopPropagation(); navigate(`/policy-set/${v.policy_set_id}`); }}
+                      >
+                        {v.policy_set_name}
+                      </strong>
+                      <div style={{ fontSize: '11px', color: '#97846c' }}>
+                        Scope: {v.policy_set_scope_type}
+                      </div>
+                    </td>
+                    <td>
+                      <span
+                        style={{ fontWeight: 600, color: '#5c4633', cursor: 'pointer' }}
+                        onClick={(e) => { e.stopPropagation(); navigate(`/policy-version/${v.id}`); }}
+                      >
+                        v{v.version_number}
+                      </span>
+                      {v.is_high_risk && (
+                        <span style={{ display: 'inline-block', marginLeft: 6, padding: '1px 6px', borderRadius: 10, fontSize: '10px', fontWeight: 600, background: '#faf0ee', color: '#a63d2f', border: '1px solid #e8c4bf' }}>
+                          HIGH RISK
+                        </span>
+                      )}
+                    </td>
+                    <td style={{ textAlign: 'center' }}>
+                      <span style={{ fontWeight: 600 }}>{v.rule_count}</span>
+                    </td>
+                    <td>
+                      {v.created_by_display_name || v.created_by_username || '—'}
+                    </td>
+                    <td>
+                      <span title={new Date(v.submitted_at || v.created_at).toLocaleString()}>
+                        {v.submitted_at ? timeAgo(v.submitted_at) : timeAgo(v.created_at)}
+                      </span>
+                      <div style={{ fontSize: '11px', color: '#97846c' }}>
+                        {new Date(v.submitted_at || v.created_at).toLocaleDateString()}
+                      </div>
+                    </td>
+                    <td style={{ maxWidth: 250 }}>
+                      <span style={{ fontSize: '13px', color: '#5c4633' }}>
+                        {v.change_summary || <span style={{ color: '#b8a890', fontStyle: 'italic' }}>No summary</span>}
+                      </span>
+                    </td>
+                    <td onClick={e => e.stopPropagation()}>
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        <button
+                          onClick={() => handleApprove(v.id, `${v.policy_set_name} v${v.version_number}`)}
+                          disabled={actionLoading === v.id}
+                          style={{
+                            padding: '5px 12px',
+                            background: '#5a7a3a',
+                            color: '#fdfcf9',
+                            border: 'none',
+                            borderRadius: 5,
+                            fontWeight: 600,
+                            fontSize: '12px',
+                            cursor: actionLoading === v.id ? 'not-allowed' : 'pointer',
+                            opacity: actionLoading === v.id ? 0.6 : 1,
                           }}
-                        />
-                        <span>{h.hostname}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-                <button 
-                  onClick={loadImpactDiff} 
-                  className="btn-secondary"
-                  disabled={!currentVersionId || sampleHostIds.length === 0 || loadingDiff}
-                  style={{ marginBottom: 16 }}
-                >
-                  {loadingDiff ? 'Loading...' : 'Analyze Impact'}
-                </button>
+                        >
+                          Approve
+                        </button>
+                        <button
+                          onClick={() => setExpandedId(expandedId === v.id ? null : v.id)}
+                          style={{
+                            padding: '5px 12px',
+                            background: 'transparent',
+                            color: '#a63d2f',
+                            border: '1px solid #e8c4bf',
+                            borderRadius: 5,
+                            fontWeight: 600,
+                            fontSize: '12px',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          Reject
+                        </button>
+                        <button
+                          onClick={() => navigate(`/policy-version/${v.id}`)}
+                          className="btn-small"
+                          style={{ fontSize: '12px' }}
+                        >
+                          View Rules
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
 
-                {impactDiff && impactDiff.length > 0 && (
-                  <div style={{ marginTop: 16 }}>
-                    {impactDiff.map((diff: any) => (
-                      <div key={diff.hostId} style={{ marginBottom: 16, padding: 12, background: '#f8f9fa', borderRadius: 8 }}>
-                        <strong>{diff.hostname}</strong>
-                        <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12 }}>
+                  {/* Expanded row for rejection reason + impact diff */}
+                  {expandedId === v.id && (
+                    <tr key={`${v.id}-expanded`}>
+                      <td colSpan={7} style={{ background: '#fdfcf9', padding: 20, borderTop: 'none' }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+                          {/* Left: Reject */}
                           <div>
-                            <strong style={{ color: '#4caf50' }}>New Allows: {diff.summary.totalNewAllows}</strong>
-                            {diff.changes.newAllows.length > 0 && (
-                              <ul style={{ fontSize: '0.85em', marginTop: 4 }}>
-                                {diff.changes.newAllows.slice(0, 5).map((r: any, i: number) => (
-                                  <li key={i}>
-                                    {r.protocol} {r.ports || '*'}: {r.sourceType} {r.sourceValue}
-                                  </li>
+                            <h4 style={{ margin: '0 0 8px 0', color: '#5c4633' }}>Reject with Reason</h4>
+                            <textarea
+                              value={rejectReasons[v.id] || ''}
+                              onChange={(e) => setRejectReasons(prev => ({ ...prev, [v.id]: e.target.value }))}
+                              placeholder="Enter reason for rejection..."
+                              rows={3}
+                              style={{ width: '100%', padding: '8px 10px', border: '1px solid #d4c9b8', borderRadius: 6, fontSize: '13px', resize: 'vertical' }}
+                            />
+                            <button
+                              onClick={() => handleReject(v.id, `${v.policy_set_name} v${v.version_number}`)}
+                              disabled={actionLoading === v.id || !(rejectReasons[v.id]?.trim())}
+                              style={{
+                                marginTop: 8,
+                                padding: '7px 16px',
+                                background: (actionLoading === v.id || !(rejectReasons[v.id]?.trim())) ? '#ddd' : '#a63d2f',
+                                color: (actionLoading === v.id || !(rejectReasons[v.id]?.trim())) ? '#999' : '#fdfcf9',
+                                border: 'none',
+                                borderRadius: 6,
+                                fontWeight: 600,
+                                fontSize: '13px',
+                                cursor: (actionLoading === v.id || !(rejectReasons[v.id]?.trim())) ? 'not-allowed' : 'pointer',
+                              }}
+                            >
+                              Confirm Rejection
+                            </button>
+                          </div>
+
+                          {/* Right: Impact Diff */}
+                          <div>
+                            <h4 style={{ margin: '0 0 8px 0', color: '#5c4633' }}>Impact Analysis (Optional)</h4>
+                            <div style={{ marginBottom: 8 }}>
+                              <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#5c4633', marginBottom: 4 }}>Compare Against</label>
+                              {approvedVersions.length > 0 ? (
+                                <select
+                                  value={currentVersionId}
+                                  onChange={(e) => setCurrentVersionId(e.target.value)}
+                                  style={{ width: '100%', padding: '6px 8px', border: '1px solid #d4c9b8', borderRadius: 6, fontSize: '13px' }}
+                                >
+                                  <option value="">Select a version...</option>
+                                  {approvedVersions.map((av: any) => (
+                                    <option key={av.id} value={av.id}>
+                                      v{av.version_number} ({av.status}) {av.change_summary ? `— ${av.change_summary}` : ''}
+                                    </option>
+                                  ))}
+                                </select>
+                              ) : (
+                                <div style={{ fontSize: '12px', color: '#97846c' }}>No approved/deployed versions to compare against.</div>
+                              )}
+                            </div>
+                            <div style={{ marginBottom: 8 }}>
+                              <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#5c4633', marginBottom: 4 }}>Sample Hosts (1-3)</label>
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, maxHeight: 80, overflowY: 'auto' }}>
+                                {hosts.slice(0, 15).map(h => (
+                                  <label key={h.id} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: '12px' }}>
+                                    <input
+                                      type="checkbox"
+                                      checked={sampleHostIds.includes(h.id)}
+                                      onChange={(e) => {
+                                        if (e.target.checked) {
+                                          setSampleHostIds(prev => [...prev, h.id].slice(0, 3));
+                                        } else {
+                                          setSampleHostIds(prev => prev.filter(id => id !== h.id));
+                                        }
+                                      }}
+                                    />
+                                    {h.hostname}
+                                  </label>
                                 ))}
-                              </ul>
-                            )}
-                          </div>
-                          <div>
-                            <strong style={{ color: '#f44336' }}>New Denies: {diff.summary.totalNewDenies}</strong>
-                            {diff.changes.newDenies.length > 0 && (
-                              <ul style={{ fontSize: '0.85em', marginTop: 4 }}>
-                                {diff.changes.newDenies.slice(0, 5).map((r: any, i: number) => (
-                                  <li key={i}>
-                                    {r.protocol} {r.ports || '*'}: {r.sourceType} {r.sourceValue}
-                                  </li>
+                              </div>
+                            </div>
+                            <button
+                              onClick={loadImpactDiff}
+                              disabled={!currentVersionId || sampleHostIds.length === 0 || loadingDiff}
+                              style={{
+                                padding: '6px 14px',
+                                background: (!currentVersionId || sampleHostIds.length === 0) ? '#ddd' : '#8b6914',
+                                color: (!currentVersionId || sampleHostIds.length === 0) ? '#999' : '#fdfcf9',
+                                border: 'none',
+                                borderRadius: 6,
+                                fontSize: '12px',
+                                fontWeight: 600,
+                                cursor: (!currentVersionId || sampleHostIds.length === 0 || loadingDiff) ? 'not-allowed' : 'pointer',
+                              }}
+                            >
+                              {loadingDiff ? 'Analyzing...' : 'Analyze Impact'}
+                            </button>
+
+                            {impactDiff && impactDiff.length > 0 && (
+                              <div style={{ marginTop: 12 }}>
+                                {impactDiff.map((diff: any) => (
+                                  <div key={diff.hostId} style={{ padding: 8, background: '#f0ebe2', borderRadius: 6, marginBottom: 6, fontSize: '12px' }}>
+                                    <strong>{diff.hostname}</strong>
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginTop: 4 }}>
+                                      <span style={{ color: '#5a7a3a' }}>+{diff.summary.totalNewAllows} new allows</span>
+                                      <span style={{ color: '#a63d2f' }}>+{diff.summary.totalNewDenies} new denies</span>
+                                      <span style={{ color: '#e65100' }}>-{diff.summary.totalRemovedAllows} removed allows</span>
+                                      <span style={{ color: '#e65100' }}>-{diff.summary.totalRemovedDenies} removed denies</span>
+                                    </div>
+                                  </div>
                                 ))}
-                              </ul>
+                              </div>
                             )}
-                          </div>
-                          <div>
-                            <strong style={{ color: '#ff9800' }}>Removed Allows: {diff.summary.totalRemovedAllows}</strong>
-                          </div>
-                          <div>
-                            <strong style={{ color: '#ff9800' }}>Removed Denies: {diff.summary.totalRemovedDenies}</strong>
                           </div>
                         </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {version.status === 'PENDING_APPROVAL' && (
-              <div style={{ marginTop: 24, paddingTop: 20, borderTop: '2px solid #e0e0e0' }}>
-                <div className="form-group" style={{ marginBottom: 16 }}>
-                  <label><strong>Rejection Reason</strong> (required for rejection)</label>
-                  <textarea
-                    value={reason}
-                    onChange={(e) => setReason(e.target.value)}
-                    placeholder="Enter reason for rejection..."
-                    rows={3}
-                    disabled={loading}
-                  />
-                </div>
-                <div className="form-actions">
-                  <button
-                    onClick={handleApprove}
-                    className="btn-primary"
-                    disabled={loading}
-                  >
-                    ✓ Approve
-                  </button>
-                  <button
-                    onClick={handleReject}
-                    className="btn-danger"
-                    disabled={loading || !reason.trim()}
-                  >
-                    ✗ Reject
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {version.status !== 'PENDING_APPROVAL' && (
-              <div style={{ marginTop: 24, padding: 16, background: '#fff3cd', borderRadius: 8, color: '#856404' }}>
-                This version is not pending approval. Current status: <strong>{version.status}</strong>
-                {version.rejection_reason && (
-                  <div style={{ marginTop: 8 }}>
-                    <strong>Rejection reason:</strong> {version.rejection_reason}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {!version && !loading && versionId && (
-          <div style={{ marginTop: 20, padding: 16, background: '#ffebee', borderRadius: 8, color: '#c62828' }}>
-            Version not found or could not be loaded.
-          </div>
+                      </td>
+                    </tr>
+                  )}
+                </>
+              ))}
+            </tbody>
+          </table>
         )}
       </div>
     </div>

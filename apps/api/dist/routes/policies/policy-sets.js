@@ -7,7 +7,11 @@ policySetsRouter.use(requireAuth);
 // GET endpoints are read-only and accessible to viewers
 policySetsRouter.get('/', requireRole('viewer', 'operator', 'approver', 'admin'), async (_req, res) => {
     const { rows } = await pool.query(`SELECT ps.*,
-       (SELECT COUNT(*)::int FROM policy_versions pv WHERE pv.policy_set_id = ps.id) as version_count
+       (SELECT COUNT(*)::int FROM policy_versions pv WHERE pv.policy_set_id = ps.id) as version_count,
+       (SELECT COUNT(*)::int FROM policy_versions pv WHERE pv.policy_set_id = ps.id AND pv.status = 'APPROVED') as approved_count,
+       (SELECT COUNT(*)::int FROM policy_versions pv WHERE pv.policy_set_id = ps.id AND pv.status = 'DEPLOYED') as deployed_count,
+       (SELECT COUNT(*)::int FROM policy_versions pv WHERE pv.policy_set_id = ps.id AND pv.status = 'PENDING_APPROVAL') as pending_count,
+       (SELECT COUNT(*)::int FROM policy_versions pv WHERE pv.policy_set_id = ps.id AND pv.status = 'DRAFT') as draft_count
      FROM policy_sets ps ORDER BY ps.created_at DESC`);
     res.json({ policySets: rows });
 });

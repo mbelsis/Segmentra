@@ -3,8 +3,8 @@ import { z } from 'zod';
 import { pool } from '../../db/pool.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 export const interfacesRouter = Router();
-interfacesRouter.use(requireAuth, requireRole('operator', 'admin'));
-interfacesRouter.get('/hosts/:id/interfaces', async (req, res) => {
+interfacesRouter.use(requireAuth);
+interfacesRouter.get('/hosts/:id/interfaces', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
     const { rows } = await pool.query(`SELECT * FROM host_interfaces WHERE host_id=$1 ORDER BY name ASC`, [
         req.params.id
     ]);
@@ -19,7 +19,7 @@ const interfaceSchema = z.object({
     isPrimary: z.boolean().optional(),
     enabled: z.boolean().optional()
 });
-interfacesRouter.post('/hosts/:id/interfaces', async (req, res) => {
+interfacesRouter.post('/hosts/:id/interfaces', requireRole('operator', 'admin'), async (req, res) => {
     const parsed = interfaceSchema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: 'invalid_body' });
@@ -38,7 +38,7 @@ interfacesRouter.post('/hosts/:id/interfaces', async (req, res) => {
     ]);
     res.status(201).json({ interface: rows[0] });
 });
-interfacesRouter.put('/interfaces/:interfaceId', async (req, res) => {
+interfacesRouter.put('/interfaces/:interfaceId', requireRole('operator', 'admin'), async (req, res) => {
     const parsed = interfaceSchema.partial().safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: 'invalid_body' });
@@ -66,7 +66,7 @@ interfacesRouter.put('/interfaces/:interfaceId', async (req, res) => {
         return res.status(404).json({ error: 'not_found' });
     res.json({ interface: rows[0] });
 });
-interfacesRouter.delete('/interfaces/:interfaceId', async (req, res) => {
+interfacesRouter.delete('/interfaces/:interfaceId', requireRole('operator', 'admin'), async (req, res) => {
     const { rowCount } = await pool.query(`DELETE FROM host_interfaces WHERE id=$1`, [req.params.interfaceId]);
     if (!rowCount)
         return res.status(404).json({ error: 'not_found' });

@@ -3,8 +3,8 @@ import { compileHostPolicy } from '@segmentra/compiler';
 import { pool } from '../../db/pool.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 export const policyRenderRouter = Router();
-policyRenderRouter.use(requireAuth, requireRole('operator', 'admin'));
-policyRenderRouter.get('/policy-versions/:versionId/render/host/:hostId', async (req, res) => {
+policyRenderRouter.use(requireAuth);
+policyRenderRouter.get('/policy-versions/:versionId/render/host/:hostId', requireRole('operator', 'admin'), async (req, res) => {
     const { versionId, hostId } = req.params;
     const [hostRes, ifRes, vRes, rRes] = await Promise.all([
         pool.query(`SELECT id, hostname, mgmt_ip, firewall_backend FROM hosts WHERE id=$1`, [hostId]),
