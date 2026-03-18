@@ -25,6 +25,11 @@ export function PolicySetsPage() {
   const [hostSearchQuery, setHostSearchQuery] = useState('');
   const [hostFilterVlan, setHostFilterVlan] = useState<string>('');
 
+  // Policy set filtering state
+  const [filterSearch, setFilterSearch] = useState('');
+  const [filterScopeType, setFilterScopeType] = useState<string>('');
+  const [filterScopeTarget, setFilterScopeTarget] = useState<string>('');
+
   useEffect(() => {
     loadData();
   }, []);
@@ -400,69 +405,195 @@ export function PolicySetsPage() {
         </div>
       )}
 
-      {!loading && (
+      {!loading && (() => {
+        // Filter policy sets
+        let filtered = policySets;
+        if (filterSearch.trim()) {
+          const q = filterSearch.toLowerCase();
+          filtered = filtered.filter(ps =>
+            (ps.name || '').toLowerCase().includes(q) ||
+            (ps.description || '').toLowerCase().includes(q)
+          );
+        }
+        if (filterScopeType) {
+          filtered = filtered.filter(ps => ps.scope_type === filterScopeType);
+        }
+        if (filterScopeTarget) {
+          filtered = filtered.filter(ps =>
+            ps.scope_tag_id === filterScopeTarget || ps.scope_vlan_id === filterScopeTarget
+          );
+        }
+
+        // Build scope target options based on selected scope type
+        const scopeTargetOptions: { id: string; label: string }[] = [];
+        if (filterScopeType === 'TAG') {
+          tags.forEach(t => scopeTargetOptions.push({ id: t.id, label: t.name }));
+        } else if (filterScopeType === 'VLAN') {
+          vlans.forEach(v => scopeTargetOptions.push({ id: v.id, label: `${v.name} (${v.vlan_tag})` }));
+        } else if (!filterScopeType) {
+          // Show all tags and vlans when no scope type selected
+          tags.forEach(t => scopeTargetOptions.push({ id: t.id, label: `Tag: ${t.name}` }));
+          vlans.forEach(v => scopeTargetOptions.push({ id: v.id, label: `VLAN: ${v.name} (${v.vlan_tag})` }));
+        }
+
+        return (
         <div className="card">
-          <div style={{ 
-          padding: 12, 
-          marginBottom: 16, 
-          background: '#e3f2fd', 
-          borderRadius: 4, 
-          border: '1px solid #90caf9',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8
-        }}>
-          <span style={{ fontSize: '1.2em' }}>💡</span>
-          <div style={{ flex: 1 }}>
-            <strong>Tip:</strong> To add firewall rules, click <strong>"New Version"</strong> on a policy set.
-            This will create a new policy version where you can add, edit, and manage firewall rules.
-            <br />
-            <strong>OT/IoT:</strong> To create firewall policies for IoT devices, create a policy set scoped to TAG <code style={{ background: '#f0ebe2', padding: '1px 6px', borderRadius: 4 }}>iot-gateway</code> and add rules referencing IoT device IPs. The policy will be deployed to the gateway hosts that protect those devices.
+          <div style={{
+            padding: 12,
+            marginBottom: 16,
+            background: '#f0ebe2',
+            borderRadius: 8,
+            border: '1px solid #d4c9b8',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8
+          }}>
+            <div style={{ flex: 1, fontSize: '13px', color: '#5c4633' }}>
+              <strong>Tip:</strong> To add firewall rules, click <strong>"New Version"</strong> on a policy set.
+              This will create a new policy version where you can add, edit, and manage firewall rules.
+              <br />
+              <strong>OT/IoT:</strong> To create firewall policies for IoT devices, create a policy set scoped to TAG <code style={{ background: '#fdfcf9', padding: '1px 6px', borderRadius: 4 }}>iot-gateway</code> and add rules referencing IoT device IPs.
+            </div>
           </div>
-        </div>
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Description</th>
-              <th>Scope</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {policySets.map((ps) => (
-              <tr key={ps.id}>
-                <td><strong>{ps.name}</strong></td>
-                <td>{ps.description || '-'}</td>
-                <td>{getScopeDisplay(ps)}</td>
-                <td>
-                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                    <button
-                      onClick={() => createVersion(ps.id)}
-                      className="btn-small btn-primary"
-                      title="Click to create a new policy version where you can add firewall rules"
-                    >
-                      New Version
-                    </button>
-                    <button onClick={() => navigate(`/policy-set/${ps.id}`)} className="btn-small">View</button>
-                    {(ps.version_count === 0 || ps.version_count === '0') && (
-                      <button onClick={() => deletePolicySet(ps.id, ps.name)} className="btn-small btn-danger">Delete</button>
-                    )}
-                  </div>
-                </td>
-              </tr>
-            ))}
-            {policySets.length === 0 && (
-              <tr>
-                <td colSpan={4} className="empty-state">
-                  No policy sets yet. Click "Create Policy Set" to create one.
-                </td>
-              </tr>
+
+          {/* Filters */}
+          <div style={{ display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+            <div style={{ flex: '1 1 220px', minWidth: 180 }}>
+              <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#5c4633', marginBottom: 4 }}>Search</label>
+              <input
+                type="text"
+                value={filterSearch}
+                onChange={(e) => setFilterSearch(e.target.value)}
+                placeholder="Search by name or description..."
+                style={{ width: '100%', padding: '7px 10px', border: '1px solid #d4c9b8', borderRadius: 6, fontSize: '13px' }}
+              />
+            </div>
+            <div style={{ minWidth: 150 }}>
+              <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#5c4633', marginBottom: 4 }}>Scope Type</label>
+              <select
+                value={filterScopeType}
+                onChange={(e) => { setFilterScopeType(e.target.value); setFilterScopeTarget(''); }}
+                style={{ width: '100%', padding: '7px 10px', border: '1px solid #d4c9b8', borderRadius: 6, fontSize: '13px' }}
+              >
+                <option value="">All Types</option>
+                <option value="TAG">Tag</option>
+                <option value="VLAN">VLAN</option>
+                <option value="HOST_LIST">Host List</option>
+              </select>
+            </div>
+            {scopeTargetOptions.length > 0 && filterScopeType !== 'HOST_LIST' && (
+              <div style={{ minWidth: 180 }}>
+                <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#5c4633', marginBottom: 4 }}>
+                  {filterScopeType === 'TAG' ? 'Tag' : filterScopeType === 'VLAN' ? 'VLAN' : 'Tag / VLAN'}
+                </label>
+                <select
+                  value={filterScopeTarget}
+                  onChange={(e) => setFilterScopeTarget(e.target.value)}
+                  style={{ width: '100%', padding: '7px 10px', border: '1px solid #d4c9b8', borderRadius: 6, fontSize: '13px' }}
+                >
+                  <option value="">All</option>
+                  {scopeTargetOptions.map(o => (
+                    <option key={o.id} value={o.id}>{o.label}</option>
+                  ))}
+                </select>
+              </div>
             )}
-          </tbody>
-        </table>
+            {(filterSearch || filterScopeType || filterScopeTarget) && (
+              <button
+                onClick={() => { setFilterSearch(''); setFilterScopeType(''); setFilterScopeTarget(''); }}
+                style={{
+                  padding: '7px 14px',
+                  background: 'transparent',
+                  color: '#5c4633',
+                  border: '1px solid #d4c9b8',
+                  borderRadius: 6,
+                  fontSize: '13px',
+                  cursor: 'pointer',
+                  alignSelf: 'flex-end',
+                }}
+              >
+                Clear Filters
+              </button>
+            )}
+            <div style={{ alignSelf: 'flex-end', fontSize: '12px', color: '#97846c' }}>
+              {filtered.length} of {policySets.length} policy sets
+            </div>
+          </div>
+
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Description</th>
+                <th>Scope</th>
+                <th>Versions</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((ps) => (
+                <tr key={ps.id}>
+                  <td><strong>{ps.name}</strong></td>
+                  <td>{ps.description || '-'}</td>
+                  <td>{getScopeDisplay(ps)}</td>
+                  <td>
+                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
+                      {ps.deployed_count > 0 && (
+                        <span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: 10, fontSize: '11px', fontWeight: 600, background: '#e8f5e9', color: '#2e7d32', border: '1px solid #a5d6a7' }}>
+                          {ps.deployed_count} Deployed
+                        </span>
+                      )}
+                      {ps.approved_count > 0 && (
+                        <span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: 10, fontSize: '11px', fontWeight: 600, background: '#f0ebe2', color: '#8b6914', border: '1px solid #d4c9b8' }}>
+                          {ps.approved_count} Approved
+                        </span>
+                      )}
+                      {ps.pending_count > 0 && (
+                        <span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: 10, fontSize: '11px', fontWeight: 600, background: '#fff3e0', color: '#e65100', border: '1px solid #ffcc80' }}>
+                          {ps.pending_count} Pending
+                        </span>
+                      )}
+                      {ps.draft_count > 0 && (
+                        <span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: 10, fontSize: '11px', fontWeight: 600, background: '#f5f5f5', color: '#666', border: '1px solid #ddd' }}>
+                          {ps.draft_count} Draft
+                        </span>
+                      )}
+                      {ps.version_count === 0 && (
+                        <span style={{ fontSize: '12px', color: '#97846c' }}>No versions</span>
+                      )}
+                    </div>
+                  </td>
+                  <td>
+                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                      <button
+                        onClick={() => createVersion(ps.id)}
+                        className="btn-small btn-primary"
+                        title="Click to create a new policy version where you can add firewall rules"
+                      >
+                        New Version
+                      </button>
+                      <button onClick={() => navigate(`/policy-set/${ps.id}`)} className="btn-small">View</button>
+                      {(ps.version_count === 0 || ps.version_count === '0') && (
+                        <button onClick={() => deletePolicySet(ps.id, ps.name)} className="btn-small btn-danger">Delete</button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {filtered.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="empty-state">
+                    {policySets.length === 0
+                      ? 'No policy sets yet. Click "Create Policy Set" to create one.'
+                      : 'No policy sets match your filters.'}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
-      )}
+        );
+      })()}
     </div>
   );
 }
