@@ -238,6 +238,11 @@ export function DeploymentsPage() {
       {showCreate && (
         <div className="card">
           <h3>Create Deployment</h3>
+          <div style={{ padding: '10px 14px', background: '#fdf6ec', border: '1px solid #e8d5a8', borderRadius: 8, marginBottom: 16, fontSize: '13px', color: '#5c4633' }}>
+            <strong>Important:</strong> Deploying a policy will <strong>completely replace</strong> all existing firewall rules on the target hosts.
+            The current ruleset is backed up automatically before deployment. If you need to add rules to an existing policy,
+            create a new version of the policy set that includes both the existing and new rules.
+          </div>
           <div className="form-grid">
             <div className="form-group">
               <label>Policy Version ID *</label>
@@ -465,14 +470,14 @@ export function DeploymentsPage() {
                   value={formExpiryAction}
                   onChange={(e) => setFormExpiryAction(e.target.value as any)}
                 >
-                  <option value="NOTIFY_ONLY">Notify Only (send alert, keep rules active)</option>
-                  <option value="REMOVE">Remove (roll back firewall rules on hosts)</option>
-                  <option value="REVERT">Revert (restore previous policy version)</option>
+                  <option value="NOTIFY_ONLY">Notify Only — send alert, rules stay active</option>
+                  <option value="REMOVE">Remove — notify to manually rollback rules on hosts</option>
+                  <option value="REVERT">Revert — notify to manually re-deploy the previous policy</option>
                 </select>
                 <small style={{ color: '#666', fontSize: '0.85em' }}>
-                  {formExpiryAction === 'NOTIFY_ONLY' && 'A notification will be sent when the policy expires. Rules remain active until manually removed.'}
-                  {formExpiryAction === 'REMOVE' && 'Firewall rules will be automatically rolled back on all deployed hosts when the policy expires.'}
-                  {formExpiryAction === 'REVERT' && 'The previous policy version will be automatically re-deployed when this policy expires.'}
+                  {formExpiryAction === 'NOTIFY_ONLY' && 'A notification will be sent when the policy expires. The deployed rules remain active on hosts until you manually remove or replace them.'}
+                  {formExpiryAction === 'REMOVE' && 'The deployment will be marked as expired and a notification sent requesting manual rollback. The backup of the previous ruleset exists on each host at /var/backups/segmentra/.'}
+                  {formExpiryAction === 'REVERT' && 'The deployment will be marked as expired and a notification sent requesting you to re-deploy the previous policy version. Create a new deployment with the prior version to restore.'}
                 </small>
               </div>
             )}
