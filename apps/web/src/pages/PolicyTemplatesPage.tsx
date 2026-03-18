@@ -180,19 +180,41 @@ export function PolicyTemplatesPage() {
         </div>
       )}
 
-      <div style={{ display: 'flex', gap: 24 }}>
-        <div style={{ flex: 1 }}>
-          <table style={{ width: '100%' }}>
-            <thead><tr><th>Name</th><th>Category</th><th>Target Tag</th><th>Rules</th><th>Auto</th><th>Used</th><th>Actions</th></tr></thead>
+      <div style={{ display: 'flex', gap: 24, alignItems: 'flex-start' }}>
+        <div className="card" style={{ flex: 1, padding: 0, overflow: 'hidden' }}>
+          <div style={{ padding: '14px 18px', borderBottom: '1px solid #e8e0d4', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <h3 style={{ margin: 0, fontSize: '15px', color: '#292018' }}>Templates</h3>
+            <span style={{ fontSize: '12px', color: '#97846c' }}>{templates.length} template{templates.length !== 1 ? 's' : ''} — click a row to view rules</span>
+          </div>
+          <table className="data-table" style={{ margin: 0 }}>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Category</th>
+                <th>Target Tag</th>
+                <th style={{ textAlign: 'center' }}>Rules</th>
+                <th style={{ textAlign: 'center' }}>Auto-Apply</th>
+                <th style={{ textAlign: 'center' }}>Used</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
             <tbody>
               {templates.map(t => (
-                <tr key={t.id} onClick={() => selectTemplate(t)} style={{ cursor: 'pointer', background: selectedTemplate?.id === t.id ? '#f0ebe2' : undefined }}>
-                  <td>{t.name}</td>
-                  <td>{t.category || '-'}</td>
-                  <td>{t.target_tag_name || '-'}</td>
-                  <td>{t.rule_count}</td>
-                  <td>{t.auto_apply ? <span style={{ color: '#5a7a3a', fontWeight: 600 }}>Yes</span> : 'No'}</td>
-                  <td>{t.instantiation_count}x</td>
+                <tr
+                  key={t.id}
+                  onClick={() => selectTemplate(t)}
+                  style={{
+                    cursor: 'pointer',
+                    background: selectedTemplate?.id === t.id ? '#f0ebe2' : undefined,
+                    borderLeft: selectedTemplate?.id === t.id ? '3px solid #8b6914' : '3px solid transparent',
+                  }}
+                >
+                  <td><strong style={{ color: '#292018' }}>{t.name}</strong>{t.description && <div style={{ fontSize: '11px', color: '#97846c', marginTop: 2 }}>{t.description}</div>}</td>
+                  <td>{t.category ? <span style={{ padding: '2px 8px', background: '#f0ebe2', borderRadius: 10, fontSize: '11px', color: '#5c4633' }}>{t.category}</span> : <span style={{ color: '#b8a890' }}>—</span>}</td>
+                  <td>{t.target_tag_name ? <span style={{ padding: '2px 8px', background: '#e8f5e9', borderRadius: 10, fontSize: '11px', color: '#2e7d32' }}>{t.target_tag_name}</span> : <span style={{ color: '#b8a890' }}>—</span>}</td>
+                  <td style={{ textAlign: 'center', fontWeight: 600 }}>{t.rule_count}</td>
+                  <td style={{ textAlign: 'center' }}>{t.auto_apply ? <span style={{ color: '#5a7a3a', fontWeight: 600 }}>Yes</span> : <span style={{ color: '#b8a890' }}>No</span>}</td>
+                  <td style={{ textAlign: 'center' }}>{t.instantiation_count}x</td>
                   <td>
                     <div style={{ display: 'flex', gap: 4 }}>
                       <button onClick={(e) => { e.stopPropagation(); instantiate(t.id); }} className="btn-small" style={{ background: '#8b6914', color: '#fdfcf9', border: 'none', borderRadius: 5, padding: '4px 10px', fontSize: '12px', fontWeight: 600, cursor: 'pointer' }}>Instantiate</button>
@@ -201,34 +223,58 @@ export function PolicyTemplatesPage() {
                   </td>
                 </tr>
               ))}
-              {templates.length === 0 && <tr><td colSpan={7}>No templates found</td></tr>}
+              {templates.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="empty-state" style={{ textAlign: 'center', padding: 30 }}>
+                    No templates found. Click "+ New Template" to create one.
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
 
         {selectedTemplate && (
-          <div style={{ flex: 1, border: '1px solid #ccc', padding: 16, borderRadius: 4 }}>
-            <h3>{selectedTemplate.name} — Rules</h3>
+          <div className="card" style={{ flex: 1, padding: 0, overflow: 'hidden' }}>
+            <div style={{ padding: '14px 18px', borderBottom: '1px solid #e8e0d4', background: '#f7f4ef' }}>
+              <h3 style={{ margin: 0, fontSize: '15px', color: '#292018' }}>{selectedTemplate.name} — Rules</h3>
+            </div>
+            <div style={{ padding: 16 }}>
             <div style={{ padding: '8px 12px', background: '#f7f4ef', borderRadius: 6, marginBottom: 12, fontSize: '12.5px', color: '#78644e', borderLeft: '3px solid #d4c9b8' }}>
               <strong>Note:</strong> Baseline rules (loopback, established/related connections, management SSH access) are automatically added by the compiler when policies are deployed. You only need to define your application-specific rules here.
             </div>
-            <table style={{ width: '100%', fontSize: '0.9em' }}>
-              <thead><tr><th>#</th><th>Dir</th><th>Action</th><th>Proto</th><th>Ports</th><th>Source</th><th>Comment</th><th></th></tr></thead>
+            {templateRules.length === 0 && (
+              <div style={{ padding: 20, textAlign: 'center', color: '#97846c', fontSize: '13px' }}>
+                No rules yet. Add rules below.
+              </div>
+            )}
+            {templateRules.length > 0 && (
+            <table className="data-table" style={{ fontSize: '0.9em' }}>
+              <thead><tr><th>#</th><th>Dir</th><th>Action</th><th>Proto</th><th>Ports</th><th>Source</th><th>Comment</th><th style={{ width: 40 }}></th></tr></thead>
               <tbody>
                 {templateRules.map(r => (
                   <tr key={r.id}>
-                    <td>{r.order_index}</td>
-                    <td>{r.direction}</td>
-                    <td style={{ color: r.action === 'ALLOW' ? 'green' : 'red' }}>{r.action}</td>
+                    <td style={{ color: '#97846c' }}>{r.order_index}</td>
+                    <td><span style={{ fontWeight: 500 }}>{r.direction}</span></td>
+                    <td><span style={{ color: r.action === 'ALLOW' ? '#5a7a3a' : '#a63d2f', fontWeight: 600 }}>{r.action}</span></td>
                     <td>{r.protocol}</td>
-                    <td>{r.ports || '*'}</td>
-                    <td>{r.source_type}:{r.source_value}</td>
-                    <td>{r.comment || ''}</td>
-                    <td><button onClick={() => deleteRule(r.id)} style={{ color: 'red' }}>X</button></td>
+                    <td><code style={{ background: '#f0ebe2', padding: '1px 4px', borderRadius: 3, fontSize: '0.9em' }}>{r.ports || '*'}</code></td>
+                    <td style={{ fontSize: '12px' }}>{r.source_type}:{r.source_value}</td>
+                    <td style={{ color: '#78644e', fontSize: '12px' }}>{r.comment || ''}</td>
+                    <td>
+                      <button
+                        onClick={() => deleteRule(r.id)}
+                        className="btn-small btn-danger"
+                        style={{ padding: '2px 8px', fontSize: '11px' }}
+                      >
+                        X
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            )}
             <div style={{ marginTop: 16, padding: 12, background: '#f7f4ef', borderRadius: 8, border: '1px solid #e8e0d4' }}>
               <h4 style={{ margin: '0 0 10px', color: '#5c4633', fontSize: '14px' }}>Add Rule</h4>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8, fontSize: '0.9em' }}>
@@ -257,6 +303,7 @@ export function PolicyTemplatesPage() {
                 <div style={{ display: 'flex', alignItems: 'flex-end' }}>
                 <button onClick={addRule} className="btn-primary" style={{ width: '100%' }}>Add Rule</button></div>
               </div>
+            </div>
             </div>
           </div>
         )}
