@@ -13,4 +13,17 @@ const envSchema = z.object({
 
 export const env = envSchema.parse(process.env);
 
+// Warn loudly if running with the default JWT secret
+const KNOWN_UNSAFE_SECRETS = ['change-me-to-a-long-random-string'];
+if (KNOWN_UNSAFE_SECRETS.includes(env.JWT_SECRET)) {
+  if (env.NODE_ENV === 'production') {
+    // eslint-disable-next-line no-console
+    console.error('[FATAL] JWT_SECRET is set to an unsafe default. Set a strong, unique secret before running in production.');
+    process.exit(1);
+  } else {
+    // eslint-disable-next-line no-console
+    console.warn('[SECURITY WARNING] JWT_SECRET is set to an unsafe default. Tokens are forgeable. Set a strong, unique JWT_SECRET for any non-dev environment.');
+  }
+}
+
 

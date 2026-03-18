@@ -2,9 +2,9 @@ services:
   segmentra-db:
     image: postgres:16
     environment:
-      POSTGRES_USER: segmentra
-      POSTGRES_PASSWORD: segmentra
-      POSTGRES_DB: segmentra
+      POSTGRES_USER: ${DB_USER:-segmentra}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-segmentra}
+      POSTGRES_DB: ${DB_NAME:-segmentra}
     ports:
       - "${DB_PORT:-15432}:5432"
     volumes:
@@ -22,7 +22,7 @@ services:
       context: .
       dockerfile: ./infra/app/Dockerfile
     environment:
-      DATABASE_URL: postgres://segmentra:segmentra@segmentra-db:5432/segmentra
+      DATABASE_URL: ${DATABASE_URL:-postgres://segmentra:segmentra@segmentra-db:5432/segmentra}
       JWT_SECRET: ${JWT_SECRET:-change-me-to-a-long-random-string}
       SEGMENTRA_KEK_B64: ${SEGMENTRA_KEK_B64:-}
       BUNDLES_DIR: /bundles

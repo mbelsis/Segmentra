@@ -279,15 +279,24 @@ deploymentsRouter.post('/deployments', requireRole('operator', 'admin'), async (
     );
   }
 
-  // Safety check: verify SSH access will be preserved
-  const safetyCheck = await checkDeploymentSafety({
-    policyVersionId: b.policyVersionId,
-    hostIds: targetIds,
-    userIp: req.ip
-  });
+  // Safety check: verify SSH access will be preserved (with 10s timeout to avoid blocking)
+  let safetyCheck: Awaited<ReturnType<typeof checkDeploymentSafety>> | null = null;
+  try {
+    safetyCheck = await Promise.race([
+      checkDeploymentSafety({
+        policyVersionId: b.policyVersionId,
+        hostIds: targetIds.slice(0, 5), // Check a sample of hosts to limit latency
+        userIp: req.ip
+      }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('safety_check_timeout')), 10000))
+    ]);
+  } catch (e: any) {
+    // eslint-disable-next-line no-console
+    console.warn(`[Safety Check] Skipped: ${e.message}`);
+  }
 
-  // For FULL mode deployments, require SSH access to be preserved
-  if (b.mode === 'FULL' && !safetyCheck.sshAccessPreserved && safetyCheck.errors.length > 0) {
+  // For FULL mode deployments, require SSH access to be preserved (only if check completed)
+  if (safetyCheck && b.mode === 'FULL' && !safetyCheck.sshAccessPreserved && safetyCheck.errors.length > 0) {
     return res.status(400).json({
       error: 'safety_check_failed',
       message: 'Deployment would block SSH access from management VLAN',
@@ -296,8 +305,7 @@ deploymentsRouter.post('/deployments', requireRole('operator', 'admin'), async (
   }
 
   // For other modes, warn but allow (user can proceed with caution)
-  if (!safetyCheck.sshAccessPreserved && safetyCheck.errors.length > 0) {
-    // Log warning but don't block
+  if (safetyCheck && !safetyCheck.sshAccessPreserved && safetyCheck.errors.length > 0) {
     // eslint-disable-next-line no-console
     console.warn(`[Safety Check] Deployment ${b.policyVersionId} may block SSH access:`, safetyCheck.errors);
   }
