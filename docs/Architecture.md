@@ -32,6 +32,8 @@ This document provides detailed technical information about Segmentra's architec
    - [Notification System](#notification-system)
    - [Security Posture Audit](#security-posture-audit)
    - [Role-Based Access Control (RBAC)](#role-based-access-control-rbac)
+   - [Async Deployment Execution](#async-deployment-execution)
+   - [Login Security](#login-security)
 7. [Troubleshooting](#troubleshooting)
 8. [Configuration Details](#configuration-details)
    - [Environment Variables](#environment-variables)
@@ -1745,6 +1747,75 @@ web-04 ansible_host=... segmentra_policy_file=/bundles/xxx/host_rules/web-04.nft
 - **Use `auto` for most hosts**: Modern Linux systems will automatically use nftables, which is preferred.
 - **Set `iptables` explicitly**: Only when you know a host requires iptables (older systems, compatibility requirements).
 - **Set `nftables` explicitly**: When you want to ensure nftables is used even if the system might support both.
+
+### Async Deployment Execution
+
+Deployment execution is fully asynchronous with real-time progress tracking.
+
+#### Flow
+
+1. **POST /deployments/:id/start** returns `202 Accepted` immediately
+2. Execution runs in the background via `setTimeout(async () => {...}, 0)`
+3. Progress is tracked in `deployments.progress` (JSONB column)
+4. UI polls `GET /deployments/:id` and displays a progress bar
+
+#### Phases
+
+| Phase | Description | Progress Bar Color |
+|-------|------------|-------------------|
+| `starting` | Initializing deployment | - |
+| `checking` | Pre-flight SSH checks (backend auto-detection) | Amber |
+| `deploying` | Pushing firewall rules to hosts | Green |
+| `complete` | All hosts processed | Green (100%) |
+| `failed` | Execution error | Red |
+
+#### Progress JSON Format
+
+```json
+{
+  "phase": "checking",
+  "checked": 5,
+  "totalToCheck": 20,
+  "deployed": 0,
+  "totalToDeploy": 20,
+  "currentHost": "web-prod-03.acme.corp",
+  "warnings": []
+}
+```
+
+#### Stop/Pause Behavior
+
+The SSH executor checks a `shouldContinue()` callback between each host. When a deployment is stopped or paused via the API, remaining hosts are marked SKIPPED instead of being processed.
+
+### Login Security
+
+#### Rate Limiting
+
+The login endpoint (`POST /api/auth/login`) implements in-memory rate limiting:
+- **10 attempts** per IP address per **15-minute window**
+- After exceeding the limit: `429 Too Many Requests` with message "Too many login attempts"
+- The counter resets automatically after 15 minutes
+
+#### Username Enumeration Prevention
+
+All login failure cases return the same generic error response:
+```json
+{ "error": "invalid_credentials", "message": "Invalid username or password" }
+```
+
+This prevents attackers from distinguishing between:
+- Non-existent username
+- Disabled account
+- Wrong password
+- No roles assigned
+- LDAP not configured
+
+#### Token Storage
+
+JWT tokens are stored in browser `localStorage`. This is a common pattern but means any XSS vulnerability could steal tokens. For high-security deployments, consider:
+- Short token expiry (currently 12 hours, configurable in `apps/api/src/services/jwt.ts`)
+- Content Security Policy (CSP) headers to mitigate XSS
+- Regular security audits of frontend dependencies
 
 ---
 
