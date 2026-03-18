@@ -110,9 +110,13 @@ export function PolicyTemplatesPage() {
     <div>
       <h2>Policy Templates</h2>
       <p style={{ color: '#78644e', fontSize: '13.5px', marginTop: -4, marginBottom: 16, lineHeight: 1.6 }}>
-        Reusable policy blueprints for common server roles. Create a template (e.g., "Web Server" = allow 80/443 in, allow 53 out),
-        then <strong>instantiate</strong> it to generate a real policy set with rules in DRAFT status — ready for the normal approval workflow.
-        Enable <strong>auto-apply</strong> on a template to automatically create DRAFT policies whenever a host gains the template's target tag.
+        Templates are reusable firewall rule blueprints for common server roles (e.g., a "Web Server" template with allow 80/443 inbound and allow 53 outbound).
+        Templates are <strong>not</strong> policies — they don't get deployed to hosts directly.
+        Click <strong>Instantiate</strong> to create a real policy set from a template. The generated policy starts in DRAFT status and must go through the normal approval workflow before it can be deployed.
+        <br /><br />
+        <strong>Auto-apply:</strong> When enabled on a template with a target tag, Segmentra will automatically create a DRAFT policy set from this template
+        whenever a host is assigned that tag (manually or via auto-tagging rules). For example, if a template targets the tag "web-server" with auto-apply enabled,
+        any host that gains the "web-server" tag will automatically get a DRAFT policy created from this template — still requiring approval before deployment.
       </p>
       {error && <div style={{ color: 'red', marginBottom: 8 }}>{error} <button onClick={() => setError('')}>dismiss</button></div>}
 
@@ -125,9 +129,9 @@ export function PolicyTemplatesPage() {
       </div>
 
       {showCreate && (
-        <div style={{ border: '1px solid #ccc', padding: 16, marginBottom: 16, borderRadius: 4 }}>
-          <h3>Create Template</h3>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+        <div style={{ border: '1px solid #d4c9b8', padding: 20, marginBottom: 16, borderRadius: 8, background: '#fdfcf9' }}>
+          <h3 style={{ marginTop: 0, marginBottom: 12, color: '#292018' }}>Create Template</h3>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <input placeholder="Name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
             <input placeholder="Category" value={form.category} onChange={e => setForm(f => ({ ...f, category: e.target.value }))} />
             <input placeholder="Description" value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))} />
@@ -135,11 +139,43 @@ export function PolicyTemplatesPage() {
               <option value="">No target tag</option>
               {tags.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
             </select>
-            <label><input type="checkbox" checked={form.autoApply} onChange={e => setForm(f => ({ ...f, autoApply: e.target.checked }))} /> Auto-apply when tag assigned</label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '13px', color: '#5c4633' }}>
+              <input type="checkbox" checked={form.autoApply} onChange={e => setForm(f => ({ ...f, autoApply: e.target.checked }))} /> Auto-apply when tag assigned
+            </label>
           </div>
-          <div style={{ marginTop: 8 }}>
-            <button onClick={createTemplate}>Create</button>
-            <button onClick={() => setShowCreate(false)} style={{ marginLeft: 8 }}>Cancel</button>
+          <div style={{ marginTop: 16, display: 'flex', gap: 8 }}>
+            <button
+              onClick={createTemplate}
+              disabled={!form.name.trim()}
+              style={{
+                padding: '9px 20px',
+                background: !form.name.trim() ? '#b8a890' : '#5a7a3a',
+                color: '#fdfcf9',
+                border: 'none',
+                borderRadius: 6,
+                fontWeight: 600,
+                fontSize: '14px',
+                cursor: !form.name.trim() ? 'not-allowed' : 'pointer',
+                opacity: !form.name.trim() ? 0.6 : 1,
+              }}
+            >
+              Create Template
+            </button>
+            <button
+              onClick={() => setShowCreate(false)}
+              style={{
+                padding: '9px 20px',
+                background: 'transparent',
+                color: '#5c4633',
+                border: '1px solid #d4c9b8',
+                borderRadius: 6,
+                fontWeight: 500,
+                fontSize: '14px',
+                cursor: 'pointer',
+              }}
+            >
+              Cancel
+            </button>
           </div>
         </div>
       )}
@@ -150,16 +186,18 @@ export function PolicyTemplatesPage() {
             <thead><tr><th>Name</th><th>Category</th><th>Target Tag</th><th>Rules</th><th>Auto</th><th>Used</th><th>Actions</th></tr></thead>
             <tbody>
               {templates.map(t => (
-                <tr key={t.id} onClick={() => selectTemplate(t)} style={{ cursor: 'pointer', background: selectedTemplate?.id === t.id ? '#e8f0fe' : undefined }}>
+                <tr key={t.id} onClick={() => selectTemplate(t)} style={{ cursor: 'pointer', background: selectedTemplate?.id === t.id ? '#f0ebe2' : undefined }}>
                   <td>{t.name}</td>
                   <td>{t.category || '-'}</td>
                   <td>{t.target_tag_name || '-'}</td>
                   <td>{t.rule_count}</td>
-                  <td>{t.auto_apply ? 'Yes' : 'No'}</td>
+                  <td>{t.auto_apply ? <span style={{ color: '#5a7a3a', fontWeight: 600 }}>Yes</span> : 'No'}</td>
                   <td>{t.instantiation_count}x</td>
                   <td>
-                    <button onClick={(e) => { e.stopPropagation(); instantiate(t.id); }}>Instantiate</button>
-                    <button onClick={(e) => { e.stopPropagation(); deleteTemplate(t.id); }} style={{ marginLeft: 4, color: 'red' }}>Delete</button>
+                    <div style={{ display: 'flex', gap: 4 }}>
+                      <button onClick={(e) => { e.stopPropagation(); instantiate(t.id); }} className="btn-small" style={{ background: '#8b6914', color: '#fdfcf9', border: 'none', borderRadius: 5, padding: '4px 10px', fontSize: '12px', fontWeight: 600, cursor: 'pointer' }}>Instantiate</button>
+                      <button onClick={(e) => { e.stopPropagation(); deleteTemplate(t.id); }} className="btn-small btn-danger">Delete</button>
+                    </div>
                   </td>
                 </tr>
               ))}
