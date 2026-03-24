@@ -11,7 +11,8 @@
     "db:migrate": "npm run migrate:up -w @segmentra/db",
     "db:seed": "npm run seed -w @segmentra/db",
     "lint": "npm run lint -ws",
-    "format": "npm run format -ws"
+    "format": "npm run format -ws",
+    "test:integration:ssh-docker": "node ./tests/run-docker-ssh-integration.mjs"
   },
   "engines": {
     "node": ">=20"

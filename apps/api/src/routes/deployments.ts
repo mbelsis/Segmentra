@@ -23,6 +23,43 @@ deploymentsRouter.use(requireAuth);
 // Host deployment timeout: 10 minutes (600000 ms)
 const HOST_DEPLOYMENT_TIMEOUT_MS = 10 * 60 * 1000;
 
+type MaterializedSshCredential =
+  | { authMethod: 'key'; username: string; privateKeyPath: string; cleanup: () => void }
+  | { authMethod: 'password'; username: string; password: string; cleanup: () => void };
+
+async function materializeSshCredential(deploymentId: string, cred: any, bundleDir: string): Promise<MaterializedSshCredential> {
+  const authMethod = String(cred.auth_method ?? 'KEY').toUpperCase();
+
+  if (authMethod === 'PASSWORD') {
+    if (!cred.password_secret_id) throw new Error('missing_ssh_password_secret');
+    const password = (await readSecretPlaintext(cred.password_secret_id)).toString('utf8');
+    return {
+      authMethod: 'password',
+      username: cred.username,
+      password,
+      cleanup: () => {}
+    };
+  }
+
+  if (!cred.private_key_secret_id) throw new Error('missing_ssh_private_key_secret');
+  const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
+  const keyPath = path.join(bundleDir, `ssh_key_${deploymentId}`);
+  fs.writeFileSync(keyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
+
+  return {
+    authMethod: 'key',
+    username: cred.username,
+    privateKeyPath: keyPath,
+    cleanup: () => {
+      try {
+        if (fs.existsSync(keyPath)) fs.unlinkSync(keyPath);
+      } catch {
+        // Best-effort cleanup.
+      }
+    }
+  };
+}
+
 /**
  * Check for and timeout stale host deployments that have been RUNNING for too long
  * This function is exported so it can be called from the main index.ts for periodic checks
@@ -661,30 +698,18 @@ async function generateBundle(deploymentId: string) {
   };
   fs.writeFileSync(path.join(bundleDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
 
-  // pick GLOBAL ssh credential for v1 (needed for auto-detection and bundle generation)
-  const credRes = await pool.query(
-    `SELECT * FROM ssh_credentials WHERE scope_type='GLOBAL' ORDER BY created_at DESC LIMIT 1`
-  );
-  const cred = credRes.rows[0];
-  if (!cred) throw new Error('missing_ssh_credential');
-  const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
-  const keyPath = path.join(bundleDir, 'ssh_key');
-  fs.writeFileSync(keyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
-  
-  // Create temp key for auto-detection (will be cleaned up)
-  // Use os.tmpdir() for temporary keys to avoid dependency on BUNDLES_DIR existing
-  const tempKeyPath = path.join(os.tmpdir(), `segmentra_deployment_key_${deploymentId}_${Date.now()}`);
-  fs.writeFileSync(tempKeyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
-
   const inventoryLines: string[] = ['[all]'];
   const hostPolicyHashes: Map<string, string> = new Map(); // host_id -> policy hash
+  const ansibleCredRes = await pool.query(
+    `SELECT username FROM ssh_credentials WHERE scope_type='GLOBAL' ORDER BY created_at DESC LIMIT 1`
+  );
+  const ansibleUsername = ansibleCredRes.rows[0]?.username ?? 'root';
 
   const totalHosts = hostRows.rows.length;
   await updateProgress(deploymentId, { phase: 'checking', checked: 0, totalToCheck: totalHosts, deployed: 0, totalToDeploy: totalHosts, warnings: [] });
 
-  try {
-    let checkedCount = 0;
-    for (const h of hostRows.rows as any[]) {
+  let checkedCount = 0;
+  for (const h of hostRows.rows as any[]) {
       const ifsRes = await pool.query(`SELECT name, role, enabled FROM host_interfaces WHERE host_id=$1`, [h.id]);
 
       // Auto-detect backend if set to 'auto' or null
@@ -693,13 +718,29 @@ async function generateBundle(deploymentId: string) {
         backend = 'iptables';
       } else if (h.firewall_backend === 'auto' || !h.firewall_backend) {
         // Perform auto-detection via SSH
+        const credRes = await pool.query(
+          `SELECT * FROM ssh_credentials WHERE scope_type='GLOBAL' ORDER BY created_at DESC LIMIT 1`
+        );
+        const cred = credRes.rows[0];
+        if (!cred) throw new Error('missing_ssh_credential');
+        if (String(cred.auth_method ?? 'KEY').toUpperCase() !== 'KEY') {
+          throw new Error('auto_detect_requires_key_auth');
+        }
+
+        const tempBundleDir = fs.mkdtempSync(path.join(os.tmpdir(), `segmentra-detect-${deploymentId}-`));
+        const materialized = await materializeSshCredential(deploymentId, cred, tempBundleDir);
         try {
+          if (materialized.authMethod !== 'key') {
+            throw new Error('auto_detect_requires_key_auth');
+          }
+
           const sshHostInfo: SshHostInfo = {
             hostname: h.hostname,
             ip: String(h.mgmt_ip),
             port: h.ssh_port || 22,
-            username: cred.username,
-            privateKeyPath: tempKeyPath
+            username: materialized.username,
+            authMethod: 'key',
+            privateKeyPath: materialized.privateKeyPath
           };
           const readinessResult = await checkHostReadiness(sshHostInfo);
           backend = readinessResult.backend === 'iptables' ? 'iptables' : 'nftables';
@@ -715,6 +756,13 @@ async function generateBundle(deploymentId: string) {
           // eslint-disable-next-line no-console
           console.warn(`[Auto-detection failed for ${h.hostname}, defaulting to nftables]`, detectionError.message);
           backend = 'nftables';
+        } finally {
+          materialized.cleanup();
+          try {
+            fs.rmSync(tempBundleDir, { recursive: true, force: true });
+          } catch {
+            // Ignore cleanup errors.
+          }
         }
       } else {
         backend = 'nftables';
@@ -777,18 +825,8 @@ async function generateBundle(deploymentId: string) {
       const policyFileRunnerPath = `/bundles/${deploymentId}/host_rules/${h.hostname}.${ext}`;
 
       inventoryLines.push(
-        `${h.hostname} ansible_host=${String(h.mgmt_ip)} ansible_port=${h.ssh_port} ansible_user=${cred.username} ansible_ssh_private_key_file=/bundles/${deploymentId}/ssh_key ansible_become=yes ansible_become_method=sudo segmentra_policy_file=${policyFileRunnerPath}`
+        `${h.hostname} ansible_host=${String(h.mgmt_ip)} ansible_port=${h.ssh_port} ansible_user=${ansibleUsername} ansible_become=yes ansible_become_method=sudo segmentra_policy_file=${policyFileRunnerPath}`
       );
-    }
-  } finally {
-    // Clean up temp key file used for auto-detection
-    if (fs.existsSync(tempKeyPath)) {
-      try {
-        fs.unlinkSync(tempKeyPath);
-      } catch (e) {
-        // Ignore cleanup errors
-      }
-    }
   }
 
   fs.writeFileSync(path.join(bundleDir, 'inventory.ini'), inventoryLines.join('\n') + '\n', 'utf8');
@@ -888,9 +926,7 @@ export async function executeDeploymentStart(
       throw new Error('missing_ssh_credential');
     }
 
-    const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
-    const keyPath = path.join(bundleDir, 'ssh_key');
-    fs.writeFileSync(keyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
+    const materializedCred = await materializeSshCredential(deploymentId, cred, bundleDir);
 
     // Get hosts and policy files (only enabled hosts)
     const hostRows = await pool.query(
@@ -902,74 +938,80 @@ export async function executeDeploymentStart(
     );
 
     const sshHosts: SshHost[] = [];
-    for (const h of hostRows.rows as any[]) {
-      const backend = h.firewall_backend === 'iptables' ? 'iptables' : 'nftables';
-      const ext = backend === 'nftables' ? 'nft' : 'iptables';
-      const policyFilePath = path.join(bundleDir, 'host_rules', `${h.hostname}.${ext}`);
+    try {
+      for (const h of hostRows.rows as any[]) {
+        const backend = h.firewall_backend === 'iptables' ? 'iptables' : 'nftables';
+        const ext = backend === 'nftables' ? 'nft' : 'iptables';
+        const policyFilePath = path.join(bundleDir, 'host_rules', `${h.hostname}.${ext}`);
 
-      if (fs.existsSync(policyFilePath)) {
-        sshHosts.push({
-          hostname: h.hostname,
-          ip: String(h.mgmt_ip),
-          port: h.ssh_port || 22,
-          username: cred.username,
-          privateKeyPath: keyPath,
-          policyFilePath,
-          backend
-        });
+        if (fs.existsSync(policyFilePath)) {
+          sshHosts.push({
+            hostname: h.hostname,
+            ip: String(h.mgmt_ip),
+            port: h.ssh_port || 22,
+            username: materializedCred.username,
+            authMethod: materializedCred.authMethod,
+            privateKeyPath: materializedCred.authMethod === 'key' ? materializedCred.privateKeyPath : undefined,
+            password: materializedCred.authMethod === 'password' ? materializedCred.password : undefined,
+            policyFilePath,
+            backend
+          });
+        }
       }
-    }
 
-    const results = await runSshDeployment({
-      hosts: sshHosts,
-      stdoutPath,
-      stderrPath,
-      // Check between each host if deployment was stopped/paused
-      shouldContinue: async () => {
-        const statusCheck = await pool.query(
-          `SELECT status FROM deployments WHERE id = $1`,
-          [deploymentId]
-        );
-        const currentStatus = statusCheck.rows[0]?.status;
-        // Continue only if still RUNNING
-        return currentStatus === 'RUNNING';
-      },
-    });
+      const results = await runSshDeployment({
+        hosts: sshHosts,
+        stdoutPath,
+        stderrPath,
+        // Check between each host if deployment was stopped/paused
+        shouldContinue: async () => {
+          const statusCheck = await pool.query(
+            `SELECT status FROM deployments WHERE id = $1`,
+            [deploymentId]
+          );
+          const currentStatus = statusCheck.rows[0]?.status;
+          // Continue only if still RUNNING
+          return currentStatus === 'RUNNING';
+        },
+      });
 
-    // Mark skipped hosts in the database
-    for (const r of results) {
-      if (r.skipped) {
-        await pool.query(
-          `UPDATE deployment_hosts SET status='SKIPPED', finished_at=now(), message=$2 WHERE deployment_id=$1 AND host_id=(SELECT id FROM hosts WHERE hostname=$3)`,
-          [deploymentId, 'Deployment was stopped before this host was processed', r.hostname]
-        );
+      // Mark skipped hosts in the database
+      for (const r of results) {
+        if (r.skipped) {
+          await pool.query(
+            `UPDATE deployment_hosts SET status='SKIPPED', finished_at=now(), message=$2 WHERE deployment_id=$1 AND host_id=(SELECT id FROM hosts WHERE hostname=$3)`,
+            [deploymentId, 'Deployment was stopped before this host was processed', r.hostname]
+          );
+        }
       }
-    }
 
-    // Update deployment_hosts based on results
-    const failedHosts = results.filter(r => !r.success && !r.skipped);
-    ok = failedHosts.length === 0;
-    exitCode = ok ? 0 : 1;
+      // Update deployment_hosts based on results
+      const failedHosts = results.filter(r => !r.success && !r.skipped);
+      ok = failedHosts.length === 0;
+      exitCode = ok ? 0 : 1;
 
-    for (const result of results) {
-      const host = hostRows.rows.find((h: any) => h.hostname === result.hostname);
-      if (host) {
-        const policyHash = result.success ? hostPolicyHashes.get(host.id) || null : null;
-        await pool.query(
-          `UPDATE deployment_hosts
-           SET status=$2, finished_at=now(), message=$3, applied_hash=$5
-           WHERE deployment_id=$1 AND host_id=$4`,
-          [deploymentId, result.success ? 'SUCCEEDED' : 'FAILED', result.success ? 'ok' : 'ssh_failed', host.id, policyHash]
-        );
+      for (const result of results) {
+        const host = hostRows.rows.find((h: any) => h.hostname === result.hostname);
+        if (host) {
+          const policyHash = result.success ? hostPolicyHashes.get(host.id) || null : null;
+          await pool.query(
+            `UPDATE deployment_hosts
+             SET status=$2, finished_at=now(), message=$3, applied_hash=$5
+             WHERE deployment_id=$1 AND host_id=$4`,
+            [deploymentId, result.success ? 'SUCCEEDED' : 'FAILED', result.success ? 'ok' : 'ssh_failed', host.id, policyHash]
+          );
+        }
       }
-    }
 
-    await pool.query(
-      `UPDATE execution_runs
-       SET exit_code=$2, stdout_path=$3, stderr_path=$4, finished_at=now(), status='DONE'
-       WHERE id=$1`,
-      [executionId, exitCode, stdoutPath, stderrPath]
-    );
+      await pool.query(
+        `UPDATE execution_runs
+         SET exit_code=$2, stdout_path=$3, stderr_path=$4, finished_at=now(), status='DONE'
+         WHERE id=$1`,
+        [executionId, exitCode, stdoutPath, stderrPath]
+      );
+    } finally {
+      materializedCred.cleanup();
+    }
     } else {
     // Ansible executor (default)
     const executionIdRes = await pool.query(
@@ -1023,6 +1065,7 @@ export async function executeDeploymentStart(
          WHERE deployment_id=$1 AND status='RUNNING'`,
         [deploymentId]
       );
+    }
     }
 
     // Get final host status counts to determine deployment status
@@ -1123,19 +1166,8 @@ export async function executeDeploymentStart(
         }
       }
     });
-    }
 
     await updateProgress(deploymentId, { phase: 'complete', checked: deployHostCount, totalToCheck: deployHostCount, deployed: deployHostCount, totalToDeploy: deployHostCount, warnings: [] });
-
-    // Clean up SSH key from bundle after deployment completes
-    try {
-      const sshKeyPath = path.join(bundleDir, 'ssh_key');
-      if (fs.existsSync(sshKeyPath)) {
-        fs.unlinkSync(sshKeyPath);
-      }
-    } catch {
-      // Best-effort cleanup — don't fail the deployment
-    }
 
     return { ok, exitCode, executionId: executionId! };
 }
@@ -1321,5 +1353,3 @@ export async function processScheduledDeployments(): Promise<number> {
 
   return processedCount;
 }
-
-

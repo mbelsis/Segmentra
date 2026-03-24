@@ -187,6 +187,18 @@ For detailed installation instructions, see [installation.md](docs/installation.
 
 ---
 
+## Integration Tests
+
+Segmentra includes a Docker-based integration test for the SSH deployment path. If you want to validate a new local version of the app, you can run the starter script from the repository root:
+
+```bash
+npm run test:integration:ssh-docker
+```
+
+This builds the current code, starts a temporary API + PostgreSQL + 3 target-container environment, deploys sample firewall ACLs through the real API using both SSH password and SSH key authentication, verifies the resulting `iptables` state, and runs live `ping` checks between the targets. For full details, see [tests/README.md](tests/README.md).
+
+---
+
 ## Architecture
 
 TypeScript monorepo:

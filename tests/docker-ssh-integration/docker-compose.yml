@@ -1,0 +1,92 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: segmentra
+      POSTGRES_PASSWORD: segmentra
+      POSTGRES_DB: segmentra
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U segmentra -d segmentra"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      integration_net:
+        ipv4_address: 172.29.0.10
+
+  api:
+    build:
+      context: ../..
+      dockerfile: infra/app/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://segmentra:segmentra@db:5432/segmentra
+      JWT_SECRET: integration-test-secret-1234567890
+      SEGMENTRA_KEK_B64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      BUNDLES_DIR: /bundles
+      ANSIBLE_RUNNER_CONTAINER: segmentra-unused
+      PORT: 8080
+    ports:
+      - "18080:8080"
+    volumes:
+      - integration_bundles:/bundles
+    networks:
+      integration_net:
+        ipv4_address: 172.29.0.20
+
+  target-a:
+    build:
+      context: ./target
+    environment:
+      TARGET_USER: segmentra
+      TARGET_PASSWORD: segmentra123!
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ./.runtime/keys:/runtime-keys:ro
+    networks:
+      integration_net:
+        ipv4_address: 172.29.0.31
+
+  target-b:
+    build:
+      context: ./target
+    environment:
+      TARGET_USER: segmentra
+      TARGET_PASSWORD: segmentra123!
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ./.runtime/keys:/runtime-keys:ro
+    networks:
+      integration_net:
+        ipv4_address: 172.29.0.32
+
+  target-c:
+    build:
+      context: ./target
+    environment:
+      TARGET_USER: segmentra
+      TARGET_PASSWORD: segmentra123!
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ./.runtime/keys:/runtime-keys:ro
+    networks:
+      integration_net:
+        ipv4_address: 172.29.0.33
+
+volumes:
+  integration_bundles:
+
+networks:
+  integration_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24

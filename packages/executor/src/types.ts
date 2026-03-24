@@ -7,6 +7,8 @@ export interface SshHostInfo {
   ip: string;
   port: number;
   username: string;
-  privateKeyPath: string;
+  authMethod?: 'key' | 'password';
+  privateKeyPath?: string;
+  password?: string;
   backend?: 'nftables' | 'iptables' | 'auto';
 }

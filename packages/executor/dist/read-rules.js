@@ -5,6 +5,9 @@ import crypto from 'node:crypto';
  * Normalizes the output for consistent hashing.
  */
 export async function readHostFirewallRules(host) {
+    if (!host.privateKeyPath) {
+        throw new Error('read_rules_requires_private_key');
+    }
     const sshOptions = [
         '-o', 'StrictHostKeyChecking=no',
         '-o', 'UserKnownHostsFile=/dev/null',

@@ -21,6 +21,10 @@ export interface HostReadinessResult {
  * - Kernel/module support for nftables (if applicable)
  */
 export async function checkHostReadiness(host: SshHostInfo): Promise<HostReadinessResult> {
+  if (!host.privateKeyPath) {
+    throw new Error('check_host_readiness_requires_private_key');
+  }
+
   const sshOptions = [
     '-o', 'StrictHostKeyChecking=no',
     '-o', 'UserKnownHostsFile=/dev/null',

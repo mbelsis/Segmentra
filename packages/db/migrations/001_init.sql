@@ -228,8 +228,10 @@ CREATE TABLE IF NOT EXISTS ssh_credentials (
   id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   name text NOT NULL,
   username text NOT NULL,
-  private_key_secret_id uuid NOT NULL REFERENCES secret_store(id),
+  private_key_secret_id uuid REFERENCES secret_store(id),
   passphrase_secret_id uuid REFERENCES secret_store(id),
+  password_secret_id uuid REFERENCES secret_store(id),
+  auth_method text NOT NULL DEFAULT 'KEY',
   scope_type text NOT NULL,
   scope_id uuid,
   created_at timestamptz NOT NULL DEFAULT now()
