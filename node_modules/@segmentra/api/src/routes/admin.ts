@@ -22,8 +22,24 @@ const bootstrapSchema = z.object({
 
 // One-time bootstrap for fresh installs: creates a local admin user record so LDAP settings
 // and group mappings can be configured. Disable by omitting SEGMENTRA_BOOTSTRAP_TOKEN.
+// Rate limited: 3 attempts per IP per 15 minutes to prevent brute-force of the token.
+const bootstrapAttempts = new Map<string, { count: number; resetAt: number }>();
 adminRouter.post('/bootstrap', async (req, res) => {
   if (!env.SEGMENTRA_BOOTSTRAP_TOKEN) return res.status(404).json({ error: 'not_enabled' });
+
+  // Rate limiting
+  const ip = req.ip || 'unknown';
+  const now = Date.now();
+  const entry = bootstrapAttempts.get(ip);
+  if (entry && entry.resetAt > now && entry.count >= 3) {
+    return res.status(429).json({ error: 'too_many_attempts', message: 'Try again later' });
+  }
+  if (!entry || entry.resetAt <= now) {
+    bootstrapAttempts.set(ip, { count: 1, resetAt: now + 15 * 60 * 1000 });
+  } else {
+    entry.count++;
+  }
+
   const parsed = bootstrapSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
   if (parsed.data.token !== env.SEGMENTRA_BOOTSTRAP_TOKEN) {

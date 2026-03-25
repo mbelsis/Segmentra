@@ -36,8 +36,11 @@ policyVersionsRouter.post('/policy-sets/:id/versions', requireRole('operator', '
         await client.query('BEGIN');
         const latest = await client.query(`SELECT COALESCE(MAX(version_number), 0)::int AS v FROM policy_versions WHERE policy_set_id=$1`, [req.params.id]);
         const nextVersion = (latest.rows[0]?.v ?? 0) + 1;
-        const userRes = await client.query(`SELECT id FROM users WHERE username=$1 LIMIT 1`, [req.auth.username]);
-        const userId = userRes.rows[0]?.id ?? null;
+        const userId = req.auth.userId;
+        if (!userId) {
+            await client.query('ROLLBACK');
+            return res.status(401).json({ error: 'user_not_found' });
+        }
         const { rows } = await client.query(`INSERT INTO policy_versions
         (policy_set_id, version_number, status, change_summary, created_by, interface_scope_type, interface_scope_roles, interface_scope_names)
        VALUES ($1,$2,'DRAFT',$3,$4,$5,$6,$7)
@@ -123,8 +126,9 @@ policyVersionsRouter.post('/policy-versions/:versionId/submit-approval', require
     res.json({ version: rows[0] });
 });
 policyVersionsRouter.post('/policy-versions/:versionId/approve', requireRole('approver', 'admin'), async (req, res) => {
-    const userRes = await pool.query(`SELECT id FROM users WHERE username=$1 LIMIT 1`, [req.auth.username]);
-    const approverId = userRes.rows[0]?.id ?? null;
+    const approverId = req.auth.userId;
+    if (!approverId)
+        return res.status(401).json({ error: 'user_not_found' });
     const vRes = await pool.query(`SELECT created_by, is_high_risk FROM policy_versions WHERE id=$1`, [req.params.versionId]);
     if (!vRes.rows[0])
         return res.status(404).json({ error: 'not_found' });
@@ -150,8 +154,9 @@ policyVersionsRouter.post('/policy-versions/:versionId/reject', requireRole('app
     const body = z.object({ reason: z.string().min(1) }).safeParse(req.body);
     if (!body.success)
         return res.status(400).json({ error: 'invalid_body' });
-    const userRes = await pool.query(`SELECT id FROM users WHERE username=$1 LIMIT 1`, [req.auth.username]);
-    const approverId = userRes.rows[0]?.id ?? null;
+    const approverId = req.auth.userId;
+    if (!approverId)
+        return res.status(401).json({ error: 'user_not_found' });
     const { rows } = await pool.query(`UPDATE policy_versions
        SET status='REJECTED', rejected_by=$2, rejected_at=now(), rejection_reason=$3
        WHERE id=$1 AND status='PENDING_APPROVAL'

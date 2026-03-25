@@ -16,6 +16,10 @@ export interface ReadRulesResult {
  * Normalizes the output for consistent hashing.
  */
 export async function readHostFirewallRules(host: SshHostInfo): Promise<ReadRulesResult> {
+  if (!host.privateKeyPath) {
+    throw new Error('read_rules_requires_private_key');
+  }
+
   const sshOptions = [
     '-o', 'StrictHostKeyChecking=no',
     '-o', 'UserKnownHostsFile=/dev/null',

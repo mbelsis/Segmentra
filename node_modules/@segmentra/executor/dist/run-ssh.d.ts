@@ -3,7 +3,9 @@ export interface SshHost {
     ip: string;
     port: number;
     username: string;
-    privateKeyPath: string;
+    authMethod?: 'key' | 'password';
+    privateKeyPath?: string;
+    password?: string;
     policyFilePath: string;
     backend: 'nftables' | 'iptables';
 }
