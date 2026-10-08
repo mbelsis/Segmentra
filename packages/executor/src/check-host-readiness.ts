@@ -62,8 +62,16 @@ export async function checkHostReadiness(host: SshHostInfo, opts: SshConnectionO
     return result;
   }
 
-  // Determine backend preference (nftables preferred)
-  if (hasNft) {
+  // Honour the host's configured backend when its tool exists; otherwise prefer nftables.
+  const useIptables = host.backend === 'iptables' ? hasIptables : !hasNft;
+  if (host.backend === 'iptables' && !hasIptables) {
+    result.ready = false;
+    result.errors.push('Host is configured for iptables, but iptables is not installed');
+  } else if (host.backend === 'nftables' && !hasNft) {
+    result.ready = false;
+    result.errors.push('Host is configured for nftables, but nft is not installed');
+  }
+  if (!useIptables) {
     result.backend = 'nftables';
     const nftVersion = await run('nft --version 2>&1');
     if (nftVersion.exitCode === 0) result.nftVersion = nftVersion.stdout.trim();

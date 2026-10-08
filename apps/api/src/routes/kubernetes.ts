@@ -224,7 +224,6 @@ kubernetesRouter.post('/clusters/:id/deploy-policy', requireRole('operator', 'ad
   // Build NetworkPolicy manifest. NetworkPolicy is allow-only and unordered, so DENY rules and
   // anything that cannot be expressed exactly are skipped with a warning rather than widened.
   const ingressRules: any[] = [];
-  const egressRules: any[] = [];
   const warnings: string[] = [];
   const resolve = createSourceResolver({ vlanMode: 'subnet' });
 
@@ -236,6 +235,11 @@ kubernetesRouter.post('/clusters/:id/deploy-policy', requireRole('operator', 'ad
 
   for (const rule of rules) {
     const label = `rule #${rule.order_index}${rule.comment ? ` (${rule.comment})` : ''}`;
+
+    if (rule.direction === 'FORWARD') {
+      warnings.push(`${label}: FORWARD rules (traffic routed through a gateway) have no NetworkPolicy equivalent; skipped`);
+      continue;
+    }
 
     if (rule.action !== 'ALLOW') {
       warnings.push(`${label}: DENY rules cannot be expressed in a Kubernetes NetworkPolicy (allow-only); skipped`);
@@ -280,7 +284,9 @@ kubernetesRouter.post('/clusters/:id/deploy-policy', requireRole('operator', 'ad
       ingressRules.push({ ...policyRule, from: peers });
     }
     if (rule.direction === 'OUT' || rule.direction === 'BOTH') {
-      egressRules.push({ ...policyRule, to: peers });
+      // Segmentra's outbound default is allow, so OUT ALLOW rules don't restrict anything.
+      // Emitting them as NetworkPolicy egress would deny every other outbound connection (DNS too).
+      warnings.push(`${label}: outbound allow is already the default (egress is not restricted); not emitted`);
     }
   }
 
@@ -290,9 +296,10 @@ kubernetesRouter.post('/clusters/:id/deploy-policy', requireRole('operator', 'ad
     metadata: { name: b.policyName, namespace: b.namespace },
     spec: {
       podSelector: {},
-      policyTypes: ['Ingress', 'Egress'],
+      // Only Ingress is restricted, matching Segmentra (inbound default deny, outbound default
+      // allow). Listing Egress would make Kubernetes deny all outbound traffic not listed.
+      policyTypes: ['Ingress'],
       ingress: ingressRules,
-      egress: egressRules,
     },
   };
 

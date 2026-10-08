@@ -1,29 +1,34 @@
 #!/bin/sh
 # Managed by Segmentra. See packages/executor/src/iptables-scripts.ts
 set -u
+PATH="$PATH:/usr/sbin:/sbin"; export PATH
 mode=${1:-}
 ipt=${2:-}
 case "$ipt" in iptables|ip6tables) ;; *) echo "segmentra-iptables: invalid family '$ipt'" >&2; exit 2 ;; esac
+bfile=
 case "$mode" in
   apply|apply-audit) pol=${3:-}; legacy=${4:-} ;;
   remove) pol=; legacy=${3:-} ;;
+  backup|restore) pol=; legacy=; bfile=${3:-}
+    if [ -z "$bfile" ]; then echo "segmentra-iptables: $mode needs a backup file argument" >&2; exit 2; fi ;;
   *) echo "segmentra-iptables: invalid mode '$mode'" >&2; exit 2 ;;
 esac
 save="$ipt-save"
 restore="$ipt-restore"
 IN=SEGMENTRA-IN
 OUT=SEGMENTRA-OUT
+FWD=SEGMENTRA-FWD
 LIN=SEGMENTRA-LEGACY-IN
 LOUT=SEGMENTRA-LEGACY-OUT
 info() { echo "[segmentra:$ipt] $*"; }
 warn() { echo "[segmentra:$ipt] warning: $*"; }
 tmpd=$(mktemp -d 2>/dev/null) || { echo "segmentra-iptables: mktemp failed" >&2; exit 1; }
-trap 'rm -f "$tmpd"/apply "$tmpd"/scratch "$tmpd"/err "$tmpd"/save "$tmpd"/save2 "$tmpd"/del "$tmpd"/keep; rmdir "$tmpd"' EXIT
+trap 'rm -rf "$tmpd"' EXIT
 had_jump=0
 if $ipt -C INPUT -j $IN 2>/dev/null; then had_jump=1; fi
 
 dedupe_jumps() {
-  for pair in INPUT:$IN OUTPUT:$OUT; do
+  for pair in INPUT:$IN OUTPUT:$OUT FORWARD:$FWD; do
     ch=${pair%%:*}; tg=${pair#*:}
     # -S prints the policy first, so rule number = line number - 1. Keep the first
     # (top-most) jump, delete the others bottom-up.
@@ -33,29 +38,51 @@ dedupe_jumps() {
   return 0
 }
 
+# drop_fwd: delete the FORWARD jump(s) and the SEGMENTRA-FWD chain if present (forwarding is
+# then no longer filtered by Segmentra).
+drop_fwd() {
+  while $ipt -C FORWARD -j $FWD 2>/dev/null; do $ipt -D FORWARD -j $FWD || return 1; done
+  if $ipt -S $FWD >/dev/null 2>&1; then
+    $ipt -F $FWD || return 1
+    $ipt -X $FWD || { echo "segmentra-iptables: could not delete chain $FWD (still referenced?)" >&2; return 1; }
+    info "removed chain $FWD"
+  fi
+  return 0
+}
+
 apply_chains() {
   if [ ! -s "$pol" ]; then echo "segmentra-iptables: policy file '$pol' missing or empty" >&2; exit 3; fi
   if ! grep -q "^:$IN " "$pol" || grep -Eq '^:(INPUT|OUTPUT|FORWARD) ' "$pol"; then
     echo "segmentra-iptables: '$pol' is not a Segmentra chain fragment; refusing to apply" >&2; exit 3
   fi
+  want_fwd=0
+  if grep -q "^:$FWD " "$pol"; then want_fwd=1; fi
   {
     sed '/^COMMIT[[:space:]]*$/d' "$pol"
     if ! $ipt -C INPUT -j $IN 2>/dev/null; then echo "-I INPUT 1 -j $IN"; fi
     if ! $ipt -C OUTPUT -j $OUT 2>/dev/null; then echo "-I OUTPUT 1 -j $OUT"; fi
+    if [ "$want_fwd" = 1 ] && ! $ipt -C FORWARD -j $FWD 2>/dev/null; then echo "-I FORWARD 1 -j $FWD"; fi
     echo COMMIT
   } > "$tmpd/apply"
   # Chains are filled and the jumps inserted in ONE atomic transaction.
   if ! $restore --noflush < "$tmpd/apply"; then echo "segmentra-iptables: $restore failed" >&2; exit 4; fi
+  if [ "$want_fwd" = 0 ]; then
+    drop_fwd || { echo "segmentra-iptables: could not remove $FWD" >&2; exit 4; }
+  fi
   dedupe_jumps || { echo "segmentra-iptables: could not remove duplicate jumps" >&2; exit 4; }
-  info "applied $IN/$OUT; INPUT/OUTPUT jumps present"
+  if [ "$want_fwd" = 1 ]; then
+    info "applied $IN/$OUT/$FWD; INPUT/OUTPUT/FORWARD jumps present"
+  else
+    info "applied $IN/$OUT; INPUT/OUTPUT jumps present"
+  fi
 }
 
 remove_chains() {
-  for pair in INPUT:$IN OUTPUT:$OUT; do
+  for pair in INPUT:$IN OUTPUT:$OUT FORWARD:$FWD; do
     ch=${pair%%:*}; tg=${pair#*:}
     while $ipt -C $ch -j $tg 2>/dev/null; do $ipt -D $ch -j $tg || exit 5; done
   done
-  for c in $IN $OUT; do
+  for c in $IN $OUT $FWD; do
     if $ipt -S $c >/dev/null 2>&1; then
       $ipt -F $c || exit 5
       $ipt -X $c || { echo "segmentra-iptables: could not delete chain $c (still referenced?)" >&2; exit 5; }
@@ -91,7 +118,7 @@ legacy_cleanup() {
     END {
       for (i = 1; i <= n; i++) {
         r = rest[i]; c = ch[i]
-        if (r == "-j SEGMENTRA-IN" || r == "-j SEGMENTRA-OUT") continue
+        if (r == "-j SEGMENTRA-IN" || r == "-j SEGMENTRA-OUT" || r == "-j SEGMENTRA-FWD") continue
         ours = (r ~ /--comment "?(segmentra|mgmt_ssh)/) || (r ~ /--log-prefix "FW-AUDIT:/)
         if (!ours && usefile == 1) {
           if (c == "INPUT" && li[r] > 0) { li[r]--; ours = 1 }
@@ -147,9 +174,165 @@ legacy_cleanup() {
   return 0
 }
 
+# ---- scoped backup / restore -------------------------------------------------------------
+
+V2HDR="# segmentra-backup v2 $ipt"
+EMPTY_FILTER='*filter\n:INPUT ACCEPT [0:0]\n:FORWARD ACCEPT [0:0]\n:OUTPUT ACCEPT [0:0]\nCOMMIT\n'
+if [ "$ipt" = ip6tables ]; then sfx=6; else sfx=; fi
+# Policy files a legacy (full-table design) deployment leaves behind.
+LEGACY_FILES="/etc/segmentra.policy$sfx /etc/segmentra.legacy.policy$sfx /etc/segmentra.legacy.policy$sfx.migrated /etc/segmentra.policy$sfx.removed"
+
+# Filter-table lines owned by Segmentra in a save file: SEGMENTRA-IN/OUT/FWD declarations + rules.
+seg_fragment() {
+  awk -v a="$IN" -v b="$OUT" -v f="$FWD" '
+    substr($0, 1, 1) == "*" { inf = ($0 == "*filter"); next }
+    !inf { next }
+    index($0, ":" a " ") == 1 || index($0, ":" b " ") == 1 || index($0, ":" f " ") == 1 { print; next }
+    index($0, "-A " a " ") == 1 || index($0, "-A " b " ") == 1 || index($0, "-A " f " ") == 1 { print }
+  ' "$1"
+}
+
+# save_has_jump <save-file> <chain> <target>: filter table has "-A <chain> ... -j <target>".
+save_has_jump() {
+  awk -v c="$2" -v t="$3" '
+    substr($0, 1, 1) == "*" { inf = ($0 == "*filter"); next }
+    inf && index($0, "-A " c " ") == 1 && $NF == t && $(NF - 1) == "-j" { f = 1 }
+    END { exit !f }
+  ' "$1"
+}
+
+# is_legacy <save-file>: the dump shows a host on the legacy full-table design (no jump to
+# SEGMENTRA-IN, and Segmentra rules directly in INPUT/OUTPUT — same markers as legacy_cleanup —
+# or an INPUT policy DROP while a legacy-format Segmentra policy file is present on the host).
+is_legacy() {
+  if save_has_jump "$1" INPUT $IN; then return 1; fi
+  if awk '
+    substr($0, 1, 1) == "*" { inf = ($0 == "*filter"); next }
+    inf && /^-A (INPUT|OUTPUT) / && (/--comment "?(segmentra|mgmt_ssh)/ || /--log-prefix "FW-AUDIT:/) { f = 1 }
+    END { exit !f }' "$1"; then return 0; fi
+  if awk '
+    substr($0, 1, 1) == "*" { inf = ($0 == "*filter"); next }
+    inf && /^:INPUT DROP/ { f = 1 }
+    END { exit !f }' "$1"; then
+    for lf in $LEGACY_FILES; do
+      if [ -f "$lf" ] && grep -Eq '^-A (INPUT|OUTPUT) ' "$lf"; then return 0; fi
+    done
+  fi
+  return 1
+}
+
+backup_state() {
+  umask 077
+  full="$bfile.full"
+  if ! $save > "$tmpd/full" 2>"$tmpd/err"; then
+    echo "segmentra-iptables: $save failed: $(tr '\n' ' ' < "$tmpd/err")" >&2; exit 4
+  fi
+  # No tables loaded -> empty dump; store an explicit open filter table instead
+  if [ ! -s "$tmpd/full" ]; then printf "$EMPTY_FILTER" > "$tmpd/full"; fi
+  seg_fragment "$tmpd/full" > "$tmpd/frag"
+  ci=0; co=0; cf=0; ji=0; jo=0; jf=0; lg=0
+  if grep -q "^:$IN " "$tmpd/frag"; then ci=1; fi
+  if grep -q "^:$OUT " "$tmpd/frag"; then co=1; fi
+  if grep -q "^:$FWD " "$tmpd/frag"; then cf=1; fi
+  if save_has_jump "$tmpd/full" INPUT $IN; then ji=1; fi
+  if save_has_jump "$tmpd/full" OUTPUT $OUT; then jo=1; fi
+  if save_has_jump "$tmpd/full" FORWARD $FWD; then jf=1; fi
+  if is_legacy "$tmpd/full"; then lg=1; fi
+  {
+    echo "$V2HDR"
+    echo "# Segmentra's own filter-table state only (chains $IN/$OUT/$FWD + INPUT/OUTPUT/FORWARD jumps)."
+    echo "# Complete $save output at the time of the backup: $full"
+    echo "# chain-in=$ci chain-out=$co chain-fwd=$cf jump-in=$ji jump-out=$jo jump-fwd=$jf legacy=$lg"
+    if [ -s "$tmpd/frag" ]; then echo '*filter'; cat "$tmpd/frag"; echo COMMIT; fi
+  } > "$tmpd/v2" || exit 4
+  cp "$tmpd/full" "$full.tmp" && mv -f "$full.tmp" "$full" || { echo "segmentra-iptables: could not write $full" >&2; exit 4; }
+  cp "$tmpd/v2" "$bfile.tmp" && mv -f "$bfile.tmp" "$bfile" || { echo "segmentra-iptables: could not write $bfile" >&2; exit 4; }
+  info "backup written: $bfile (chains: in=$ci out=$co fwd=$cf, jumps: in=$ji out=$jo fwd=$jf, legacy=$lg)"
+}
+
+# Legacy hosts only: Segmentra's rules live directly in INPUT/OUTPUT (and may have set the
+# built-in policies), so they cannot be separated from other rules. The complete filter table
+# of the backup is restored (-T filter: nat/mangle/raw/... are left alone). Filter-table rules
+# other tools added after the backup are lost — the behaviour of the legacy design itself.
+restore_full_filter() {
+  if [ ! -s "$1" ]; then echo "segmentra-iptables: full backup $1 missing; cannot restore legacy host" >&2; exit 3; fi
+  if ! grep -qx '[*]filter' "$1"; then echo "segmentra-iptables: $1 has no filter table" >&2; exit 4; fi
+  if ! $restore -T filter < "$1"; then echo "segmentra-iptables: $restore -T filter < $1 failed" >&2; exit 4; fi
+  info "legacy host: restored the complete filter table from $1"
+}
+
+# Restore only SEGMENTRA-IN/OUT/FWD and the INPUT/OUTPUT/FORWARD jumps from the fragment in
+# $tmpd/frag. Backups taken before SEGMENTRA-FWD existed contain no FWD chain: restoring them
+# removes it (and its jump), which is exactly the state at backup time.
+restore_scoped() {
+  hi=0; ho=0; hf=0
+  if grep -q "^:$IN " "$tmpd/frag"; then hi=1; fi
+  if grep -q "^:$OUT " "$tmpd/frag"; then ho=1; fi
+  if grep -q "^:$FWD " "$tmpd/frag"; then hf=1; fi
+  [ "$hi" = 1 ] || ji=0
+  [ "$ho" = 1 ] || jo=0
+  [ "$hf" = 1 ] || jf=0
+  if [ "$hi" = 1 ] || [ "$ho" = 1 ] || [ "$hf" = 1 ]; then
+    # Declaring an existing chain with --noflush flushes it: the chains get their backed-up
+    # content (and missing jumps are inserted) in ONE atomic transaction.
+    {
+      echo '*filter'
+      cat "$tmpd/frag"
+      if [ "$ji" = 1 ] && ! $ipt -C INPUT -j $IN 2>/dev/null; then echo "-I INPUT 1 -j $IN"; fi
+      if [ "$jo" = 1 ] && ! $ipt -C OUTPUT -j $OUT 2>/dev/null; then echo "-I OUTPUT 1 -j $OUT"; fi
+      if [ "$jf" = 1 ] && ! $ipt -C FORWARD -j $FWD 2>/dev/null; then echo "-I FORWARD 1 -j $FWD"; fi
+      echo COMMIT
+    } > "$tmpd/apply"
+    if ! $restore --noflush < "$tmpd/apply"; then echo "segmentra-iptables: $restore failed; nothing was changed" >&2; exit 4; fi
+  fi
+  # Jumps / chains that did not exist when the backup was taken.
+  if [ "$ji" = 0 ]; then while $ipt -C INPUT -j $IN 2>/dev/null; do $ipt -D INPUT -j $IN || exit 5; done; fi
+  if [ "$jo" = 0 ]; then while $ipt -C OUTPUT -j $OUT 2>/dev/null; do $ipt -D OUTPUT -j $OUT || exit 5; done; fi
+  if [ "$jf" = 0 ]; then while $ipt -C FORWARD -j $FWD 2>/dev/null; do $ipt -D FORWARD -j $FWD || exit 5; done; fi
+  for pair in $IN:$hi $OUT:$ho $FWD:$hf; do
+    c=${pair%%:*}; h=${pair#*:}
+    if [ "$h" = 0 ] && $ipt -S $c >/dev/null 2>&1; then
+      $ipt -F $c || exit 5
+      $ipt -X $c || { echo "segmentra-iptables: could not delete chain $c (still referenced?)" >&2; exit 5; }
+    fi
+  done
+  dedupe_jumps || { echo "segmentra-iptables: could not remove duplicate jumps" >&2; exit 4; }
+  info "restored $IN/$OUT/$FWD from $bfile (chains: in=$hi out=$ho fwd=$hf, jumps: in=$ji out=$jo fwd=$jf); other chains untouched"
+}
+
+restore_backup() {
+  if [ ! -s "$bfile" ]; then echo "segmentra-iptables: backup missing or empty: $bfile" >&2; exit 3; fi
+  first=$(head -n 1 "$bfile")
+  case "$first" in
+    "$V2HDR")
+      hdr=$(grep -m 1 '^# chain-in=' "$bfile" || true)
+      case " $hdr " in *" legacy="[01]" "*) ;; *) echo "segmentra-iptables: malformed backup header in $bfile" >&2; exit 4 ;; esac
+      ji=0; jo=0; jf=0
+      case " $hdr " in *" jump-in=1 "*) ji=1 ;; esac
+      case " $hdr " in *" jump-out=1 "*) jo=1 ;; esac
+      case " $hdr " in *" jump-fwd=1 "*) jf=1 ;; esac
+      case " $hdr " in *" legacy=1 "*) restore_full_filter "$bfile.full"; return ;; esac
+      ;;
+    "# segmentra-backup "*)
+      echo "segmentra-iptables: $bfile is not a $ipt backup this version understands ($first)" >&2; exit 4 ;;
+    *)
+      # Pre-v2 backup: a complete $save dump. Only Segmentra's part of it is restored.
+      ji=0; jo=0; jf=0
+      if save_has_jump "$bfile" INPUT $IN; then ji=1; fi
+      if save_has_jump "$bfile" OUTPUT $OUT; then jo=1; fi
+      if save_has_jump "$bfile" FORWARD $FWD; then jf=1; fi
+      if is_legacy "$bfile"; then restore_full_filter "$bfile"; return; fi
+      ;;
+  esac
+  seg_fragment "$bfile" > "$tmpd/frag"
+  restore_scoped
+}
+
 case "$mode" in
   apply) apply_chains; legacy_cleanup ;;
   apply-audit) apply_chains ;;
   remove) remove_chains; legacy_cleanup ;;
+  backup) backup_state ;;
+  restore) restore_backup ;;
 esac
 exit 0

@@ -5,6 +5,7 @@ import { pool } from '../../db/pool.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 import { isValidIp } from '../../services/ip-utils.js';
 import { evaluateHostAgainstRules } from '../../services/tag-rule-engine.js';
+import { triggerTemplateAutoApply } from '../../services/template-engine.js';
 
 /** Re-run tag rules for a host after attributes changed; never fails the request. */
 function reevaluateHostTags(hostId: string) {
@@ -199,6 +200,7 @@ hostsRouter.post('/', requireRole('operator', 'admin'), async (req, res) => {
     }
     
     await client.query('COMMIT');
+    triggerTemplateAutoApply(b.tagIds ?? []);
     reevaluateHostTags(host.id);
     
     // Fetch host with tags and VLAN
@@ -318,6 +320,7 @@ hostsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
     }
     
     await client.query('COMMIT');
+    triggerTemplateAutoApply(b.tagIds ?? []);
     reevaluateHostTags(req.params.id);
     
     // Fetch updated host with tags and VLAN
@@ -457,6 +460,7 @@ hostsRouter.post('/bulk/assign-tag', requireRole('operator', 'admin'), async (re
       if (result.rowCount) added++;
     }
     await client.query('COMMIT');
+    triggerTemplateAutoApply([parsed.data.tagId]);
 
     await pool.query(
       `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
@@ -533,6 +537,8 @@ hostsRouter.post('/bulk/import', requireRole('operator', 'admin'), async (req, r
   }
 
   const results: Array<{ row: number; hostname: string; success: boolean; error?: string; warnings?: string[] }> = [];
+
+  const importedTagIds: string[] = [];
   const client = await pool.connect();
 
   try {
@@ -648,6 +654,7 @@ hostsRouter.post('/bulk/import', requireRole('operator', 'admin'), async (req, r
         }
 
         await client.query('RELEASE SAVEPOINT import_row');
+        if (tagIdx >= 0) importedTagIds.push(...tagIds);
         results.push({
           row: rowNumber,
           hostname,
@@ -662,6 +669,7 @@ hostsRouter.post('/bulk/import', requireRole('operator', 'admin'), async (req, r
     }
 
     await client.query('COMMIT');
+    triggerTemplateAutoApply(importedTagIds);
 
     const imported = results.filter(r => r.success).length;
     const failed = results.filter(r => !r.success).length;

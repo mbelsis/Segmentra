@@ -187,6 +187,18 @@ export function DeploymentDetailPage() {
               Start
             </button>
           )}
+          {canOperate && (deployment.status === 'FAILED' || deployment.status === 'PARTIAL') && (
+            <button
+              className="btn-small btn-primary"
+              onClick={() => runAction(async () => {
+                // retry-failed resets failed hosts and puts the deployment back to QUEUED; then start it.
+                await api.retryFailedHosts(deployment.id);
+                await api.startDeployment(deployment.id);
+              }, 'Retry the failed hosts? Only hosts that failed are redeployed; succeeded hosts are left alone.')}
+            >
+              Retry Failed Hosts
+            </button>
+          )}
           {canOperate && (deployment.status === 'QUEUED' || deployment.status === 'SCHEDULED') && (
             <button
               className="btn-small"

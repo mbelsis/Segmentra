@@ -70,8 +70,9 @@ export async function instantiateTemplate(
       await client.query(
         `INSERT INTO policy_rules
           (policy_version_id, order_index, direction, action, protocol, ports, source_type, source_value,
-           log_mode, comment, use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+           log_mode, comment, use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names,
+           destination_type, destination_value)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
         [
           version.id,
           rule.order_index,
@@ -86,7 +87,9 @@ export async function instantiateTemplate(
           rule.use_policy_interface_scope,
           rule.interface_scope_type,
           rule.interface_scope_roles,
-          rule.interface_scope_names
+          rule.interface_scope_names,
+          rule.direction === 'FORWARD' ? rule.destination_type : null,
+          rule.direction === 'FORWARD' ? rule.destination_value : null
         ]
       );
       rulesCreated++;
@@ -107,6 +110,27 @@ export async function instantiateTemplate(
   } finally {
     client.release();
   }
+}
+
+/**
+ * Fire-and-forget: create DRAFT policy sets from auto-apply templates for tags that hosts just
+ * gained (manual tagging, CSV import, tag rules, discovery). Never fails the caller.
+ */
+export function triggerTemplateAutoApply(tagIds: Iterable<string | null | undefined>): void {
+  const ids = [...new Set([...tagIds].filter((t): t is string => !!t))];
+  if (ids.length === 0) return;
+  setImmediate(async () => {
+    for (const id of ids) {
+      try {
+        const { templatesApplied } = await autoApplyTemplates(id);
+        // eslint-disable-next-line no-console
+        if (templatesApplied > 0) console.log(`[Templates] Auto-applied ${templatesApplied} template(s) for tag ${id}`);
+      } catch (e: any) {
+        // eslint-disable-next-line no-console
+        console.error(`[Templates] Auto-apply failed for tag ${id}:`, e?.message ?? e);
+      }
+    }
+  });
 }
 
 export async function autoApplyTemplates(tagId: string): Promise<{ templatesApplied: number }> {

@@ -148,32 +148,22 @@ sudo systemctl enable iptables
 
 ---
 
-## Step 4: Configure Default Deny (Before Segmentra)
+## Step 4: Leave Forwarding to Segmentra
 
-Before Segmentra deploys rules, set a safe default — deny all forwarded traffic:
+Segmentra manages forwarded traffic for the devices this gateway protects. When a policy is deployed to the gateway:
 
-### nftables
+- Forwarded traffic **to every IoT device assigned to the gateway** (OT/IoT page) is **dropped unless a FORWARD rule allows it**.
+- Other forwarded traffic, such as Docker networks or routes to non-protected subnets, passes unchanged.
+- Replies to allowed connections (established/related) always pass.
 
-```bash
-sudo nft add table inet filter
-sudo nft add chain inet filter forward '{ type filter hook forward priority 0; policy drop; }'
+How it is implemented:
 
-# Allow established/related (so existing connections don't break)
-sudo nft add rule inet filter forward ct state established,related accept
+- **nftables:** `chain forward { type filter hook forward priority 0; policy accept; ... }` inside `table inet segmentra`, with a final `ip daddr @protected_v4 drop`. Like the rest of `table inet segmentra`, it is replaced atomically on each deploy.
+- **iptables:** chain `SEGMENTRA-FWD`, reached from one jump at the top of `FORWARD`. An allow returns (`RETURN`) to `FORWARD`, a deny is `DROP`, and the protected devices get a final `-d <ip> -j DROP`.
 
-# Allow ICMP (for troubleshooting)
-sudo nft add rule inet filter forward ip protocol icmp accept
-```
+**Do not** add a manual `policy drop` forward chain or `iptables -P FORWARD DROP` for the OT networks. Segmentra does not remove or override it: a drop in another nftables table, or in the built-in `FORWARD` policy, still drops traffic Segmentra allows. Every allowed flow would then need a second, manual accept rule. If you already have such a rule set, remove it or make sure it accepts what your Segmentra FORWARD rules allow.
 
-### iptables
-
-```bash
-sudo iptables -P FORWARD DROP
-sudo iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
-sudo iptables -A FORWARD -p icmp -j ACCEPT
-```
-
-> **Note:** Once Segmentra deploys a policy, it replaces these rules entirely. The default deny above is just a safety net before the first deployment.
+> Until the first deployment, forwarding is not filtered by Segmentra. Assigning or unassigning a device on the OT/IoT page takes effect on the gateway's **next** deployment. If you need a safety net before the first deploy, deploy a version with no FORWARD rules as soon as the devices are assigned: everything forwarded to them is then denied.
 
 ---
 
@@ -193,6 +183,8 @@ echo "ssh-ed25519 AAAA... segmentra@management" | sudo tee /home/segmentra/.ssh/
 sudo chmod 600 /home/segmentra/.ssh/authorized_keys
 sudo chown -R segmentra:segmentra /home/segmentra/.ssh
 ```
+
+Store the matching private key (or a password) in **Admin → SSH Credentials**. Segmentra encrypts it at rest; see [security.md](security.md) for how credentials are stored and protected.
 
 Configure passwordless sudo for firewall commands:
 
@@ -375,8 +367,10 @@ Add the gateway to your monitoring system (Prometheus node_exporter, Zabbix, etc
 1. Check if the gateway is forwarding: `cat /proc/sys/net/ipv4/ip_forward` (must be `1`)
 2. Check the deployed rules: `sudo nft list ruleset` or `sudo iptables -L -n`
 3. Check routing: `ip route` on the gateway, verify OT subnets are reachable
-4. Run Firewall Learning on the gateway to see what traffic is being blocked
-5. Check the OT device's gateway setting — it should point to the gateway's OT interface IP
+4. Run the **Troubleshoot → Simulate** check (source IP, device IP, port): it evaluates the gateway's FORWARD rules and shows the rule that decides, or the protected-device default deny
+5. Run Firewall Learning on the gateway to see what traffic reaches the device (the gateway accepts and logs while learning)
+6. Check the OT device's gateway setting. It should point to the gateway's OT interface IP
+7. Check that the device is assigned to the gateway on the OT/IoT page and that the gateway was redeployed after the assignment
 
 ### Policy Deployment Fails
 
@@ -387,5 +381,5 @@ Add the gateway to your monitoring system (Prometheus node_exporter, Zabbix, etc
 ### Traffic Flows But Shouldn't
 
 1. Check if there's a permissive rule: run **Security Audit** to find overly broad rules
-2. Verify the FORWARD chain policy is DROP (not ACCEPT)
-3. Check for bypasses: ensure no direct routes exist between IT and OT that skip the gateway
+2. Verify the device is protected: it must be assigned to the gateway (OT/IoT page), be enabled, have an IP address, and the gateway must have been redeployed since. Check `sudo nft list chain inet segmentra forward` (nftables) or `sudo iptables -S SEGMENTRA-FWD` and `sudo iptables -S FORWARD | head -2` (iptables) for the `protected_default_deny` rule and the jump
+3. Check for bypasses: ensure no direct routes exist between IT and OT that skip the gateway. Segmentra can only filter traffic that is actually routed through the gateway

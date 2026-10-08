@@ -3,8 +3,9 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { useAuth, hasRole } from '../lib/auth-context';
 import { HostPolicyVisualization } from '../components/HostPolicyVisualization';
+import { DiscoveryTab } from '../components/DiscoveryTab';
 
-type Tab = 'hosts' | 'tags' | 'vlans' | 'tag-rules';
+type Tab = 'hosts' | 'tags' | 'vlans' | 'tag-rules' | 'discovery';
 
 export function InventoryPage() {
   const { roles } = useAuth();
@@ -275,7 +276,8 @@ export function InventoryPage() {
       // Dry-run on the server: evaluates the (unsaved) criteria without creating or modifying any rule
       const res = await api.tagRules.preview({
         name: tagRuleForm.name || 'Preview Rule',
-        tagId: tagRuleForm.tagId,
+        // A tag isn't needed to preview matches; don't send an empty one.
+        ...(tagRuleForm.tagId ? { tagId: tagRuleForm.tagId } : {}),
         enabled: tagRuleForm.enabled,
         priority: tagRuleForm.priority,
         criteria: { conditions: tagRuleForm.conditions, logic: tagRuleForm.logic },
@@ -691,6 +693,13 @@ export function InventoryPage() {
           style={{ borderBottom: activeTab === 'tag-rules' ? '2px solid #646cff' : 'none', borderRadius: 0, marginBottom: -2 }}
         >
           Auto-Tagging
+        </button>
+        <button
+          onClick={() => setActiveTab('discovery')}
+          className={activeTab === 'discovery' ? 'btn-primary' : 'btn-secondary'}
+          style={{ borderBottom: activeTab === 'discovery' ? '2px solid #646cff' : 'none', borderRadius: 0, marginBottom: -2 }}
+        >
+          Discovery
         </button>
       </div>
 
@@ -1521,6 +1530,15 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
             </p>
           </div>
         </>
+      )}
+
+      {activeTab === 'discovery' && (
+        <DiscoveryTab
+          vlans={vlans}
+          canManage={hasRole(roles, 'admin')}
+          canRun={canEdit}
+          onHostsImported={loadData}
+        />
       )}
 
       {visualizationHost && (

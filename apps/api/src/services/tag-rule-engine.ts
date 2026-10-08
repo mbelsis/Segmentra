@@ -2,6 +2,7 @@ import type { PoolClient } from 'pg';
 
 import { pool } from '../db/pool.js';
 import { cidrContains, isValidCidr } from './ip-utils.js';
+import { triggerTemplateAutoApply } from './template-engine.js';
 
 // Helper: check if IP matches a CIDR range (IPv4 and IPv6)
 function ipMatchesCidr(ip: string, cidr: string): boolean {
@@ -307,6 +308,7 @@ async function reconcileRuleTags(opts: { hostId?: string } = {}): Promise<Reconc
     }
 
     await client.query('COMMIT');
+    triggerTemplateAutoApply(assigned.map((a) => a.tagId));
     return { perRule, hostsEvaluated: hosts.length, rulesEvaluated: enabledRules.length, assigned };
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});

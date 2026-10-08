@@ -17,6 +17,10 @@ export const INTERFACE_ROLE_REGEX = /^[A-Za-z0-9_.-]{1,64}$/;
 
 export const protocolSchema = z.enum(['tcp', 'udp', 'icmp', 'any']);
 export const sourceTypeSchema = z.enum(['CIDR', 'TAG', 'VLAN', 'HOST']);
+/** IN/OUT/BOTH = traffic to/from the host; FORWARD = traffic routed through the host (gateways). */
+export const directionSchema = z.enum(['IN', 'OUT', 'BOTH', 'FORWARD']);
+/** Destination of a FORWARD rule (IOT_ASSET = iot_assets.id). */
+export const destinationTypeSchema = z.enum(['CIDR', 'TAG', 'VLAN', 'HOST', 'IOT_ASSET']);
 export const interfaceScopeTypeSchema = z.enum(['ALL_INTERFACES', 'INTERFACE_ROLE', 'INTERFACE_NAME']);
 export const interfaceNamesSchema = z.array(z.string().regex(INTERFACE_NAME_REGEX, 'Invalid interface name'));
 export const interfaceRolesSchema = z.array(z.string().regex(INTERFACE_ROLE_REGEX, 'Invalid interface role'));
@@ -62,6 +66,10 @@ export type RuleSemanticsInput = {
   ports?: string | null;
   sourceType?: string | null;
   sourceValue?: string | null;
+  /** When given, FORWARD/destination consistency is checked. */
+  direction?: string | null;
+  destinationType?: string | null;
+  destinationValue?: string | null;
 };
 
 /**
@@ -83,6 +91,23 @@ export function validateRuleSemantics(rule: RuleSemanticsInput): string[] {
       if (!isIpOrCidr(value)) problems.push(`Source value '${value}' is not a valid IP address or CIDR`);
     } else if (['TAG', 'VLAN', 'HOST'].includes(rule.sourceType)) {
       if (!UUID_REGEX.test(value)) problems.push(`Source value for ${rule.sourceType} must be the ${rule.sourceType.toLowerCase()} id (uuid)`);
+    }
+  }
+  if (rule.direction !== undefined) {
+    const dType = rule.destinationType ?? null;
+    const dValue = rule.destinationValue === null || rule.destinationValue === undefined ? '' : String(rule.destinationValue).trim();
+    if (rule.direction === 'FORWARD') {
+      if (!dType || !dValue) {
+        problems.push('FORWARD rules require a destination (destinationType and destinationValue)');
+      } else if (dType === 'CIDR') {
+        if (!isIpOrCidr(dValue)) problems.push(`Destination value '${dValue}' is not a valid IP address or CIDR`);
+      } else if (['TAG', 'VLAN', 'HOST', 'IOT_ASSET'].includes(dType)) {
+        if (!UUID_REGEX.test(dValue)) problems.push(`Destination value for ${dType} must be the ${dType === 'IOT_ASSET' ? 'IoT asset' : dType.toLowerCase()} id (uuid)`);
+      } else {
+        problems.push(`Invalid destination type '${dType}'`);
+      }
+    } else if (dType || dValue) {
+      problems.push(`Only FORWARD rules can have a destination (direction is '${rule.direction}'); clear destinationType/destinationValue`);
     }
   }
   return problems;

@@ -17,11 +17,26 @@ policyVersionsRouter.get('/policy-sets/:id/versions', requireRole('viewer', 'ope
     `SELECT pv.*,
        u_created.username as created_by_username,
        u_approved.username as approved_by_username,
-       u_rejected.username as rejected_by_username
+       u_rejected.username as rejected_by_username,
+       COALESCE(act.active_host_count, 0)::int AS active_host_count
      FROM policy_versions pv
      LEFT JOIN users u_created ON u_created.id = pv.created_by
      LEFT JOIN users u_approved ON u_approved.id = pv.approved_by
      LEFT JOIN users u_rejected ON u_rejected.id = pv.rejected_by
+     -- Hosts on which this version is the one currently enforced: each host's latest successful
+     -- deployment (a deploy replaces the host's whole Segmentra ruleset), unless removed on expiry.
+     LEFT JOIN (
+       SELECT cur.policy_version_id, COUNT(*) AS active_host_count
+       FROM (
+         SELECT DISTINCT ON (dh.host_id) d.policy_version_id, dh.expiry_status
+         FROM deployment_hosts dh
+         JOIN deployments d ON d.id = dh.deployment_id
+         WHERE dh.status = 'SUCCEEDED'
+         ORDER BY dh.host_id, COALESCE(dh.finished_at, d.finished_at, d.created_at) DESC
+       ) cur
+       WHERE cur.expiry_status IS DISTINCT FROM 'REMOVED'
+       GROUP BY cur.policy_version_id
+     ) act ON act.policy_version_id = pv.id
      WHERE pv.policy_set_id=$1 ORDER BY pv.version_number DESC`,
     [req.params.id]
   );
@@ -302,7 +317,8 @@ policyVersionsRouter.post('/policy-versions/:versionId/clone', requireRole('oper
     // Clone all rules from source version
     const sourceRulesRes = await client.query(
       `SELECT order_index, direction, action, protocol, ports, source_type, source_value, log_mode, comment,
-              use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names
+              use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names,
+              destination_type, destination_value
        FROM policy_rules WHERE policy_version_id=$1 ORDER BY order_index ASC`,
       [req.params.versionId]
     );
@@ -311,8 +327,9 @@ policyVersionsRouter.post('/policy-versions/:versionId/clone', requireRole('oper
       await client.query(
         `INSERT INTO policy_rules
           (policy_version_id, order_index, direction, action, protocol, ports, source_type, source_value, log_mode, comment,
-           use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+           use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names,
+           destination_type, destination_value)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
         [
           newVersion.id,
           rule.order_index,
@@ -327,7 +344,9 @@ policyVersionsRouter.post('/policy-versions/:versionId/clone', requireRole('oper
           rule.use_policy_interface_scope,
           rule.interface_scope_type,
           rule.interface_scope_roles,
-          rule.interface_scope_names
+          rule.interface_scope_names,
+          rule.destination_type,
+          rule.destination_value
         ]
       );
     }
@@ -361,12 +380,12 @@ policyVersionsRouter.get('/policy-versions/:versionId/diff', requireRole('viewer
 
   const [aRules, bRules] = await Promise.all([
     pool.query(
-      `SELECT order_index, direction, action, protocol, ports, source_type, source_value, log_mode, comment
+      `SELECT order_index, direction, action, protocol, ports, source_type, source_value, destination_type, destination_value, log_mode, comment
        FROM policy_rules WHERE policy_version_id=$1 ORDER BY order_index ASC`,
       [from]
     ),
     pool.query(
-      `SELECT order_index, direction, action, protocol, ports, source_type, source_value, log_mode, comment
+      `SELECT order_index, direction, action, protocol, ports, source_type, source_value, destination_type, destination_value, log_mode, comment
        FROM policy_rules WHERE policy_version_id=$1 ORDER BY order_index ASC`,
       [req.params.versionId]
     )

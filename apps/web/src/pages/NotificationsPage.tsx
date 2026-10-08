@@ -65,6 +65,7 @@ export function NotificationsPage() {
   };
 
   const createChannel = async () => {
+    setError(''); // clear any stale error from an earlier action
     try {
       const parsed = parseConfigJson(form.config);
       if (!parsed.ok) { setConfigError(parsed.error); return; }
@@ -78,6 +79,7 @@ export function NotificationsPage() {
 
   const deleteChannel = async (id: string) => {
     if (!confirm('Delete this notification channel and all its rules?')) return;
+    setError(''); // clear any stale error from an earlier action
     try {
       await api.notifications.deleteChannel(id);
       if (selectedChannel?.id === id) { setSelectedChannel(null); setRules([]); setLog([]); }
@@ -86,6 +88,7 @@ export function NotificationsPage() {
   };
 
   const testChannel = async (id: string) => {
+    setError(''); // clear any stale error from an earlier action
     try {
       const res = await api.notifications.testChannel(id);
       alert(res.message);
@@ -94,6 +97,7 @@ export function NotificationsPage() {
 
   const addRule = async () => {
     if (!selectedChannel) return;
+    setError(''); // clear any stale error from an earlier action
     try {
       await api.notifications.addRule(selectedChannel.id, { eventType: ruleForm.eventType, enabled: ruleForm.enabled });
       setShowAddRule(false);
@@ -102,6 +106,7 @@ export function NotificationsPage() {
   };
 
   const deleteRule = async (ruleId: string) => {
+    setError(''); // clear any stale error from an earlier action
     try {
       await api.notifications.deleteRule(ruleId);
       if (selectedChannel) selectChannel(selectedChannel);

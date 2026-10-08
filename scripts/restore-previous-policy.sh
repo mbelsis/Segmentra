@@ -1,8 +1,19 @@
 #!/bin/bash
 # restore-previous-policy.sh
 #
-# Restores the previous firewall ruleset on target hosts from Segmentra backups.
+# Restores Segmentra's previous firewall state on target hosts from Segmentra backups.
 # Use this after a deployment expires or when you need to rollback deployed policies.
+#
+# Only Segmentra's own state is restored: nftables `table inet segmentra`, or the
+# iptables/ip6tables chains SEGMENTRA-IN/OUT(/FWD) and their INPUT/OUTPUT(/FORWARD) jumps. Tables and
+# chains of other tools (Docker, Kubernetes, fail2ban, ...) are never touched; the
+# ruleset is never flushed. Backups written by older Segmentra versions (complete
+# `nft list ruleset` / iptables-save dumps) are accepted: only Segmentra's part of
+# them is restored (hosts still on the legacy full-table iptables design get their
+# filter table restored). The restore logic runs on the host and is the same script
+# the executor and the Ansible playbook use:
+#   infra/ansible-runner/playbooks/files/segmentra-nft.sh
+#   infra/ansible-runner/playbooks/files/segmentra-iptables.sh
 #
 # Usage:
 #   ./restore-previous-policy.sh --hosts <hosts-file> --user <ssh-user> --timestamp <backup-timestamp>
@@ -26,6 +37,10 @@
 set -euo pipefail
 
 BACKUP_DIR="/var/backups/segmentra"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FILES_DIR="${SEGMENTRA_HOST_SCRIPTS_DIR:-$SCRIPT_DIR/../infra/ansible-runner/playbooks/files}"
+NFT_SH="$FILES_DIR/segmentra-nft.sh"
+IPT_SH="$FILES_DIR/segmentra-iptables.sh"
 HOSTS_FILE=""
 SSH_USER=""
 TIMESTAMP=""
@@ -72,11 +87,15 @@ if [ ! -f "$HOSTS_FILE" ]; then
   echo "Error: hosts file not found: $HOSTS_FILE"
   exit 1
 fi
+if [ ! -s "$NFT_SH" ] || [ ! -s "$IPT_SH" ]; then
+  echo "Error: host restore scripts not found in $FILES_DIR (set SEGMENTRA_HOST_SCRIPTS_DIR)"
+  exit 1
+fi
 
 # Build SSH options (array form; host keys are verified, new hosts are accepted once)
 KNOWN_HOSTS="${SEGMENTRA_KNOWN_HOSTS:-$HOME/.ssh/known_hosts}"
 mkdir -p "$(dirname "$KNOWN_HOSTS")" && chmod 700 "$(dirname "$KNOWN_HOSTS")" 2>/dev/null || true
-SSH_OPTS=(-n -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$KNOWN_HOSTS"
+SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$KNOWN_HOSTS"
           -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4
           -o BatchMode=yes -o LogLevel=ERROR -p "$SSH_PORT")
 if [ -n "$SSH_KEY" ]; then
@@ -86,7 +105,16 @@ fi
 # Run a remote command; stdin is never consumed (-n) so the hosts-file loop is safe.
 remote() {
   local host="$1"; shift
-  ssh "${SSH_OPTS[@]}" "$SSH_USER@$host" "$@"
+  ssh -n "${SSH_OPTS[@]}" "$SSH_USER@$host" "$@"
+}
+
+# Run a host script (local file $2) as root on the host: sudo sh -s -- <args...>.
+# stdin is the script file, never the hosts file.
+remote_script() {
+  local host="$1" script="$2"; shift 2
+  local args="" a sq="'" esc="'\\''"
+  for a in "$@"; do args+=" '${a//$sq/$esc}'"; done
+  ssh "${SSH_OPTS[@]}" "$SSH_USER@$host" "sudo -n sh -s --$args" < "$script"
 }
 
 # Counters
@@ -123,31 +151,22 @@ while IFS= read -r HOST <&3 || [ -n "$HOST" ]; do
   TOTAL=$((TOTAL + 1))
   echo "--- [$TOTAL] $HOST ---"
 
-  # Detect firewall backend (failures are captured explicitly; set -e must not abort the loop)
-  RC=0
-  BACKEND=$(remote "$HOST" "command -v nft > /dev/null 2>&1 && echo nft || echo iptables" 2>/dev/null) || RC=$?
-  if [ "$RC" -ne 0 ] || [ -z "$BACKEND" ]; then
-    echo "  ✗ SSH connection failed (exit $RC)"
-    FAILED=$((FAILED + 1))
-    echo ""
-    continue
-  fi
-  echo "  Backend: $BACKEND"
-
-  # Determine backup file. Only deployment backups are considered:
-  #   nft.ruleset.<timestamp>  /  iptables.<timestamp>
-  # (audit backups "*.audit-backup.*" and other files are excluded)
-  if [ "$BACKEND" = "nft" ]; then
-    PREFIX="nft.ruleset."
-    PREFIX_RE='^nft\.ruleset\.'
-  else
-    PREFIX="iptables."
-    PREFIX_RE='^iptables\.'
-  fi
+  # Determine backup file (and with it the backend). Only deployment / removal backups
+  # are considered:  nft.ruleset.<timestamp>  /  iptables.<timestamp>
+  # (audit backups "*.audit-backup.*", "*.full" reference dumps and other files are excluded).
+  # The backend is taken from the backup, not from the installed tools: hosts often have
+  # both nft and iptables(-nft) installed. Failures are captured explicitly; set -e must
+  # not abort the loop.
   if [ "$USE_LATEST" = true ]; then
     RC=0
-    BACKUP_FILE=$(remote "$HOST" "sudo -n ls -1t '$BACKUP_DIR' 2>/dev/null | grep -E '${PREFIX_RE}[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9-]+\$' | head -n 1" 2>/dev/null) || RC=$?
-    if [ "$RC" -ne 0 ] || [ -z "$BACKUP_FILE" ]; then
+    BACKUP_FILE=$(remote "$HOST" "sudo -n ls -1t '$BACKUP_DIR' 2>/dev/null | grep -E '^(nft\.ruleset|iptables)\.[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9][0-9A-Za-z-]*\$' | head -n 1" 2>/dev/null) || RC=$?
+    if [ "$RC" -eq 255 ]; then
+      echo "  ✗ SSH connection failed (exit $RC)"
+      FAILED=$((FAILED + 1))
+      echo ""
+      continue
+    fi
+    if [ -z "$BACKUP_FILE" ]; then
       echo "  ✗ No backup files found in $BACKUP_DIR"
       FAILED=$((FAILED + 1))
       echo ""
@@ -161,16 +180,27 @@ while IFS= read -r HOST <&3 || [ -n "$HOST" ]; do
       echo ""
       continue
     fi
-    BACKUP_FILE="$BACKUP_DIR/$PREFIX$TIMESTAMP"
     RC=0
-    EXISTS=$(remote "$HOST" "sudo -n test -f '$BACKUP_FILE' && echo yes || echo no" 2>/dev/null) || RC=$?
-    if [ "$EXISTS" != "yes" ]; then
-      echo "  ✗ Backup not found: $BACKUP_FILE"
+    FOUND=$(remote "$HOST" "for f in '$BACKUP_DIR/nft.ruleset.$TIMESTAMP' '$BACKUP_DIR/iptables.$TIMESTAMP'; do if sudo -n test -f \"\$f\"; then echo \"\$f\"; break; fi; done" 2>/dev/null) || RC=$?
+    if [ "$RC" -eq 255 ]; then
+      echo "  ✗ SSH connection failed (exit $RC)"
       FAILED=$((FAILED + 1))
       echo ""
       continue
     fi
+    if [ -z "$FOUND" ]; then
+      echo "  ✗ Backup not found: $BACKUP_DIR/{nft.ruleset,iptables}.$TIMESTAMP"
+      FAILED=$((FAILED + 1))
+      echo ""
+      continue
+    fi
+    BACKUP_FILE="$FOUND"
   fi
+  case "${BACKUP_FILE##*/}" in
+    nft.ruleset.*) BACKEND=nft ;;
+    *) BACKEND=iptables ;;
+  esac
+  echo "  Backend: $BACKEND"
   echo "  Backup:  $BACKUP_FILE"
 
   # Dry run — just show what would happen
@@ -181,15 +211,21 @@ while IFS= read -r HOST <&3 || [ -n "$HOST" ]; do
     continue
   fi
 
-  # Restore. nft: "flush ruleset" + backup in ONE file -> single atomic nft -f transaction.
-  # iptables: iptables-restore replaces the table (incl. policies) atomically; the matching
-  # ip6tables backup (ip6tables.<timestamp>) is restored too when present.
+  # Scoped restore (see the header). nft: one atomic nft -f transaction replacing only
+  # table inet segmentra. iptables: SEGMENTRA-IN/OUT(/FWD) + jumps; the matching ip6tables backup
+  # (ip6tables.<timestamp>) is restored too when present. Both families are attempted.
   RC=0
   if [ "$BACKEND" = "nft" ]; then
-    remote "$HOST" "sudo -n sh -c 'umask 077; t=\"$BACKUP_FILE.restore\"; { echo \"flush ruleset\"; cat \"$BACKUP_FILE\"; } > \"\$t\" && nft -f \"\$t\"; rc=\$?; rm -f \"\$t\"; exit \$rc'" 2>&1 || RC=$?
+    remote_script "$HOST" "$NFT_SH" restore "$BACKUP_FILE" 2>&1 | sed 's/^/  /' || RC=$?
   else
     V6_FILE="$BACKUP_DIR/ip6tables.${BACKUP_FILE##*/iptables.}"
-    remote "$HOST" "sudo -n sh -c 'iptables-restore < \"$BACKUP_FILE\" && { [ ! -s \"$V6_FILE\" ] || ! command -v ip6tables-restore >/dev/null 2>&1 || ip6tables-restore < \"$V6_FILE\"; }'" 2>&1 || RC=$?
+    remote_script "$HOST" "$IPT_SH" restore iptables "$BACKUP_FILE" 2>&1 | sed 's/^/  /' || RC=$?
+    HAS_V6=$(remote "$HOST" "sudo -n test -s '$V6_FILE' && command -v ip6tables-restore >/dev/null 2>&1 && echo yes || echo no" 2>/dev/null) || HAS_V6=no
+    if [ "$HAS_V6" = "yes" ]; then
+      RC6=0
+      remote_script "$HOST" "$IPT_SH" restore ip6tables "$V6_FILE" 2>&1 | sed 's/^/  /' || RC6=$?
+      if [ "$RC" -eq 0 ]; then RC=$RC6; fi
+    fi
   fi
 
   if [ "$RC" -eq 0 ]; then

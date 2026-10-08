@@ -5,7 +5,10 @@ import { z } from 'zod';
 import { pool } from '../../db/pool.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 import { EDITABLE_VERSION_STATUSES, recordPolicyVersionEditor } from '../../lib/policy-editors.js';
+import { destinationEntityExists } from '../../services/forward-rules.js';
 import {
+  destinationTypeSchema,
+  directionSchema,
   interfaceNamesSchema,
   interfaceRolesSchema,
   interfaceScopeTypeSchema,
@@ -30,13 +33,16 @@ policyRulesRouter.get('/policy-versions/:versionId/rules', requireRole('viewer',
 
 const ruleSchema = z.object({
   orderIndex: z.number().int().min(0),
-  direction: z.enum(['IN', 'OUT', 'BOTH']).default('IN'),
+  direction: directionSchema.default('IN'),
   action: z.enum(['ALLOW', 'DENY']),
   protocol: protocolSchema,
   // '' and null both mean "no ports"
   ports: portsSchema.or(z.literal('')).nullable().optional(),
   sourceType: sourceTypeSchema,
   sourceValue: z.string().trim().min(1),
+  // FORWARD rules only (required there)
+  destinationType: destinationTypeSchema.nullable().optional(),
+  destinationValue: z.string().trim().min(1).nullable().optional(),
   logMode: z.enum(['NONE', 'LOG', 'LOG_RATE_LIMITED']).default('NONE'),
   comment: ruleCommentSchema.nullable().optional(),
   usePolicyInterfaceScope: z.boolean().default(true),
@@ -48,12 +54,14 @@ const ruleSchema = z.object({
 // Partial schema for PUT: no defaults, so omitted fields are really omitted (kept as-is).
 const ruleUpdateSchema = z.object({
   orderIndex: z.number().int().min(0),
-  direction: z.enum(['IN', 'OUT', 'BOTH']),
+  direction: directionSchema,
   action: z.enum(['ALLOW', 'DENY']),
   protocol: protocolSchema,
   ports: portsSchema.or(z.literal('')).nullable(),
   sourceType: sourceTypeSchema,
   sourceValue: z.string().trim().min(1),
+  destinationType: destinationTypeSchema.nullable(),
+  destinationValue: z.string().trim().min(1).nullable(),
   logMode: z.enum(['NONE', 'LOG', 'LOG_RATE_LIMITED']),
   comment: ruleCommentSchema.nullable(),
   usePolicyInterfaceScope: z.boolean(),
@@ -71,6 +79,8 @@ const UPDATE_COLUMNS: Record<string, { column: string; nullable: boolean }> = {
   ports: { column: 'ports', nullable: true },
   sourceType: { column: 'source_type', nullable: false },
   sourceValue: { column: 'source_value', nullable: false },
+  destinationType: { column: 'destination_type', nullable: true },
+  destinationValue: { column: 'destination_value', nullable: true },
   logMode: { column: 'log_mode', nullable: false },
   comment: { column: 'comment', nullable: true },
   usePolicyInterfaceScope: { column: 'use_policy_interface_scope', nullable: false },
@@ -118,8 +128,20 @@ policyRulesRouter.post('/policy-versions/:versionId/rules', requireRole('operato
   const parsed = ruleSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
   const b = parsed.data;
-  const problems = validateRuleSemantics({ protocol: b.protocol, ports: b.ports ?? null, sourceType: b.sourceType, sourceValue: b.sourceValue });
+  const problems = validateRuleSemantics({
+    protocol: b.protocol,
+    ports: b.ports ?? null,
+    sourceType: b.sourceType,
+    sourceValue: b.sourceValue,
+    direction: b.direction,
+    destinationType: b.destinationType ?? null,
+    destinationValue: b.destinationValue ?? null
+  });
+  if (!problems.length && b.direction === 'FORWARD' && !(await destinationEntityExists(b.destinationType!, b.destinationValue!))) {
+    problems.push(`Destination ${b.destinationType} ${b.destinationValue} does not exist`);
+  }
   if (problems.length) return res.status(400).json({ error: 'invalid_rule', message: problems.join('; '), details: problems });
+  const isForward = b.direction === 'FORWARD';
 
   const versionId = req.params.versionId;
   try {
@@ -130,8 +152,9 @@ policyRulesRouter.post('/policy-versions/:versionId/rules', requireRole('operato
       const { rows } = await client.query(
         `INSERT INTO policy_rules
           (policy_version_id, order_index, direction, action, protocol, ports, source_type, source_value, log_mode, comment,
-           use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+           use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names,
+           destination_type, destination_value)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
          RETURNING *`,
         [
           versionId,
@@ -147,14 +170,16 @@ policyRulesRouter.post('/policy-versions/:versionId/rules', requireRole('operato
           b.usePolicyInterfaceScope,
           b.interfaceScopeType ?? null,
           b.interfaceScopeRoles ?? null,
-          b.interfaceScopeNames ?? null
+          b.interfaceScopeNames ?? null,
+          isForward ? b.destinationType : null,
+          isForward ? b.destinationValue : null
         ]
       );
       await recordPolicyVersionEditor(client, versionId, req.auth!.userId);
       await client.query(
         `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
          VALUES ($1, $2, $3, $4, $5)`,
-        [req.auth!.userId, 'POLICY_RULE_CREATE', 'policy_rule', rows[0].id, JSON.stringify({ versionId, direction: b.direction, action: b.action, protocol: b.protocol, ports: b.ports || null, sourceType: b.sourceType })]
+        [req.auth!.userId, 'POLICY_RULE_CREATE', 'policy_rule', rows[0].id, JSON.stringify({ versionId, direction: b.direction, action: b.action, protocol: b.protocol, ports: b.ports || null, sourceType: b.sourceType, destinationType: isForward ? b.destinationType : undefined })]
       );
       return rows[0];
     });
@@ -194,9 +219,20 @@ policyRulesRouter.put('/policy-rules/:ruleId', requireRole('operator', 'admin'),
         protocol: (presentKeys.includes('protocol') ? b.protocol : cur.protocol) as string,
         ports: (presentKeys.includes('ports') ? b.ports : cur.ports) as string | null,
         sourceType: (presentKeys.includes('sourceType') ? b.sourceType : cur.source_type) as string,
-        sourceValue: (presentKeys.includes('sourceValue') ? b.sourceValue : cur.source_value) as string
+        sourceValue: (presentKeys.includes('sourceValue') ? b.sourceValue : cur.source_value) as string,
+        direction: (presentKeys.includes('direction') ? b.direction : cur.direction ?? 'IN') as string,
+        destinationType: (presentKeys.includes('destinationType') ? b.destinationType : cur.destination_type) as string | null,
+        destinationValue: (presentKeys.includes('destinationValue') ? b.destinationValue : cur.destination_value) as string | null
       };
       const problems = validateRuleSemantics(effective);
+      if (
+        !problems.length &&
+        effective.direction === 'FORWARD' &&
+        (presentKeys.includes('destinationType') || presentKeys.includes('destinationValue')) &&
+        !(await destinationEntityExists(effective.destinationType!, effective.destinationValue!))
+      ) {
+        problems.push(`Destination ${effective.destinationType} ${effective.destinationValue} does not exist`);
+      }
       if (problems.length) throw new HttpError(400, { error: 'invalid_rule', message: problems.join('; '), details: problems });
 
       if (presentKeys.length === 0) return cur;

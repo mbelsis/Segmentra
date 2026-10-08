@@ -7,7 +7,9 @@ import { startAuditSession, deployLogOnlyPolicy } from '@segmentra/executor';
 import { buildAuditHost, restoreAuditSessionById } from '../services/audit-scheduler.js';
 import { cidrContains, isValidCidr, isValidIp, portSpecIncludes } from '../services/ip-utils.js';
 import { createSourceResolver } from '../services/source-resolver.js';
+import { createDestinationResolver, gatewaysProtecting, getProtectedDestinations } from '../services/forward-rules.js';
 import { getSshCredentialForHost, type MaterializedSshCredential } from '../services/ssh-credentials.js';
+import { createAuditEvent } from '../services/audit.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -105,14 +107,22 @@ troubleshootRouter.get('/policies/by-ip', async (req, res) => {
 
   // For each matching rule, find which hosts have this policy deployed
   const results = await Promise.all(matchingRules.map(async (rule) => {
+    // Hosts where this version is the one currently active: each host's latest successful
+    // deployment (a deploy replaces the host's whole Segmentra ruleset), not removed by expiry.
     const deploymentsRes = await pool.query(
-      `SELECT d.id, d.status, d.created_at, d.started_at, d.finished_at,
-              dh.host_id, h.hostname, h.mgmt_ip, dh.status as host_status
-       FROM deployments d
-       JOIN deployment_hosts dh ON dh.deployment_id = d.id
-       JOIN hosts h ON h.id = dh.host_id
-       WHERE d.policy_version_id = $1 AND h.enabled = true
-       ORDER BY d.created_at DESC`,
+      `SELECT * FROM (
+         SELECT DISTINCT ON (dh.host_id)
+                d.id, d.status, d.created_at, d.started_at, d.finished_at, d.policy_version_id,
+                dh.host_id, h.hostname, h.mgmt_ip, dh.status AS host_status, dh.expiry_status
+           FROM deployment_hosts dh
+           JOIN deployments d ON d.id = dh.deployment_id
+           JOIN hosts h ON h.id = dh.host_id
+          WHERE dh.status = 'SUCCEEDED' AND h.enabled = true
+            AND dh.host_id IN (SELECT dh2.host_id FROM deployment_hosts dh2 JOIN deployments d2 ON d2.id = dh2.deployment_id WHERE d2.policy_version_id = $1)
+          ORDER BY dh.host_id, COALESCE(dh.finished_at, d.finished_at, d.created_at) DESC
+       ) cur
+       WHERE cur.policy_version_id = $1 AND cur.expiry_status IS DISTINCT FROM 'REMOVED'
+       ORDER BY cur.hostname`,
       [rule.version_id]
     );
 
@@ -125,6 +135,8 @@ troubleshootRouter.get('/policies/by-ip', async (req, res) => {
         ports: rule.ports,
         sourceType: rule.source_type,
         sourceValue: rule.source_value,
+        destinationType: rule.destination_type ?? null,
+        destinationValue: rule.destination_value ?? null,
         direction: rule.direction,
         comment: rule.comment
       },
@@ -164,7 +176,8 @@ troubleshootRouter.get('/hosts/:hostId/policies', async (req, res) => {
   const deploymentsRes = await pool.query(
     `SELECT DISTINCT d.*, pv.version_number, pv.status as version_status,
             ps.id as policy_set_id, ps.name as policy_set_name,
-            dh.status as host_deployment_status, dh.started_at, dh.finished_at, dh.message
+            dh.status as host_deployment_status, dh.started_at, dh.finished_at, dh.message,
+            dh.expiry_status, dh.finished_at AS host_finished_at
      FROM deployments d
      JOIN deployment_hosts dh ON dh.deployment_id = d.id
      JOIN policy_versions pv ON pv.id = d.policy_version_id
@@ -173,6 +186,13 @@ troubleshootRouter.get('/hosts/:hostId/policies', async (req, res) => {
      ORDER BY d.created_at DESC`,
     [hostId]
   );
+
+  // The host's active policy is its latest successful deployment (each deploy replaces the whole
+  // Segmentra ruleset), unless the expiry REMOVE action stripped it afterwards.
+  const latestOk = deploymentsRes.rows
+    .filter((d: any) => d.host_deployment_status === 'SUCCEEDED')
+    .sort((a: any, b: any) => new Date(b.host_finished_at ?? b.finished_at ?? b.created_at).getTime() - new Date(a.host_finished_at ?? a.finished_at ?? a.created_at).getTime())[0];
+  const currentDeploymentId = latestOk && latestOk.expiry_status !== 'REMOVED' ? latestOk.id : null;
 
   // Get rules for each policy version
   const results = await Promise.all(deploymentsRes.rows.map(async (dep: any) => {
@@ -198,6 +218,7 @@ troubleshootRouter.get('/hosts/:hostId/policies', async (req, res) => {
       },
       hostDeploymentStatus: dep.host_deployment_status,
       hostDeploymentMessage: dep.message,
+      current: dep.id === currentDeploymentId,
       rules: rulesRes.rows.map((r: any) => ({
         id: r.id,
         orderIndex: r.order_index,
@@ -206,6 +227,8 @@ troubleshootRouter.get('/hosts/:hostId/policies', async (req, res) => {
         ports: r.ports,
         sourceType: r.source_type,
         sourceValue: r.source_value,
+        destinationType: r.destination_type ?? null,
+        destinationValue: r.destination_value ?? null,
         direction: r.direction,
         comment: r.comment
       }))
@@ -288,6 +311,8 @@ type SimRule = {
   ports: string | null;
   source_type: string;
   source_value: string;
+  destination_type?: string | null;
+  destination_value?: string | null;
   comment: string | null;
 };
 
@@ -373,7 +398,7 @@ troubleshootRouter.post('/simulate-communication', requireRole('operator', 'admi
     return addrs.some((a) => cidrContains(a, remoteIp));
   };
 
-  const ruleInfoOf = (rule: SimRule, policy: any, host: any, appliesTo: 'source' | 'destination') => ({
+  const ruleInfoOf = (rule: SimRule, policy: any, host: any, appliesTo: 'source' | 'destination' | 'gateway') => ({
     rule: {
       id: rule.id,
       orderIndex: rule.order_index,
@@ -382,6 +407,8 @@ troubleshootRouter.post('/simulate-communication', requireRole('operator', 'admi
       ports: rule.ports,
       sourceType: rule.source_type,
       sourceValue: rule.source_value,
+      destinationType: rule.destination_type ?? null,
+      destinationValue: rule.destination_value ?? null,
       direction: rule.direction,
       comment: rule.comment
     },
@@ -393,7 +420,7 @@ troubleshootRouter.post('/simulate-communication', requireRole('operator', 'admi
     },
     host: { id: host.id, hostname: host.hostname, mgmtIp: host.mgmt_ip },
     appliesTo,
-    direction: appliesTo === 'source' ? 'OUT' : 'IN'
+    direction: appliesTo === 'source' ? 'OUT' : appliesTo === 'gateway' ? 'FORWARD' : 'IN'
   });
 
   const blockingRules: any[] = [];
@@ -455,10 +482,52 @@ troubleshootRouter.post('/simulate-communication', requireRole('operator', 'admi
     }
   }
 
-  const wouldBlock = sourceSide.decision === 'DENY' || destSide.decision === 'DENY';
+  // Forwarded through a managed gateway: when the destination is an IoT device assigned to a
+  // gateway, that gateway's FORWARD rules are evaluated in order (first match wins) and traffic
+  // no rule allows is dropped (protected-device default deny). The simulator assumes the traffic
+  // is actually routed through the gateway.
+  const resolveDst = createDestinationResolver();
+  type GatewayResult = SideResult & { gateway: { id: string; hostname: string; mgmtIp: string | null }; protectedAsset: { id: string; name: string } };
+  const gatewayResults: GatewayResult[] = [];
+  for (const gw of await gatewaysProtecting(destIp)) {
+    const eff = await effectivePolicyForHost(gw.id);
+    const gwHost = { id: gw.id, hostname: gw.hostname, mgmt_ip: gw.mgmt_ip };
+    let r: GatewayResult = {
+      managed: !!eff,
+      decision: eff ? 'DENY' : 'ALLOW',
+      decidedBy: eff ? 'default_policy' : 'no_policy',
+      defaultAction: eff ? 'DROP' : null,
+      matchedRule: null,
+      policyVersion: eff?.policy ?? null,
+      gateway: { id: gw.id, hostname: gw.hostname, mgmtIp: gw.mgmt_ip },
+      protectedAsset: { id: gw.asset_id, name: gw.asset_name }
+    };
+    if (eff) {
+      for (const rule of eff.rules) {
+        if (rule.direction !== 'FORWARD' || !rule.destination_type) continue;
+        if (!(await ruleMatches(rule, sourceIp))) continue;
+        const dsts = await resolveDst(rule.destination_type, String(rule.destination_value ?? ''));
+        if (!dsts.some((a) => cidrContains(a, destIp))) continue;
+        const info = ruleInfoOf(rule, eff.policy, gwHost, 'gateway');
+        allRules.push(info);
+        (rule.action === 'DENY' ? blockingRules : allowingRules).push(info);
+        if (!r.matchedRule) r = { ...r, decision: rule.action, decidedBy: 'rule', matchedRule: info };
+      }
+      notes.push(
+        `${destIp} is protected IoT device "${gw.asset_name}" behind gateway ${gw.hostname}: forwarded traffic to it is denied unless a FORWARD rule allows it ` +
+          '(assumes the traffic is routed through the gateway and the gateway was deployed after the device was assigned)'
+      );
+    } else {
+      notes.push(`${destIp} is IoT device "${gw.asset_name}" assigned to gateway ${gw.hostname}, but no policy is deployed on that gateway: forwarded traffic is not filtered`);
+    }
+    gatewayResults.push(r);
+  }
+  const gatewayDeny = gatewayResults.find((g) => g.decision === 'DENY') ?? null;
+
+  const wouldBlock = sourceSide.decision === 'DENY' || destSide.decision === 'DENY' || !!gatewayDeny;
   let blockingRule: any = null;
   let reason: string;
-  if (!sourceSide.managed && !destSide.managed) {
+  if (!sourceSide.managed && !destSide.managed && !gatewayResults.some((g) => g.managed)) {
     reason = 'allowed (no policy)';
   } else if (sourceSide.decision === 'DENY') {
     blockingRule = sourceSide.matchedRule;
@@ -468,6 +537,11 @@ troubleshootRouter.post('/simulate-communication', requireRole('operator', 'admi
     reason = destSide.decidedBy === 'rule'
       ? `blocked inbound on ${destHost.hostname} by rule #${destSide.matchedRule?.rule.orderIndex}`
       : `blocked inbound on ${destHost.hostname} by the default DROP policy (no rule matched)`;
+  } else if (gatewayDeny) {
+    blockingRule = gatewayDeny.matchedRule;
+    reason = gatewayDeny.decidedBy === 'rule'
+      ? `blocked while forwarded through gateway ${gatewayDeny.gateway.hostname} by FORWARD rule #${gatewayDeny.matchedRule?.rule.orderIndex}`
+      : `blocked while forwarded through gateway ${gatewayDeny.gateway.hostname}: ${destIp} is a protected device and no FORWARD rule allows this traffic`;
   } else {
     reason = 'allowed';
   }
@@ -487,6 +561,7 @@ troubleshootRouter.post('/simulate-communication', requireRole('operator', 'admi
     blockingRule,
     source: sourceSide,
     destination: destSide,
+    gateways: gatewayResults,
     blockingRules,
     allowingRules,
     allRules,
@@ -597,7 +672,9 @@ troubleshootRouter.post('/audit/start', requireRole('operator', 'admin'), async 
         rules: [],
         sets: {},
         baseline: { mgmtSshCidrs },
-        logOnlyMode: true
+        logOnlyMode: true,
+        // Gateways: log forwarded traffic to their protected devices (accepted while learning)
+        protectedDestinations: await getProtectedDestinations(host.id)
       });
 
       policyFilePath = path.join(os.tmpdir(), `audit_policy_${host.id}_${Date.now()}.${compiled.backend === 'nftables' ? 'nft' : 'iptables'}`);
@@ -651,6 +728,19 @@ troubleshootRouter.post('/audit/start', requireRole('operator', 'admin'), async 
     }
   }
 
+  // Firewall learning puts hosts into log-only (allow-all) mode, so every start is audited.
+  for (const r of results) {
+    if (!r.sessionId) continue;
+    await createAuditEvent({
+      actorUserId: userId,
+      action: r.status === 'RUNNING' ? 'FIREWALL_LEARNING_START' : 'FIREWALL_LEARNING_START_FAILED',
+      entityType: 'firewall_audit_session',
+      entityId: r.sessionId,
+      ipAddress: req.ip,
+      metadata: { hostId: r.hostId, hostname: r.hostname, durationMinutes, status: r.status, error: r.error }
+    });
+  }
+
   const failed = results.filter((r) => r.status !== 'RUNNING').length;
   res.status(failed === 0 ? 201 : 207).json({
     sessions,
@@ -692,6 +782,14 @@ troubleshootRouter.post('/audit/sessions/:id/restore', requireRole('operator', '
   if (!outcome) {
     return res.status(404).json({ error: 'not_found', message: 'Session not found or not running' });
   }
+  await createAuditEvent({
+    actorUserId: req.auth!.userId ?? null,
+    action: outcome.success ? 'FIREWALL_LEARNING_RESTORE' : 'FIREWALL_LEARNING_RESTORE_FAILED',
+    entityType: 'firewall_audit_session',
+    entityId: req.params.id,
+    ipAddress: req.ip,
+    metadata: outcome.success ? { entryCount: outcome.entryCount } : { error: outcome.error }
+  });
   if (!outcome.success) {
     return res.status(502).json({
       error: 'restore_failed',
@@ -721,6 +819,14 @@ troubleshootRouter.post('/audit/sessions/:id/cancel', requireRole('operator', 'a
   if (!outcome) {
     return res.status(404).json({ error: 'not_found', message: 'Session not found or not running' });
   }
+  await createAuditEvent({
+    actorUserId: req.auth!.userId ?? null,
+    action: outcome.success ? 'FIREWALL_LEARNING_CANCEL' : 'FIREWALL_LEARNING_CANCEL_FAILED',
+    entityType: 'firewall_audit_session',
+    entityId: req.params.id,
+    ipAddress: req.ip,
+    metadata: outcome.success ? {} : { error: outcome.error }
+  });
   if (!outcome.success) {
     return res.status(502).json({
       error: 'cancel_failed',

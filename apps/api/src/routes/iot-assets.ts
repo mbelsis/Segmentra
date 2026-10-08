@@ -245,16 +245,21 @@ iotAssetsRouter.get('/gateways/list', requireRole('viewer', 'operator', 'approve
   const { rows } = await pool.query(
     `SELECT h.id, h.hostname, h.mgmt_ip, h.firewall_backend, h.enabled,
        (SELECT COUNT(*)::int FROM iot_asset_gateways iag WHERE iag.host_id = h.id) as protected_asset_count,
+       (SELECT COALESCE(json_agg(json_build_object('id', ia.id, 'name', ia.name, 'ip_address', ia.ip_address, 'enabled', ia.enabled) ORDER BY ia.name), '[]'::json)
+          FROM iot_assets ia JOIN iot_asset_gateways iag ON iag.asset_id = ia.id
+         WHERE iag.host_id = h.id) as protected_assets,
        (SELECT json_build_object(
           'deploymentId', d.id, 'status', d.status, 'policySetName', ps.name,
-          'versionNumber', pv.version_number, 'deployedAt', d.finished_at
+          'versionNumber', pv.version_number, 'deployedAt', COALESCE(dh.finished_at, d.finished_at),
+          'removedByExpiry', dh.expiry_status IS NOT DISTINCT FROM 'REMOVED',
+          'forwardRuleCount', (SELECT COUNT(*)::int FROM policy_rules pr WHERE pr.policy_version_id = pv.id AND pr.direction = 'FORWARD')
         )
         FROM deployment_hosts dh
         JOIN deployments d ON d.id = dh.deployment_id
         JOIN policy_versions pv ON pv.id = d.policy_version_id
         JOIN policy_sets ps ON ps.id = pv.policy_set_id
         WHERE dh.host_id = h.id AND dh.status = 'SUCCEEDED'
-        ORDER BY d.finished_at DESC LIMIT 1
+        ORDER BY COALESCE(dh.finished_at, d.finished_at, d.created_at) DESC LIMIT 1
        ) as last_deployment
      FROM hosts h
      JOIN host_tags ht ON ht.host_id = h.id

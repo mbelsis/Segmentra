@@ -71,13 +71,16 @@ export async function insertRule(
     interface_scope_type?: string | null;
     interface_scope_roles?: string[] | null;
     interface_scope_names?: string[] | null;
+    destination_type?: string | null;
+    destination_value?: string | null;
   }
 ): Promise<void> {
   await client.query(
     `INSERT INTO policy_rules
        (policy_version_id, order_index, direction, action, protocol, ports, source_type, source_value,
-        log_mode, comment, use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+        log_mode, comment, use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names,
+        destination_type, destination_value)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
     [
       versionId,
       orderIndex,
@@ -93,6 +96,8 @@ export async function insertRule(
       rule.interface_scope_type ?? null,
       rule.interface_scope_roles ?? null,
       rule.interface_scope_names ?? null,
+      rule.direction === 'FORWARD' ? rule.destination_type ?? null : null,
+      rule.direction === 'FORWARD' ? rule.destination_value ?? null : null,
     ]
   );
 }

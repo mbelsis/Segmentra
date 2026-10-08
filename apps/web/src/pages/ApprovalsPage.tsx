@@ -266,7 +266,7 @@ export function ApprovalsPage() {
                           Approve
                         </button>
                         <button
-                          onClick={() => setExpandedId(expandedId === v.id ? null : v.id)}
+                          onClick={(e) => { e.stopPropagation(); toggleExpand(v); }}
                           style={{
                             padding: '5px 12px',
                             background: 'transparent',

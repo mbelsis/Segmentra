@@ -213,6 +213,33 @@ app.listen(env.PORT, () => {
     }
   }, 60 * 1000); // Check every 1 minute
 
+  // Inventory discovery scheduler (every 1 minute). Runs left RUNNING by a previous process
+  // are marked FAILED once at startup; due profiles are claimed atomically (SKIP LOCKED) and
+  // each run executes in the background.
+  void import('./services/discovery.js')
+    .then(({ failStaleDiscoveryRuns }) => failStaleDiscoveryRuns({ all: true }))
+    .then((n) => {
+      // eslint-disable-next-line no-console
+      if (n > 0) console.log(`[Discovery] Marked ${n} interrupted run(s) as FAILED`);
+    })
+    .catch((e) => {
+      // eslint-disable-next-line no-console
+      console.error('[Discovery] Error cleaning up interrupted runs:', e);
+    });
+  setInterval(async () => {
+    try {
+      const { processScheduledDiscovery } = await import('./services/discovery.js');
+      const started = await processScheduledDiscovery();
+      if (started > 0) {
+        // eslint-disable-next-line no-console
+        console.log(`[Discovery] Started ${started} scheduled discovery run(s)`);
+      }
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[Discovery] Error processing scheduled discovery:', e);
+    }
+  }, 60 * 1000); // Check every 1 minute
+
   // Start periodic policy test session expiry processor (every 1 minute)
   // When a test session expires, SSH into the host to restore original rules and collect logs.
   // Sessions whose restore failed stay RUNNING (with scheduled_end_at pulled forward) and are retried here.

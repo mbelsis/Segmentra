@@ -242,6 +242,7 @@ export const api = {
   resumeDeployment: (deploymentId: string) => request<{ ok: boolean }>(`/deployments/${deploymentId}/resume`, { method: 'POST' }),
   stopDeployment: (deploymentId: string) => request<{ ok: boolean }>(`/deployments/${deploymentId}/stop`, { method: 'POST' }),
   cancelDeployment: (deploymentId: string) => request<{ ok: boolean }>(`/deployments/${deploymentId}/cancel`, { method: 'POST' }),
+  retryFailedHosts: (deploymentId: string) => request<{ ok: boolean; deployment: any; hostsReset: number }>(`/deployments/${deploymentId}/retry-failed`, { method: 'POST' }),
   approveDeployment: (deploymentId: string) => request<{ deployment: any }>(`/deployments/${deploymentId}/approve`, { method: 'POST' }),
   deploymentHosts: (deploymentId: string) => request<{ hosts: any[] }>(`/deployments/${deploymentId}/hosts`),
 
@@ -314,6 +315,8 @@ export const api = {
         policyVersion: any;
         hostDeploymentStatus: string;
         hostDeploymentMessage: string | null;
+        /** True for the deployment whose rules are currently active on the host. */
+        current?: boolean;
         rules: any[];
       }>;
     }>(`/troubleshoot/hosts/${hostId}/policies`),
@@ -475,6 +478,18 @@ export const api = {
     }),
 
   // === Capability 1: Tag Rules (Auto-Tagging) ===
+  // === Inventory discovery (/api/discovery) ===
+  discovery: {
+    profiles: () => request<{ profiles: any[]; limits: { maxAddressesPerRun: number; minPrefix: number } }>('/discovery/profiles'),
+    profile: (id: string) => request<{ profile: any }>(`/discovery/profiles/${id}`),
+    createProfile: (b: any) => request<{ profile: any }>('/discovery/profiles', { method: 'POST', body: JSON.stringify(b) }),
+    updateProfile: (id: string, b: any) => request<{ profile: any }>(`/discovery/profiles/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
+    deleteProfile: (id: string) => request<{ ok: boolean }>(`/discovery/profiles/${id}`, { method: 'DELETE' }),
+    run: (id: string) => request<{ runId: string; status: string }>(`/discovery/profiles/${id}/run`, { method: 'POST' }),
+    runs: (id: string, limit = 20) => request<{ runs: any[] }>(`/discovery/profiles/${id}/runs?limit=${limit}`),
+    getRun: (runId: string) => request<{ run: any }>(`/discovery/runs/${runId}`),
+  },
+
   tagRules: {
     list: () => request<{ tagRules: any[] }>('/tag-rules'),
     get: (id: string) => request<{ tagRule: any; matchedHosts: any[] }>(`/tag-rules/${id}`),

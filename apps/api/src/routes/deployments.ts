@@ -6,12 +6,13 @@ import path from 'node:path';
 import { Router } from 'express';
 import { z } from 'zod';
 
-import { compileHostPolicy } from '@segmentra/compiler';
+import { compileHostPolicy, type RuleDirection } from '@segmentra/compiler';
 import { runAnsiblePlaybook, runSshDeployment, checkHostReadiness, readHostFirewallRules, type SshHost, type SshHostInfo } from '@segmentra/executor';
 
 import { pool } from '../db/pool.js';
 import { env } from '../lib/env.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
+import { addDestinationSets, compilerDestination, getProtectedDestinations } from '../services/forward-rules.js';
 import { createAuditEvent } from '../services/audit.js';
 import { getSshCredentialForHost, loadSshCredential, materializeSshCredential, type MaterializedSshCredential } from '../services/ssh-credentials.js';
 import { checkDeploymentSafety } from '../services/safety-check.js';
@@ -778,7 +779,8 @@ async function generateBundle(deploymentId: string, opts: { ansible: boolean } =
 
   const rRes = await pool.query(
     `SELECT order_index, direction, action, protocol, ports, source_type, source_value, log_mode, comment,
-            use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names
+            use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names,
+            destination_type, destination_value
      FROM policy_rules
      WHERE policy_version_id=$1`,
     [dep.policy_version_id]
@@ -819,6 +821,8 @@ async function generateBundle(deploymentId: string, opts: { ansible: boolean } =
     }
     sets[setName] = ips;
   }
+  // FORWARD rule destinations (gateways): dst_* sets
+  await addDestinationSets(rRes.rows, sets);
 
   const manifest = {
     deployment_id: deploymentId,
@@ -900,7 +904,7 @@ async function generateBundle(deploymentId: string, opts: { ansible: boolean } =
           : ({ kind: 'SET' as const, setName: `src_${r.source_type.toLowerCase()}_${String(r.source_value).replace(/-/g, '')}` });
         return {
           orderIndex: Number(r.order_index),
-          direction: (r.direction ?? 'IN') as 'IN' | 'OUT' | 'BOTH',
+          direction: (r.direction ?? 'IN') as RuleDirection,
           action: r.action,
           protocol: r.protocol,
           ports: r.ports,
@@ -910,9 +914,12 @@ async function generateBundle(deploymentId: string, opts: { ansible: boolean } =
           comment: r.comment,
           usePolicyInterfaceScope: Boolean(r.use_policy_interface_scope),
           interfaceScope: ruleScope,
-          remote
+          remote,
+          ...compilerDestination(r)
         };
       });
+      // IoT devices assigned to this host as a gateway: forwarded traffic to them is default-deny.
+      const protectedDestinations = await getProtectedDestinations(h.id);
 
       let compiled: ReturnType<typeof compileHostPolicy>;
       try {
@@ -928,7 +935,8 @@ async function generateBundle(deploymentId: string, opts: { ansible: boolean } =
           policyInterfaceScope,
           rules,
           sets,
-          baseline: { mgmtSshCidrs }
+          baseline: { mgmtSshCidrs },
+          protectedDestinations
         });
       } catch (compileError: any) {
         if (compileError?.name !== 'CompileError') throw compileError;
@@ -1441,6 +1449,14 @@ deploymentsRouter.post('/deployments/:deploymentId/start', requireRole('operator
   // Atomically claim QUEUED/SCHEDULED -> RUNNING (prevents double-start and enforces approval)
   const claimed = await claimDeploymentForStart(deploymentId, ['QUEUED', 'SCHEDULED']);
   if (!claimed) return explainNotStartable(deploymentId, res, ['QUEUED', 'SCHEDULED']);
+
+  await createAuditEvent({
+    actorUserId: req.auth!.userId ?? null,
+    action: 'DEPLOYMENT_STARTED',
+    entityType: 'DEPLOYMENT',
+    entityId: deploymentId,
+    ipAddress: req.ip
+  });
 
   // Return 202 Accepted immediately — execution happens in background
   res.status(202).json({ ok: true, message: 'Deployment started. Monitor progress on the deployment detail page.', deploymentId });

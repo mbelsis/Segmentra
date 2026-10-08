@@ -6,6 +6,8 @@ export function KubernetesPage() {
   const { roles } = useAuth();
   // Cluster create/update/delete is admin-only in the API
   const isAdmin = hasRole(roles, 'admin');
+  // Generating NetworkPolicy manifests is operator/admin in the API
+  const canGenerate = hasRole(roles, 'operator') || isAdmin;
   // Latest cluster selection; responses for any other cluster are stale and ignored
   const selectedClusterIdRef = useRef<string | null>(null);
   const workloadsRequestId = useRef(0);
@@ -21,6 +23,46 @@ export function KubernetesPage() {
   const [tab, setTab] = useState<'workloads' | 'policies'>('workloads');
   const [selectedManifest, setSelectedManifest] = useState<any>(null);
   const [form, setForm] = useState({ name: '', description: '', apiServerUrl: '', authType: 'kubeconfig', defaultNamespace: 'default' });
+  const [showGenerate, setShowGenerate] = useState(false);
+  const [deployableVersions, setDeployableVersions] = useState<Array<{ id: string; label: string }>>([]);
+  const [genForm, setGenForm] = useState({ policyVersionId: '', namespace: 'default', policyName: '' });
+  const [genWarnings, setGenWarnings] = useState<string[]>([]);
+  const [generating, setGenerating] = useState(false);
+
+  // NetworkPolicies can only be generated from APPROVED or DEPLOYED versions
+  const openGenerate = async () => {
+    setShowGenerate(true);
+    setGenWarnings([]);
+    setGenForm(f => ({ ...f, namespace: selectedCluster?.default_namespace || 'default' }));
+    try {
+      const { policySets } = await api.policySets();
+      const lists = await Promise.all(policySets.map(async (ps: any) => {
+        const { versions } = await api.versions(ps.id);
+        return versions
+          .filter((v: any) => v.status === 'APPROVED' || v.status === 'DEPLOYED')
+          .map((v: any) => ({ id: v.id, label: `${ps.name} v${v.version_number} (${v.status})` }));
+      }));
+      setDeployableVersions(lists.flat());
+    } catch (e: any) { setError(e.message); }
+  };
+
+  const generateNetworkPolicy = async () => {
+    if (!selectedCluster || !genForm.policyVersionId || !genForm.namespace.trim() || !genForm.policyName.trim()) return;
+    setGenerating(true);
+    setError('');
+    try {
+      const res: any = await api.k8s.deployPolicy(selectedCluster.id, {
+        policyVersionId: genForm.policyVersionId,
+        namespace: genForm.namespace.trim(),
+        policyName: genForm.policyName.trim()
+      });
+      setGenWarnings(res.warnings || []);
+      if (!res.warnings?.length) setShowGenerate(false);
+      const npRes = await api.k8s.networkPolicies(selectedCluster.id);
+      setNetworkPolicies(npRes.networkPolicies);
+    } catch (e: any) { setError(e.message); }
+    setGenerating(false);
+  };
 
   const load = async () => {
     setLoading(true);
@@ -216,6 +258,45 @@ export function KubernetesPage() {
 
             {tab === 'policies' && (
               <>
+                {canGenerate && !showGenerate && (
+                  <div style={{ marginBottom: 12 }}>
+                    <button onClick={openGenerate} className="btn-primary">Generate NetworkPolicy</button>
+                  </div>
+                )}
+                {showGenerate && (
+                  <div className="card" style={{ border: '1px solid #d4c9b8' }}>
+                    <h4 style={{ marginTop: 0 }}>Generate NetworkPolicy</h4>
+                    <div className="form-grid">
+                      <div className="form-group">
+                        <label>Policy Version *</label>
+                        <select value={genForm.policyVersionId} onChange={e => setGenForm(f => ({ ...f, policyVersionId: e.target.value }))}>
+                          <option value="">Select an approved or deployed version</option>
+                          {deployableVersions.map(v => <option key={v.id} value={v.id}>{v.label}</option>)}
+                        </select>
+                      </div>
+                      <div className="form-group">
+                        <label>Namespace *</label>
+                        <input value={genForm.namespace} onChange={e => setGenForm(f => ({ ...f, namespace: e.target.value }))} />
+                      </div>
+                      <div className="form-group">
+                        <label>NetworkPolicy Name *</label>
+                        <input value={genForm.policyName} onChange={e => setGenForm(f => ({ ...f, policyName: e.target.value }))} placeholder="e.g., web-access" />
+                      </div>
+                    </div>
+                    {genWarnings.length > 0 && (
+                      <div role="note" style={{ background: '#fff8e6', border: '1px solid #f0d58c', color: '#6b5310', padding: '8px 12px', borderRadius: 6, fontSize: '0.88em', marginBottom: 12 }}>
+                        <strong>Generated with warnings</strong> (rules NetworkPolicy can't express were skipped):
+                        <ul style={{ margin: '6px 0 0 18px' }}>{genWarnings.map((w, i) => <li key={i}>{w}</li>)}</ul>
+                      </div>
+                    )}
+                    <div className="form-actions">
+                      <button onClick={generateNetworkPolicy} className="btn-primary" disabled={generating || !genForm.policyVersionId || !genForm.namespace.trim() || !genForm.policyName.trim()}>
+                        {generating ? 'Generating...' : 'Generate'}
+                      </button>
+                      <button onClick={() => { setShowGenerate(false); setGenWarnings([]); }} className="btn-secondary">Close</button>
+                    </div>
+                  </div>
+                )}
                 <div className="card">
                   <table className="data-table">
                     <thead><tr><th>Namespace</th><th>Policy Name</th><th>Source Policy</th><th>Status</th><th>Generated</th><th>Actions</th></tr></thead>
@@ -236,7 +317,7 @@ export function KubernetesPage() {
                           </td>
                         </tr>
                       ))}
-                      {networkPolicies.length === 0 && <tr><td colSpan={6} className="empty-state">No NetworkPolicy manifests generated yet. Use "Generate NetworkPolicy" from an approved Segmentra policy.</td></tr>}
+                      {networkPolicies.length === 0 && <tr><td colSpan={6} className="empty-state">No NetworkPolicy manifests generated yet. Use "Generate NetworkPolicy" above with an approved or deployed Segmentra policy version.</td></tr>}
                     </tbody>
                   </table>
                 </div>

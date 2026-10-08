@@ -189,8 +189,8 @@ export function PolicyTestPage() {
             to capture real traffic, then automatically restore the original rules and let you analyze the results.
           </p>
           <div role="note" style={{ background: '#fff8e6', border: '1px solid #f0d58c', color: '#6b5310', padding: '10px 12px', borderRadius: 6, fontSize: '0.88em', marginBottom: 16 }}>
-            <strong>Note:</strong> when the session ends, the host's <em>complete</em> firewall ruleset is restored from the backup taken at the start.
-            Rules added by Docker, Kubernetes or fail2ban during the session are lost; restart Docker / kube-proxy on the host afterwards if containers changed meanwhile.
+            <strong>Note:</strong> while the session runs, the host is in log-only mode and nothing is blocked. When it ends,
+            Segmentra's own rules are restored to their state at the start; rules of Docker, Kubernetes or fail2ban are not touched.
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <div>
@@ -417,10 +417,17 @@ export function PolicyTestPage() {
                   </div>
                 </div>
 
-                <div style={{ marginBottom: 12, padding: 8, background: '#f5f5f5', borderRadius: 4 }}>
-                  <strong>Coverage:</strong> {analysis.summary.coveragePercent}% of observed traffic is covered by ALLOW rules |
-                  <strong> Total Flows:</strong> {analysis.summary.totalFlows}
-                </div>
+                {analysis.summary.totalFlows === 0 ? (
+                  <div role="note" style={{ marginBottom: 12, padding: 8, background: '#fff8e6', border: '1px solid #f0d58c', color: '#6b5310', borderRadius: 4 }}>
+                    <strong>No traffic was captured</strong>, so this test can't confirm the policy is safe. Check that the host logs kernel
+                    firewall messages (rsyslog/journald) and that traffic occurred during the test window.
+                  </div>
+                ) : (
+                  <div style={{ marginBottom: 12, padding: 8, background: '#f5f5f5', borderRadius: 4 }}>
+                    <strong>Coverage:</strong> {analysis.summary.coveragePercent}% of observed traffic is covered by ALLOW rules |
+                    <strong> Total Flows:</strong> {analysis.summary.totalFlows}
+                  </div>
+                )}
 
                 {analysis.unexpectedAllows?.length > 0 && (
                   <>

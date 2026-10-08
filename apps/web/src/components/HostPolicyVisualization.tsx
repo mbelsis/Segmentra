@@ -43,7 +43,8 @@ export function HostPolicyVisualization({ hostId, hostname, onClose }: HostPolic
     try {
       // Load policies for the host
       const policiesRes = await api.troubleshoot.hostPolicies(hostId);
-      setPolicies(policiesRes.policies || []);
+      // Only the active deployment's rules are enforced on the host; older deployments are history.
+      setPolicies((policiesRes.policies || []).filter((p) => p.current));
 
       // Load tags, VLANs, and hosts for resolution
       const [tagsRes, vlansRes, hostsRes] = await Promise.all([

@@ -26,6 +26,8 @@ export function AdminPage() {
   const [sshName, setSshName] = useState('global');
   const [sshUser, setSshUser] = useState('root');
   const [sshKey, setSshKey] = useState('');
+  const [sshAuthMethod, setSshAuthMethod] = useState<'KEY' | 'PASSWORD'>('KEY');
+  const [sshPassword, setSshPassword] = useState('');
   const [sshCreds, setSshCreds] = useState<any[]>([]);
   const [showSshForm, setShowSshForm] = useState(false);
 
@@ -292,8 +294,9 @@ export function AdminPage() {
   }
 
   async function saveSshCredential() {
-    if (!sshName.trim() || !sshUser.trim() || !sshKey.trim()) {
-      setError('Name, username, and private key are required');
+    const secretMissing = sshAuthMethod === 'KEY' ? !sshKey.trim() : !sshPassword;
+    if (!sshName.trim() || !sshUser.trim() || secretMissing) {
+      setError(sshAuthMethod === 'KEY' ? 'Name, username, and private key are required' : 'Name, username, and password are required');
       return;
     }
     
@@ -302,16 +305,17 @@ export function AdminPage() {
     setSuccess('');
     
     try {
-      await api.createSshCredential({
-        name: sshName.trim(),
-        username: sshUser.trim(),
-        privateKeyPem: sshKey.trim(),
-        scopeType: 'GLOBAL'
-      });
+      await api.createSshCredential(
+        sshAuthMethod === 'KEY'
+          ? { name: sshName.trim(), username: sshUser.trim(), authMethod: 'KEY', privateKeyPem: sshKey.trim(), scopeType: 'GLOBAL' }
+          : { name: sshName.trim(), username: sshUser.trim(), authMethod: 'PASSWORD', password: sshPassword, scopeType: 'GLOBAL' }
+      );
       setSuccess('SSH credential saved successfully');
       setSshName('global');
       setSshUser('root');
       setSshKey('');
+      setSshPassword('');
+      setSshAuthMethod('KEY');
       setShowSshForm(false);
       await loadData();
       setTimeout(() => setSuccess(''), 3000);
@@ -794,7 +798,27 @@ export function AdminPage() {
                 />
                 <small>Use a sudo-capable account. Root login is often disabled on modern systems.</small>
               </div>
+              <div className="form-group">
+                <label>Authentication *</label>
+                <select value={sshAuthMethod} onChange={(e) => setSshAuthMethod(e.target.value as 'KEY' | 'PASSWORD')}>
+                  <option value="KEY">Private key</option>
+                  <option value="PASSWORD">Password</option>
+                </select>
+              </div>
             </div>
+            {sshAuthMethod === 'PASSWORD' && (
+              <div className="form-group">
+                <label>Password *</label>
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  value={sshPassword}
+                  onChange={(e) => setSshPassword(e.target.value)}
+                />
+                <small>Stored encrypted. Also used as the sudo password when Ansible deploys to this host.</small>
+              </div>
+            )}
+            {sshAuthMethod === 'KEY' && (
               <div className="form-group">
                 <label>Private Key (PEM) *</label>
                 <textarea
@@ -811,11 +835,12 @@ export function AdminPage() {
                   and file operations in <code>/etc</code> and <code>/var/backups</code>.
                 </div>
               </div>
+            )}
             <div className="form-actions">
               <button
                 onClick={saveSshCredential}
                 className="btn-primary"
-                disabled={loading || !sshName.trim() || !sshUser.trim() || !sshKey.trim()}
+                disabled={loading || !sshName.trim() || !sshUser.trim() || (sshAuthMethod === 'KEY' ? !sshKey.trim() : !sshPassword)}
               >
                 {loading ? 'Saving...' : 'Save SSH Credential'}
               </button>
@@ -825,6 +850,8 @@ export function AdminPage() {
                   setSshName('global');
                   setSshUser('root');
                   setSshKey('');
+                  setSshPassword('');
+                  setSshAuthMethod('KEY');
                 }}
                 className="btn-secondary"
               >

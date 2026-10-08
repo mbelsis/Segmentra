@@ -79,7 +79,11 @@ const tagRuleSchema = z.object({
 });
 
 // Preview body: same shape as create, but only `criteria` is needed (tagId/name optional).
-const previewSchema = tagRuleSchema.partial().extend({ criteria: criteriaSchema });
+const previewSchema = tagRuleSchema.partial().extend({
+  criteria: criteriaSchema,
+  // An unselected tag in the form arrives as '' — treat it as "no tag" (preview doesn't need one).
+  tagId: z.preprocess((v) => (v === '' || v === null ? undefined : v), z.string().uuid().optional())
+});
 
 /**
  * Preview which hosts a rule would match. Performs NO writes.
@@ -120,7 +124,9 @@ tagRulesRouter.post('/', requireRole('operator', 'admin'), async (req, res) => {
     [userId, rows[0].id, JSON.stringify({ name: b.name, tagId: b.tagId })]
   );
 
-  res.status(201).json({ tagRule: rows[0] });
+  // Apply the new rule right away (same as updates) instead of waiting for the 5-minute job.
+  const reevaluationError = b.enabled ? await reconcileNow('rule create') : null;
+  res.status(201).json({ tagRule: rows[0], reevaluationError });
 });
 
 // Update tag rule

@@ -8,9 +8,9 @@ import {
   retireLegacyPolicyScript,
   segmentraIptablesCommand
 } from './iptables-scripts.js';
+import { SEGMENTRA_BACKUP_DIR, scopedBackupSnippet } from './firewall-backup.js';
 
-const BACKUP_DIR = '/var/backups/segmentra';
-const EMPTY_FILTER_TABLE = '*filter\\n:INPUT ACCEPT [0:0]\\n:FORWARD ACCEPT [0:0]\\n:OUTPUT ACCEPT [0:0]\\nCOMMIT\\n';
+const BACKUP_DIR = SEGMENTRA_BACKUP_DIR;
 
 export interface RemovePolicyResult {
   success: boolean;
@@ -22,12 +22,13 @@ export interface RemovePolicyResult {
 /**
  * Remove Segmentra's policy from a host, leaving every other firewall rule alone.
  *
- * A backup is taken first (same files as a deployment: nft.ruleset.<ts> /
- * iptables.<ts> + ip6tables.<ts> in /var/backups/segmentra); nothing is changed
- * if it cannot be written. Then:
+ * A scoped backup of Segmentra's own state is taken first (same files and format
+ * as a deployment: nft.ruleset.<ts> / iptables.<ts> + ip6tables.<ts> in
+ * /var/backups/segmentra, see firewall-backup.ts); nothing is changed if it cannot
+ * be written. Then:
  *  - nftables: `nft delete table inet segmentra` (a missing table is not an error);
- *  - iptables/ip6tables: the INPUT/OUTPUT jumps are deleted (all copies), the
- *    SEGMENTRA-IN/OUT chains flushed and deleted, and rules left by the legacy
+ *  - iptables/ip6tables: the INPUT/OUTPUT(/FORWARD) jumps are deleted (all copies), the
+ *    SEGMENTRA-IN/OUT(/FWD) chains flushed and deleted, and rules left by the legacy
  *    full-table design are cleaned up when positively identifiable.
  * /etc/segmentra.policy[6] are renamed to *.removed afterwards.
  * With host.backend 'auto'/undefined, both are attempted where the tools exist.
@@ -49,18 +50,12 @@ export async function removeSegmentraPolicy(host: SshHostInfo, opts: SshConnecti
     'if [ "$has_nft" = 0 ] && [ "$has_ipt" = 0 ]; then echo "error: no supported firewall tooling (nft / iptables) found" >&2; exit 6; fi',
     // --- backup (abort on failure: set -e) ---
     'if [ "$has_nft" = 1 ]; then',
-    `  nft list ruleset > ${b('nft.ruleset')}`,
-    `  { echo 'flush ruleset'; cat ${b('nft.ruleset')}; } > ${b('nft.rollback')}`,
-    `  echo "Backup written: ${BACKUP_DIR}/nft.ruleset.${ts}"`,
+    `  ${scopedBackupSnippet('nftables', `${BACKUP_DIR}/nft.ruleset.${ts}`)}`,
+    `  test -s ${b('nft.ruleset')}`,
     'fi',
     'if [ "$has_ipt" = 1 ]; then',
-    `  iptables-save > ${b('iptables')}`,
-    `  if [ ! -s ${b('iptables')} ]; then printf ${shq(EMPTY_FILTER_TABLE)} > ${b('iptables')}; fi`,
-    '  if command -v ip6tables-save >/dev/null 2>&1; then',
-    `    ip6tables-save > ${b('ip6tables')}`,
-    `    if [ ! -s ${b('ip6tables')} ]; then printf ${shq(EMPTY_FILTER_TABLE)} > ${b('ip6tables')}; fi`,
-    '  fi',
-    `  echo "Backup written: ${BACKUP_DIR}/iptables.${ts}"`,
+    `  ${scopedBackupSnippet('iptables', `${BACKUP_DIR}/iptables.${ts}`, `${BACKUP_DIR}/ip6tables.${ts}`)}`,
+    `  test -s ${b('iptables')}`,
     'fi',
     // --- removal ---
     'if [ "$has_nft" = 1 ]; then',

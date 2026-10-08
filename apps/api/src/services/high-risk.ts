@@ -6,6 +6,7 @@ import { pool } from '../db/pool.js';
  * - Very broad source (internet-like) to sensitive ports
  * - Opening management/administrative access beyond the management VLAN
  * - Big "any/any" style rules
+ * - FORWARD allows from a very broad source to devices behind a gateway (IoT/OT)
  */
 export async function isPolicyVersionHighRisk(params: {
   policyVersionId: string;
@@ -23,7 +24,7 @@ export async function isPolicyVersionHighRisk(params: {
       [policyVersionId]
     ),
     pool.query(
-      `SELECT action, protocol, ports, source_type, source_value, direction
+      `SELECT action, protocol, ports, source_type, source_value, direction, destination_type, destination_value
        FROM policy_rules
        WHERE policy_version_id = $1`,
       [policyVersionId]
@@ -136,6 +137,13 @@ export async function isPolicyVersionHighRisk(params: {
 
     // Only consider ALLOW rules for "opening things up"
     if (action !== 'ALLOW') continue;
+
+    // (0) FORWARD: opening protected devices (IoT/OT behind a gateway) to "anywhere". Any
+    //     FORWARD destination may be a protected device (IOT_ASSET, or a TAG/VLAN/CIDR/HOST
+    //     covering one), so a very broad source is high-risk whatever the destination.
+    if (r.direction === 'FORWARD' && sourceType === 'CIDR' && isVeryBroadCidr(sourceValue)) {
+      return true;
+    }
 
     // (a) Very broad CIDR to sensitive ports
     if (

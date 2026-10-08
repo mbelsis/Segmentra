@@ -15,6 +15,8 @@ export function PolicyVersionPage() {
   const [hosts, setHosts] = useState<any[]>([]);
   const [tags, setTags] = useState<any[]>([]);
   const [vlans, setVlans] = useState<any[]>([]);
+  const [iotAssets, setIotAssets] = useState<any[]>([]);
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [managementVlan, setManagementVlan] = useState<any>(null);
   // undefined = not loaded / not visible to this user (setting is admin-only)
   const [managementVlanLoaded, setManagementVlanLoaded] = useState(false);
@@ -24,12 +26,14 @@ export function PolicyVersionPage() {
 
   // Form state
   const [formOrderIndex, setFormOrderIndex] = useState(0);
-  const [formDirection, setFormDirection] = useState<'IN' | 'OUT' | 'BOTH'>('IN');
+  const [formDirection, setFormDirection] = useState<'IN' | 'OUT' | 'BOTH' | 'FORWARD'>('IN');
   const [formAction, setFormAction] = useState<'ALLOW' | 'DENY'>('ALLOW');
   const [formProtocol, setFormProtocol] = useState<'tcp' | 'udp' | 'icmp' | 'any'>('tcp');
   const [formPorts, setFormPorts] = useState('');
   const [formSourceType, setFormSourceType] = useState<'CIDR' | 'TAG' | 'VLAN' | 'HOST'>('CIDR');
   const [formSourceValue, setFormSourceValue] = useState('');
+  const [formDestinationType, setFormDestinationType] = useState<'CIDR' | 'TAG' | 'VLAN' | 'HOST' | 'IOT_ASSET'>('IOT_ASSET');
+  const [formDestinationValue, setFormDestinationValue] = useState('');
   const [formLogMode, setFormLogMode] = useState<'NONE' | 'LOG' | 'LOG_RATE_LIMITED'>('NONE');
   const [formComment, setFormComment] = useState('');
   const [formUsePolicyInterfaceScope, setFormUsePolicyInterfaceScope] = useState(true);
@@ -48,6 +52,7 @@ export function PolicyVersionPage() {
     api.allHosts().then((r) => setHosts(r.hosts)).catch(() => undefined);
     api.tags().then((r) => setTags(r.tags)).catch(() => undefined);
     api.vlans().then((r) => setVlans(r.vlans)).catch(() => undefined);
+    api.iot.assets().then((r) => setIotAssets(r.assets)).catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [versionId]);
 
@@ -87,6 +92,8 @@ export function PolicyVersionPage() {
     setFormPorts('');
     setFormSourceType('CIDR');
     setFormSourceValue('');
+    setFormDestinationType('IOT_ASSET');
+    setFormDestinationValue('');
     setFormLogMode('NONE');
     setFormComment('');
     setFormUsePolicyInterfaceScope(true);
@@ -108,6 +115,10 @@ export function PolicyVersionPage() {
       setError('Source value is required');
       return;
     }
+    if (formDirection === 'FORWARD' && !formDestinationValue.trim()) {
+      setError('FORWARD rules need a destination');
+      return;
+    }
 
     try {
       const payload: any = {
@@ -119,6 +130,9 @@ export function PolicyVersionPage() {
         ports: formPorts.trim() || null,
         sourceType: formSourceType,
         sourceValue: formSourceValue.trim(),
+        // Only FORWARD rules carry a destination; explicit null clears it on update
+        destinationType: formDirection === 'FORWARD' ? formDestinationType : null,
+        destinationValue: formDirection === 'FORWARD' ? formDestinationValue.trim() : null,
         logMode: formLogMode,
         comment: formComment.trim() || null,
         usePolicyInterfaceScope: formUsePolicyInterfaceScope
@@ -150,7 +164,7 @@ export function PolicyVersionPage() {
       setError('Only DRAFT or REJECTED versions can be edited');
       return;
     }
-    if (!confirm('Delete this rule?')) return;
+    setPendingDelete(null);
     try {
       await api.deleteRule(ruleId);
       loadData();
@@ -168,6 +182,8 @@ export function PolicyVersionPage() {
     setFormPorts(rule.ports || '');
     setFormSourceType(rule.source_type);
     setFormSourceValue(rule.source_value);
+    setFormDestinationType(rule.destination_type || 'IOT_ASSET');
+    setFormDestinationValue(rule.destination_value || '');
     setFormLogMode(rule.log_mode);
     setFormComment(rule.comment || '');
     setFormUsePolicyInterfaceScope(rule.use_policy_interface_scope);
@@ -211,7 +227,18 @@ export function PolicyVersionPage() {
 
   const isEditableStatus = version.status === 'DRAFT' || version.status === 'REJECTED';
   const canEdit = isEditableStatus && canEditRules;
-  const colCount = canEdit ? 9 : 8;
+  const colCount = canEdit ? 10 : 9;
+  const describeEndpoint = (type: string | null | undefined, value: string | null | undefined) => {
+    if (!type) return '-';
+    if (type === 'CIDR') return value;
+    if (type === 'TAG') return tags.find((t) => t.id === value)?.name || value;
+    if (type === 'VLAN') return vlans.find((v) => v.id === value)?.name || value;
+    if (type === 'IOT_ASSET') {
+      const a = iotAssets.find((x) => x.id === value);
+      return a ? `${a.name}${a.ip_address ? ` (${a.ip_address})` : ''}` : value;
+    }
+    return hosts.find((h) => h.id === value)?.hostname || value;
+  };
 
   return (
     <div className="page">
@@ -309,7 +336,7 @@ export function PolicyVersionPage() {
           )}
         </div>
         <div style={{ padding: '8px 12px', background: '#f7f4ef', borderRadius: 6, marginBottom: 12, fontSize: '12.5px', color: '#78644e', borderLeft: '3px solid #d4c9b8' }}>
-          <strong>Baseline rules applied automatically:</strong> Loopback allow, established/related connections, and management SSH access (from the configured management VLAN) are added by the compiler at deploy time. Define only your application-specific rules here.
+          <strong>Baseline rules applied automatically:</strong> Loopback allow, established/related connections, and management SSH access on each host's SSH port (from the configured management VLAN, or from any source if none is configured) are added by the compiler at deploy time. Define only your application-specific rules here.
         </div>
 
         {showAddRule && canEdit && (
@@ -331,6 +358,7 @@ export function PolicyVersionPage() {
                   <option value="IN">IN</option>
                   <option value="OUT">OUT</option>
                   <option value="BOTH">BOTH</option>
+                  <option value="FORWARD">FORWARD (through gateway)</option>
                 </select>
               </div>
               <div className="form-group">
@@ -402,6 +430,66 @@ export function PolicyVersionPage() {
                   </select>
                 )}
               </div>
+              {formDirection === 'FORWARD' && (
+                <>
+                  <div className="form-group">
+                    <label>Destination Type</label>
+                    <select
+                      value={formDestinationType}
+                      onChange={(e) => { setFormDestinationType(e.target.value as any); setFormDestinationValue(''); }}
+                    >
+                      <option value="IOT_ASSET">IoT device</option>
+                      <option value="CIDR">CIDR</option>
+                      <option value="VLAN">VLAN</option>
+                      <option value="TAG">TAG</option>
+                      <option value="HOST">HOST</option>
+                    </select>
+                  </div>
+                  <div className="form-group">
+                    <label>Destination Value</label>
+                    {formDestinationType === 'CIDR' && (
+                      <input
+                        type="text"
+                        value={formDestinationValue}
+                        onChange={(e) => setFormDestinationValue(e.target.value)}
+                        placeholder="172.31.0.0/24"
+                      />
+                    )}
+                    {formDestinationType === 'IOT_ASSET' && (
+                      <select value={formDestinationValue} onChange={(e) => setFormDestinationValue(e.target.value)}>
+                        <option value="">Select IoT device</option>
+                        {iotAssets.map((a) => (
+                          <option key={a.id} value={a.id}>{a.name}{a.ip_address ? ` (${a.ip_address})` : ' (no IP)'}</option>
+                        ))}
+                      </select>
+                    )}
+                    {formDestinationType === 'TAG' && (
+                      <select value={formDestinationValue} onChange={(e) => setFormDestinationValue(e.target.value)}>
+                        <option value="">Select tag</option>
+                        {tags.map((t) => (
+                          <option key={t.id} value={t.id}>{t.name}</option>
+                        ))}
+                      </select>
+                    )}
+                    {formDestinationType === 'VLAN' && (
+                      <select value={formDestinationValue} onChange={(e) => setFormDestinationValue(e.target.value)}>
+                        <option value="">Select VLAN</option>
+                        {vlans.map((v) => (
+                          <option key={v.id} value={v.id}>{v.name} (VLAN {v.vlan_tag})</option>
+                        ))}
+                      </select>
+                    )}
+                    {formDestinationType === 'HOST' && (
+                      <select value={formDestinationValue} onChange={(e) => setFormDestinationValue(e.target.value)}>
+                        <option value="">Select host</option>
+                        {hosts.map((h) => (
+                          <option key={h.id} value={h.id}>{h.hostname} ({h.mgmt_ip})</option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                </>
+              )}
               <div className="form-group">
                 <label>Log Mode</label>
                 <select value={formLogMode} onChange={(e) => setFormLogMode(e.target.value as any)}>
@@ -421,6 +509,13 @@ export function PolicyVersionPage() {
               </div>
             </div>
 
+            {formDirection === 'FORWARD' && (
+              <div style={{ padding: '8px 12px', background: '#f7f4ef', borderRadius: 6, marginBottom: 12, fontSize: '12.5px', color: '#78644e', borderLeft: '3px solid #d4c9b8' }}>
+                FORWARD rules filter traffic routed <em>through</em> the host (e.g. an IoT/OT gateway), matched on source and destination.
+                On a gateway, traffic to its protected devices (IoT assets assigned on the OT/IoT page) is denied unless a FORWARD rule allows it;
+                other forwarded traffic is not affected. Interface scopes do not apply to FORWARD rules.
+              </div>
+            )}
             {/* Per-rule interface scope override */}
             <div className="form-group">
               <label>
@@ -481,6 +576,7 @@ export function PolicyVersionPage() {
               <th>Protocol</th>
               <th>Ports</th>
               <th>Source</th>
+              <th>Destination</th>
               <th>Log</th>
               <th>Comment</th>
               {canEdit && <th>Actions</th>}
@@ -500,6 +596,7 @@ export function PolicyVersionPage() {
               <td><code>any</code></td>
               <td>-</td>
               <td><code>CIDR</code>: <code>lo</code> (loopback)</td>
+              <td>-</td>
               <td>NONE</td>
               <td>Loopback interface</td>
               {canEdit && <td></td>}
@@ -511,6 +608,7 @@ export function PolicyVersionPage() {
               <td><code>any</code></td>
               <td>-</td>
               <td><code>CIDR</code>: Established/Related connections</td>
+              <td>-</td>
               <td>NONE</td>
               <td>Connection tracking</td>
               {canEdit && <td></td>}
@@ -523,6 +621,7 @@ export function PolicyVersionPage() {
                 <td><code>tcp</code></td>
                 <td>22</td>
                 <td><code>CIDR</code>: {managementVlan.subnet} (Management VLAN: {managementVlan.name})</td>
+                <td>-</td>
                 <td>NONE</td>
                 <td>Baseline SSH access from management network</td>
                 {canEdit && <td></td>}
@@ -531,7 +630,7 @@ export function PolicyVersionPage() {
             {isAdmin && managementVlanLoaded && !managementVlan && (
               <tr style={{ background: '#fff3cd' }}>
                 <td colSpan={colCount} style={{ padding: 8, fontSize: '0.9em', color: '#856404' }}>
-                  ⚠️ No management VLAN configured. Configure it in Admin → Management VLAN to enable baseline SSH access.
+                  ⚠️ No management VLAN configured: SSH is allowed from any source so hosts can't be locked out. Configure Admin → Management VLAN to restrict SSH to that subnet.
                 </td>
               </tr>
             )}
@@ -551,18 +650,26 @@ export function PolicyVersionPage() {
                 <td><code>{r.protocol}</code></td>
                 <td>{r.ports || '-'}</td>
                 <td>
-                  <code>{r.source_type}</code>: {r.source_type === 'CIDR' ? r.source_value : (
-                    r.source_type === 'TAG' ? tags.find(t => t.id === r.source_value)?.name || r.source_value :
-                    r.source_type === 'VLAN' ? vlans.find(v => v.id === r.source_value)?.name || r.source_value :
-                    hosts.find(h => h.id === r.source_value)?.hostname || r.source_value
-                  )}
+                  <code>{r.source_type}</code>: {describeEndpoint(r.source_type, r.source_value)}
+                </td>
+                <td>
+                  {r.direction === 'FORWARD' && r.destination_type
+                    ? <><code>{r.destination_type === 'IOT_ASSET' ? 'IoT device' : r.destination_type}</code>: {describeEndpoint(r.destination_type, r.destination_value)}</>
+                    : '-'}
                 </td>
                 <td>{r.log_mode}</td>
                 <td>{r.comment || '-'}</td>
                 {canEdit && (
                   <td>
                     <button onClick={() => editRule(r)} className="btn-small">Edit</button>
-                    <button onClick={() => deleteRule(r.id)} className="btn-small btn-danger">Delete</button>
+                    {pendingDelete === r.id ? (
+                      <>
+                        <button onClick={() => deleteRule(r.id)} className="btn-small btn-danger">Confirm delete</button>
+                        <button onClick={() => setPendingDelete(null)} className="btn-small">Cancel</button>
+                      </>
+                    ) : (
+                      <button onClick={() => setPendingDelete(r.id)} className="btn-small btn-danger">Delete</button>
+                    )}
                   </td>
                 )}
               </tr>

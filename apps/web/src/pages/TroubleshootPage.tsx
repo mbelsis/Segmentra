@@ -231,9 +231,9 @@ export function TroubleshootPage() {
           Deploy log-only firewall rules to capture all network traffic without blocking. After the specified duration, original rules will be restored and communication flows will be displayed.
         </p>
         <div role="note" style={{ background: '#fff8e6', border: '1px solid #f0d58c', color: '#6b5310', padding: '10px 12px', borderRadius: 6, fontSize: '0.88em', marginBottom: 16 }}>
-          <strong>Note:</strong> when the session ends, the host's <em>complete</em> firewall ruleset is restored from the backup taken at the start.
-          Rules added by Docker, Kubernetes or fail2ban during the session are lost; restart Docker / kube-proxy on the host afterwards if containers changed meanwhile.
-        </div>
+          <strong>Note:</strong> while the session runs, the host is in log-only mode and nothing is blocked. When it ends,
+            Segmentra's own rules are restored to their state at the start; rules of Docker, Kubernetes or fail2ban are not touched.
+          </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: 16, marginBottom: 16 }}>
           <div>
@@ -595,10 +595,36 @@ export function TroubleshootPage() {
             )}
             {simResults.allRules.length === 0 && simResults.wouldBlock && (
               <div style={{ marginTop: 12 }}>
-                <strong>Reason:</strong> No matching firewall rules found. Default policy is DENY.
+                <strong>Reason:</strong> {simResults.reason || 'No matching firewall rules found. Default policy is DENY.'}
               </div>
             )}
+            {simResults.allRules.length > 0 && simResults.reason && (
+              <div style={{ marginTop: 8, fontSize: '0.9em' }}><strong>Reason:</strong> {simResults.reason}</div>
+            )}
+            {Array.isArray(simResults.notes) && simResults.notes.length > 0 && (
+              <ul style={{ marginTop: 8, marginBottom: 0, fontSize: '0.85em', color: '#555' }}>
+                {simResults.notes.map((n: string, i: number) => <li key={i}>{n}</li>)}
+              </ul>
+            )}
           </div>
+
+          {Array.isArray(simResults.gateways) && simResults.gateways.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <h3>Forwarded Through Gateway</h3>
+              {simResults.gateways.map((g: any) => (
+                <div key={g.gateway.id} style={{ padding: 12, background: '#f5f5f5', borderRadius: 4, marginBottom: 8, fontSize: '0.9em' }}>
+                  <strong>{g.gateway.hostname}</strong> protects <strong>{g.protectedAsset.name}</strong> ({simResults.destIp}):{' '}
+                  <strong style={{ color: g.decision === 'DENY' ? '#f44336' : '#4CAF50' }}>{g.decision}</strong>{' '}
+                  {g.decidedBy === 'rule' && g.matchedRule
+                    ? `by FORWARD rule #${g.matchedRule.rule.orderIndex}${g.matchedRule.rule.comment ? ` (${g.matchedRule.rule.comment})` : ''}`
+                    : g.decidedBy === 'default_policy'
+                      ? '(no FORWARD rule matched: protected-device default deny)'
+                      : '(no policy deployed on the gateway: not filtered)'}
+                  {g.policyVersion && <span style={{ color: '#666' }}> — {g.policyVersion.policy_set_name} v{g.policyVersion.version_number}</span>}
+                </div>
+              ))}
+            </div>
+          )}
 
           <div style={{ marginBottom: 16 }}>
             <h3>Host Information</h3>
@@ -645,7 +671,7 @@ export function TroubleshootPage() {
                           Policy: {ruleInfo.policyVersion.policySetName} v{ruleInfo.policyVersion.versionNumber}
                         </div>
                         <div style={{ fontSize: '0.9em', color: '#666' }}>
-                          Host: {ruleInfo.host.hostname} ({ruleInfo.appliesTo === 'source' ? 'Source' : 'Destination'}, {ruleInfo.direction})
+                          Host: {ruleInfo.host.hostname} ({ruleInfo.appliesTo === 'source' ? 'Source' : ruleInfo.appliesTo === 'gateway' ? 'Gateway' : 'Destination'}, {ruleInfo.direction})
                         </div>
                       </div>
                     </div>
@@ -653,6 +679,7 @@ export function TroubleshootPage() {
                       <div><strong>Protocol:</strong> {ruleInfo.rule.protocol}</div>
                       {ruleInfo.rule.ports && <div><strong>Ports:</strong> {ruleInfo.rule.ports}</div>}
                       <div><strong>Source:</strong> {ruleInfo.rule.sourceType} = {ruleInfo.rule.sourceValue}</div>
+                      {ruleInfo.rule.destinationType && <div><strong>Destination:</strong> {ruleInfo.rule.destinationType} = {ruleInfo.rule.destinationValue}</div>}
                       <div><strong>Direction:</strong> {ruleInfo.rule.direction}</div>
                       {ruleInfo.rule.comment && <div><strong>Comment:</strong> {ruleInfo.rule.comment}</div>}
                     </div>
@@ -748,6 +775,7 @@ export function TroubleshootPage() {
                     <div><strong>Protocol:</strong> {result.rule.protocol}</div>
                     {result.rule.ports && <div><strong>Ports:</strong> {result.rule.ports}</div>}
                     <div><strong>Source:</strong> {result.rule.sourceType} = {result.rule.sourceValue}</div>
+                    {result.rule.destinationType && <div><strong>Destination:</strong> {result.rule.destinationType} = {result.rule.destinationValue}</div>}
                     <div><strong>Direction:</strong> {result.rule.direction}</div>
                     {result.rule.comment && <div><strong>Comment:</strong> {result.rule.comment}</div>}
                   </div>
@@ -828,7 +856,10 @@ export function TroubleshootPage() {
                           <td><code>{rule.action}</code></td>
                           <td><code>{rule.protocol}</code></td>
                           <td>{rule.ports || '-'}</td>
-                          <td>{rule.sourceType}: {rule.sourceValue}</td>
+                          <td>
+                            {rule.sourceType}: {rule.sourceValue}
+                            {rule.destinationType && <div style={{ fontSize: '0.85em', color: '#666' }}>→ {rule.destinationType}: {rule.destinationValue}</div>}
+                          </td>
                           <td>{rule.direction}</td>
                           <td>{rule.comment || '-'}</td>
                         </tr>

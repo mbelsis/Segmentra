@@ -16,10 +16,14 @@
 
   # Segmentra only ever touches its own state:
   #   nftables: table inet segmentra (replaced atomically by nft -f)
-  #   iptables: chains SEGMENTRA-IN / SEGMENTRA-OUT plus one jump from INPUT / OUTPUT
+  #   iptables: chains SEGMENTRA-IN / SEGMENTRA-OUT plus one jump from INPUT / OUTPUT, and on
+  #             gateways filtering forwarded traffic SEGMENTRA-FWD plus one jump from FORWARD
   #             (iptables-restore --noflush; see files/segmentra-iptables.sh)
   # Docker, Kubernetes, fail2ban, ... rules and built-in chain policies are left alone.
-  # Failure rollback restores the full backup taken by this run.
+  # Backups and the failure rollback are scoped to exactly that state as well
+  # (files/segmentra-nft.sh, files/segmentra-iptables.sh "backup" / "restore"): a full
+  # `nft list ruleset` cannot be replayed on hosts where other tools use iptables-nft
+  # (xtables-compat expressions), and replaying it would clobber their tables anyway.
 
   tasks:
     - name: Generate timestamp
@@ -38,53 +42,71 @@
         state: directory
         mode: "0700"
 
+    # Both tools may be installed (iptables-nft ships next to nft on modern distros), so only
+    # check that the tool required by the compiled policy exists.
     - name: Detect nftables
       become: true
-      shell: "command -v nft >/dev/null 2>&1 && echo nft || echo no"
+      shell: "PATH=\"$PATH:/usr/sbin:/sbin\"; command -v nft >/dev/null 2>&1 && echo nft || echo no"
       register: nft_detect
+      changed_when: false
+
+    - name: Detect iptables-restore
+      become: true
+      shell: "PATH=\"$PATH:/usr/sbin:/sbin\"; command -v iptables-restore >/dev/null 2>&1 && echo iptables || echo no"
+      register: ipt_detect
       changed_when: false
 
     - name: Decide backend
       set_fact:
         nft_will_apply: "{{ nft_detect.stdout == 'nft' and seg_policy_file.endswith('.nft') }}"
-        iptables_will_apply: "{{ nft_detect.stdout != 'nft' and seg_policy_file.endswith('.iptables') }}"
-        ip6_will_apply: "{{ nft_detect.stdout != 'nft' and seg_ip6_policy_file != '' }}"
+        iptables_will_apply: "{{ ipt_detect.stdout == 'iptables' and seg_policy_file.endswith('.iptables') }}"
+        ip6_will_apply: "{{ ipt_detect.stdout == 'iptables' and seg_policy_file.endswith('.iptables') and seg_ip6_policy_file != '' }}"
 
     - name: Log backend detection vs policy file
       debug:
-        msg: "Backend detection: {{ nft_detect.stdout }}, Policy file: {{ seg_policy_file }}, IPv6 policy file: {{ seg_ip6_policy_file | default('', true) }}, Will apply nftables: {{ nft_will_apply }}, Will apply iptables: {{ iptables_will_apply }}"
+        msg: "Backend detection: nft={{ nft_detect.stdout }} iptables-restore={{ ipt_detect.stdout }}, Policy file: {{ seg_policy_file }}, IPv6 policy file: {{ seg_ip6_policy_file | default('', true) }}, Will apply nftables: {{ nft_will_apply }}, Will apply iptables: {{ iptables_will_apply }}"
 
     - name: Fail if backend mismatch detected (no apply task will run)
       fail:
-        msg: "Backend mismatch: Detected backend is '{{ nft_detect.stdout }}', but policy file extension is '{{ seg_policy_file.split('.')[-1] }}'. Expected .nft for nftables or .iptables for iptables. Please check host firewall_backend setting. This indicates the compiled policy format does not match the host's firewall backend."
+        msg: "The tool required by the policy is not installed on the host (policy file: {{ seg_policy_file }}; nft: {{ nft_detect.stdout }}, iptables-restore: {{ ipt_detect.stdout }}). Install it or change the host's firewall_backend setting."
       when: not nft_will_apply and not iptables_will_apply
 
-    - name: Backup nftables ruleset
+    - name: Backup nftables.conf
       when: nft_will_apply
       become: true
       shell: |
-        set -e
         umask 077
         if [ -f /etc/nftables.conf ]; then
           cp /etc/nftables.conf "{{ segmentra_backup_dir }}/nftables.conf.{{ segmentra_ts }}"
         fi
-        nft list ruleset > "{{ segmentra_backup_dir }}/nft.ruleset.{{ segmentra_ts }}"
-        { echo 'flush ruleset'; cat "{{ segmentra_backup_dir }}/nft.ruleset.{{ segmentra_ts }}"; } > "{{ segmentra_backup_dir }}/nft.rollback.{{ segmentra_ts }}"
       changed_when: true
 
-    - name: Backup iptables / ip6tables rules
+    # Scoped backup: table inet segmentra only ("absent" marker if it does not exist).
+    - name: Backup table inet segmentra
+      when: nft_will_apply
+      become: true
+      script: "files/segmentra-nft.sh backup {{ segmentra_backup_dir }}/nft.ruleset.{{ segmentra_ts }}"
+      changed_when: true
+
+    # Scoped backup: SEGMENTRA-IN/OUT(/FWD) + INPUT/OUTPUT(/FORWARD) jumps (+ legacy-host flag);
+    # the full iptables-save is kept next to it as <file>.full.
+    - name: Backup iptables SEGMENTRA chains
       when: iptables_will_apply
       become: true
-      shell: |
-        set -e
-        umask 077
-        empty='*filter\n:INPUT ACCEPT [0:0]\n:FORWARD ACCEPT [0:0]\n:OUTPUT ACCEPT [0:0]\nCOMMIT\n'
-        iptables-save > "{{ segmentra_backup_dir }}/iptables.{{ segmentra_ts }}"
-        [ -s "{{ segmentra_backup_dir }}/iptables.{{ segmentra_ts }}" ] || printf "$empty" > "{{ segmentra_backup_dir }}/iptables.{{ segmentra_ts }}"
-        if command -v ip6tables-save >/dev/null 2>&1; then
-          ip6tables-save > "{{ segmentra_backup_dir }}/ip6tables.{{ segmentra_ts }}"
-          [ -s "{{ segmentra_backup_dir }}/ip6tables.{{ segmentra_ts }}" ] || printf "$empty" > "{{ segmentra_backup_dir }}/ip6tables.{{ segmentra_ts }}"
-        fi
+      script: "files/segmentra-iptables.sh backup iptables {{ segmentra_backup_dir }}/iptables.{{ segmentra_ts }}"
+      changed_when: true
+
+    - name: Detect ip6tables-save / ip6tables-restore
+      when: iptables_will_apply
+      become: true
+      shell: "PATH=\"$PATH:/usr/sbin:/sbin\"; command -v ip6tables-save >/dev/null 2>&1 && command -v ip6tables-restore >/dev/null 2>&1 && echo yes || echo no"
+      register: ip6_tools_detect
+      changed_when: false
+
+    - name: Backup ip6tables SEGMENTRA chains
+      when: iptables_will_apply and ip6_tools_detect.stdout == 'yes'
+      become: true
+      script: "files/segmentra-iptables.sh backup ip6tables {{ segmentra_backup_dir }}/ip6tables.{{ segmentra_ts }}"
       changed_when: true
 
     - name: Preserve legacy (full-table design) policy files for cleanup
@@ -124,7 +146,7 @@
           become: true
           shell: "nft -f /etc/segmentra.policy"
 
-        - name: Apply iptables chains SEGMENTRA-IN/OUT and INPUT/OUTPUT jumps
+        - name: Apply iptables chains SEGMENTRA-IN/OUT(/FWD) and INPUT/OUTPUT(/FORWARD) jumps
           when: iptables_will_apply
           become: true
           script: "files/segmentra-iptables.sh apply iptables /etc/segmentra.policy {{ segmentra_legacy_policy }}"
@@ -142,7 +164,7 @@
           register: ip6_detect
           changed_when: false
 
-        - name: Apply ip6tables chains SEGMENTRA-IN/OUT and INPUT/OUTPUT jumps
+        - name: Apply ip6tables chains SEGMENTRA-IN/OUT(/FWD) and INPUT/OUTPUT(/FORWARD) jumps
           when: ip6_will_apply and ip6_detect.stdout == 'yes'
           become: true
           script: "files/segmentra-iptables.sh apply ip6tables /etc/segmentra.policy6 {{ segmentra_legacy_policy6 }}"
@@ -166,24 +188,38 @@
             if [ -f {{ segmentra_legacy_policy6 }} ]; then mv -f {{ segmentra_legacy_policy6 }} {{ segmentra_legacy_policy6 }}.migrated; fi
           changed_when: false
       rescue:
-        - name: Roll back nftables from this run's backup
+        # Scoped rollback: only table inet segmentra / SEGMENTRA-IN/OUT(/FWD) + jumps are
+        # restored (legacy full-table iptables hosts: the filter table). Failures are
+        # recorded and reported by the final task instead of aborting the rescue.
+        - name: Roll back table inet segmentra from this run's backup
           when: nft_will_apply
           become: true
-          shell: |
-            rb="{{ segmentra_backup_dir }}/nft.rollback.{{ segmentra_ts }}"
-            if [ -s "$rb" ]; then nft -f "$rb" || true; fi
+          script: "files/segmentra-nft.sh restore {{ segmentra_backup_dir }}/nft.ruleset.{{ segmentra_ts }}"
+          register: nft_rollback
+          failed_when: false
           changed_when: true
 
-        - name: Roll back iptables / ip6tables from this run's backup
+        - name: Roll back iptables SEGMENTRA chains from this run's backup
           when: iptables_will_apply
           become: true
-          shell: |
-            b="{{ segmentra_backup_dir }}/iptables.{{ segmentra_ts }}"
-            b6="{{ segmentra_backup_dir }}/ip6tables.{{ segmentra_ts }}"
-            if [ -s "$b" ]; then iptables-restore < "$b" || true; fi
-            if [ -s "$b6" ] && command -v ip6tables-restore >/dev/null 2>&1; then ip6tables-restore < "$b6" || true; fi
+          script: "files/segmentra-iptables.sh restore iptables {{ segmentra_backup_dir }}/iptables.{{ segmentra_ts }}"
+          register: ipt_rollback
+          failed_when: false
+          changed_when: true
+
+        - name: Roll back ip6tables SEGMENTRA chains from this run's backup
+          when: iptables_will_apply and (ip6_tools_detect.stdout | default('no')) == 'yes'
+          become: true
+          script: "files/segmentra-iptables.sh restore ip6tables {{ segmentra_backup_dir }}/ip6tables.{{ segmentra_ts }}"
+          register: ip6_rollback
+          failed_when: false
           changed_when: true
 
         - name: Fail after rollback
+          vars:
+            rollback_rcs: "{{ [nft_rollback, ipt_rollback, ip6_rollback] | selectattr('rc', 'defined') | map(attribute='rc') | list }}"
+            rollback_ok: "{{ rollback_rcs | reject('equalto', 0) | list | length == 0 }}"
           fail:
-            msg: "Firewall apply failed; rollback attempted"
+            msg: >-
+              Firewall apply failed; rollback {{ 'succeeded (previous Segmentra state restored)' if rollback_ok
+              else 'FAILED (exit codes ' ~ (rollback_rcs | join(', ')) ~ ') - check the host manually' }}

@@ -11,7 +11,7 @@ export interface ReadRulesResult {
   error?: string;
   /**
    * False when Segmentra's table (nft) or SEGMENTRA-IN chain / INPUT+OUTPUT jumps
-   * (iptables, IPv4) are missing from the live ruleset. Set only on success.
+   * (iptables, IPv4; plus the FORWARD jump when SEGMENTRA-FWD exists) are missing from the live ruleset. Set only on success.
    */
   segmentraPresent?: boolean;
 }
@@ -103,7 +103,14 @@ function extractNftTable(text: string): string | null {
   return out.join('\n');
 }
 
-function iptablesSegmentraLines(section: string): { lines: string[]; chain: boolean; jumpIn: boolean; jumpOut: boolean } {
+function iptablesSegmentraLines(section: string): {
+  lines: string[];
+  chain: boolean;
+  jumpIn: boolean;
+  jumpOut: boolean;
+  chainFwd: boolean;
+  jumpFwd: boolean;
+} {
   const all = section.split(/\r?\n/).map((l) => l.trim());
   // Only the filter table section
   const lines: string[] = [];
@@ -111,22 +118,28 @@ function iptablesSegmentraLines(section: string): { lines: string[]; chain: bool
   let chain = false;
   let jumpIn = false;
   let jumpOut = false;
+  let chainFwd = false;
+  let jumpFwd = false;
   for (const l of all) {
     if (l.startsWith('*')) { inFilter = l === '*filter'; continue; }
     if (!inFilter) continue;
     if (/^:SEGMENTRA-IN\s/.test(l)) chain = true;
-    if (/^-A (SEGMENTRA-IN|SEGMENTRA-OUT) /.test(l)) lines.push(l.replace(/\s+/g, ' '));
+    if (/^:SEGMENTRA-FWD\s/.test(l)) chainFwd = true;
+    if (/^-A (SEGMENTRA-IN|SEGMENTRA-OUT|SEGMENTRA-FWD) /.test(l)) lines.push(l.replace(/\s+/g, ' '));
     if (/^-A INPUT (.* )?-j SEGMENTRA-IN$/.test(l)) jumpIn = true;
     if (/^-A OUTPUT (.* )?-j SEGMENTRA-OUT$/.test(l)) jumpOut = true;
+    if (/^-A FORWARD (.* )?-j SEGMENTRA-FWD$/.test(l)) jumpFwd = true;
   }
-  return { lines, chain, jumpIn, jumpOut };
+  return { lines, chain, jumpIn, jumpOut, chainFwd, jumpFwd };
 }
 
 /**
  * Extract Segmentra's own state from a live read (see liveRulesReadCommand):
  * nftables → the `table inet segmentra` block (counters/handles stripped);
- * iptables → the SEGMENTRA-IN/OUT rules plus whether the INPUT/OUTPUT jumps
- * exist, for IPv4 and (when present) IPv6. Rules of other tools (Docker,
+ * iptables → the SEGMENTRA-IN/OUT(/FWD) rules plus whether the INPUT/OUTPUT
+ * (/FORWARD) jumps exist, for IPv4 and (when present) IPv6. The forward state is
+ * only part of the hash when SEGMENTRA-FWD or its jump exists, so hosts that do not
+ * filter forwarded traffic keep the same hash as before forwarding support. Rules of other tools (Docker,
  * Kubernetes, fail2ban, ...) are ignored. `present` is false when the table /
  * chain / jumps are missing.
  */
@@ -148,8 +161,10 @@ export function extractSegmentraState(backend: 'nftables' | 'iptables', text: st
   for (const [fam, sec] of [['v4', v4text], ['v6', v6text]] as const) {
     if (sec === undefined) continue;
     const st = iptablesSegmentraLines(sec);
-    if (fam === 'v4') present = st.chain && st.jumpIn && st.jumpOut;
-    parts.push(`[${fam}] chain=${st.chain ? 1 : 0} jump_in=${st.jumpIn ? 1 : 0} jump_out=${st.jumpOut ? 1 : 0}`, ...st.lines);
+    // A SEGMENTRA-FWD chain without its FORWARD jump does not filter anything: not "present".
+    if (fam === 'v4') present = st.chain && st.jumpIn && st.jumpOut && (!st.chainFwd || st.jumpFwd);
+    const fwd = st.chainFwd || st.jumpFwd ? ` chain_fwd=${st.chainFwd ? 1 : 0} jump_fwd=${st.jumpFwd ? 1 : 0}` : '';
+    parts.push(`[${fam}] chain=${st.chain ? 1 : 0} jump_in=${st.jumpIn ? 1 : 0} jump_out=${st.jumpOut ? 1 : 0}${fwd}`, ...st.lines);
   }
   return { present, normalized: parts.join('\n') };
 }

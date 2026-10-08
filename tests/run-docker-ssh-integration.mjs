@@ -411,7 +411,7 @@ async function verifyIptablesState(policies) {
   log('Inspecting deployed iptables rules in each target');
   for (const policy of policies) {
     const { stdout } = await execInService(policy.hostService, 'iptables-save');
-    if (!/-A SEGMENTRA-IN\b[^\n]*-s 172\.29\.0\.0\/24\b[^\n]*-p tcp\b[^\n]*--dport 22\b[^\n]*-j ACCEPT/.test(stdout)) {
+    if (!/-A SEGMENTRA-IN\b[^\n]*-s 172\.29\.0\.0\/24\b[^\n]*-p tcp\b[^\n]*--dport 22\b[^\n]*-j RETURN/.test(stdout)) {
       throw new Error(`Missing management SSH baseline on ${policy.hostName}`);
     }
     if (countLines(stdout, '-A INPUT -j SEGMENTRA-IN') !== 1 || countLines(stdout, '-A OUTPUT -j SEGMENTRA-OUT') !== 1) {
@@ -429,10 +429,10 @@ async function verifyIptablesState(policies) {
 
     if (policy.allowFrom) {
       const escapedSource = policy.allowFrom.replaceAll('.', '\\.').replace('/', '\\/');
-      if (!new RegExp(`-A SEGMENTRA-IN\\b[^\\n]*-s ${escapedSource}\\b[^\\n]*-p icmp\\b[^\\n]*-j ACCEPT`).test(stdout)) {
+      if (!new RegExp(`-A SEGMENTRA-IN\\b[^\\n]*-s ${escapedSource}\\b[^\\n]*-p icmp\\b[^\\n]*-j RETURN`).test(stdout)) {
         throw new Error(`Missing expected ICMP allow rule on ${policy.hostName}`);
       }
-    } else if (/-A SEGMENTRA-IN [^\n]*-p icmp [^\n]*-j ACCEPT/.test(stdout)) {
+    } else if (/-A SEGMENTRA-IN [^\n]*-p icmp [^\n]*-j RETURN/.test(stdout)) {
       throw new Error(`Unexpected ICMP allow rule found on ${policy.hostName}`);
     }
   }

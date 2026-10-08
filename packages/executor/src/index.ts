@@ -7,3 +7,6 @@ export * from './audit-ssh.js';
 export * from './ssh-options.js';
 export * from './remove-policy.js';
 export * from './iptables-scripts.js';
+export * from './nft-scripts.js';
+export * from './firewall-backup.js';
+export * from './discover-host.js';

@@ -12,6 +12,7 @@ import {
   type SshConnectionOptions
 } from './ssh-options.js';
 import { segmentraIptablesCommand } from './iptables-scripts.js';
+import { SEGMENTRA_BACKUP_DIR, scopedBackupSnippet, scopedRestoreSnippet } from './firewall-backup.js';
 
 const writeFile = promisify(fs.writeFile);
 const readFile = promisify(fs.readFile);
@@ -37,7 +38,7 @@ export interface AuditSessionResult {
   logFilePath?: string;
 }
 
-const BACKUP_DIR = '/var/backups/segmentra';
+const BACKUP_DIR = SEGMENTRA_BACKUP_DIR;
 const RSYSLOG_CONF = '/etc/rsyslog.d/99-segmentra-audit.conf';
 const AUDIT_POLICY_PATH = '/etc/segmentra-audit.policy';
 const RSYSLOG_RESTART =
@@ -57,8 +58,13 @@ function collector(host: AuditSshHost) {
 }
 
 /**
- * Start an audit session: backup rules (as root; aborts if the backup can't be
- * written) and configure rsyslog to capture FW-AUDIT kernel log lines.
+ * Start an audit session: back up Segmentra's own state (as root; aborts if the
+ * backup can't be written) and configure rsyslog to capture FW-AUDIT kernel log lines.
+ *
+ * The backup is scoped (see firewall-backup.ts): nftables = table inet segmentra only,
+ * iptables = SEGMENTRA-IN/OUT(/FWD) + INPUT/OUTPUT(/FORWARD) jumps (full iptables-save kept as
+ * `<backupPath>.full`). The log-only policy only replaces that state, so restoring it
+ * never touches rules of Docker, Kubernetes, fail2ban, ...
  */
 export async function startAuditSession(
   host: AuditSshHost,
@@ -77,26 +83,19 @@ export async function startAuditSession(
     }
 
     // Step 1+2: Ensure backup directory exists and back up existing rules as root.
-    const backupScript =
-      host.backend === 'nftables'
-        ? [
-            'set -e',
-            'umask 077',
-            `mkdir -p ${shq(BACKUP_DIR)}`,
-            `chmod 700 ${shq(BACKUP_DIR)}`,
-            `if [ -f /etc/nftables.conf ]; then cp /etc/nftables.conf ${shq(`${backupPath}.conf`)} || true; fi`,
-            `nft list ruleset > ${shq(backupPath)}`,
-            `test -f ${shq(backupPath)}`
-          ].join('\n')
-        : [
-            'set -e',
-            'umask 077',
-            `mkdir -p ${shq(BACKUP_DIR)}`,
-            `chmod 700 ${shq(BACKUP_DIR)}`,
-            `iptables-save > ${shq(backupPath)}`,
-            `if [ ! -s ${shq(backupPath)} ]; then printf ${shq('*filter\\n:INPUT ACCEPT [0:0]\\n:FORWARD ACCEPT [0:0]\\n:OUTPUT ACCEPT [0:0]\\nCOMMIT\\n')} > ${shq(backupPath)}; fi`,
-            `test -s ${shq(backupPath)}`
-          ].join('\n');
+    // The log-only policy is IPv4-only for iptables (apply-audit iptables), so only the
+    // IPv4 state is backed up / restored there.
+    const backupScript = [
+      'set -e',
+      'umask 077',
+      `mkdir -p ${shq(BACKUP_DIR)}`,
+      `chmod 700 ${shq(BACKUP_DIR)}`,
+      ...(host.backend === 'nftables'
+        ? [`if [ -f /etc/nftables.conf ]; then cp /etc/nftables.conf ${shq(`${backupPath}.conf`)} || true; fi`]
+        : []),
+      scopedBackupSnippet(host.backend, backupPath),
+      `test -s ${shq(backupPath)}`
+    ].join('\n');
     const backupResult = await run(sudoSh(backupScript));
     c.add(backupResult);
     if (backupResult.exitCode !== 0) {
@@ -148,8 +147,8 @@ async function configureLogging(host: AuditSshHost, logFilePath: string, opts: S
 
 /**
  * Deploy log-only firewall policy. For nftables the policy only replaces
- * table inet segmentra; for iptables only the SEGMENTRA-IN/OUT chains (+ the
- * INPUT/OUTPUT jumps) are touched. Other tools' rules are left alone.
+ * table inet segmentra; for iptables only the SEGMENTRA-IN/OUT(/FWD) chains (+ the
+ * INPUT/OUTPUT(/FORWARD) jumps) are touched. Other tools' rules are left alone.
  */
 export async function deployLogOnlyPolicy(
   host: AuditSshHost,
@@ -173,7 +172,7 @@ export async function deployLogOnlyPolicy(
 
     // Step 3: Install to a root-owned location and apply (redirects run as root)
     // iptables: chain-scoped --noflush fragment + jumps (other tools' rules untouched);
-    // the full iptables-save backup is restored when the audit ends.
+    // the scoped backup of SEGMENTRA-IN/OUT(/FWD) is restored when the audit ends.
     const applyCmd =
       host.backend === 'nftables'
         ? `nft -f ${shq(AUDIT_POLICY_PATH)}`
@@ -199,13 +198,15 @@ export async function deployLogOnlyPolicy(
 }
 
 /**
- * Restore original firewall rules from backup.
+ * Restore Segmentra's pre-session state from the backup taken by startAuditSession.
  *
- * The backup's existence is verified before anything is changed, and the
- * restore is atomic: nftables loads "flush ruleset" + backup in a single
- * `nft -f` transaction; iptables-restore replaces the table (incl. policies)
- * in one commit. Returns success:false if the backup is missing or the
- * restore fails (the host then still runs the log-only policy).
+ * Scoped (see firewall-backup.ts): nftables restores only table inet segmentra in one
+ * atomic `nft -f` transaction (never `flush ruleset`); iptables restores only
+ * SEGMENTRA-IN/OUT(/FWD) and the INPUT/OUTPUT(/FORWARD) jumps (legacy full-table hosts: the filter
+ * table). Backups taken by older versions (complete `nft list ruleset` / iptables-save
+ * dumps) are accepted: only Segmentra's part of them is restored.
+ * Returns success:false (exit 3) if the backup is missing, or if the restore fails
+ * (the host then still runs the log-only policy).
  */
 export async function restoreAuditSession(
   host: AuditSshHost,
@@ -221,22 +222,7 @@ export async function restoreAuditSession(
       return c.result(false, 1);
     }
 
-    const bp = shq(backupPath);
-    const restoreScript =
-      host.backend === 'nftables'
-        ? [
-            `if [ ! -f ${bp} ]; then echo "backup missing: ${backupPath.replace(/["$`\\]/g, '')}" >&2; exit 3; fi`,
-            'umask 077',
-            `tmp=${shq(`${backupPath}.restore`)}`,
-            `{ echo 'flush ruleset'; cat ${bp}; } > "$tmp" || exit 4`,
-            'nft -f "$tmp"; rc=$?',
-            'rm -f "$tmp"',
-            'exit $rc'
-          ].join('\n')
-        : [
-            `if [ ! -s ${bp} ]; then echo "backup missing or empty: ${backupPath.replace(/["$`\\]/g, '')}" >&2; exit 3; fi`,
-            `iptables-restore < ${bp}`
-          ].join('\n');
+    const restoreScript = ['umask 077', scopedRestoreSnippet(host.backend, backupPath)].join('\n');
     const restoreResult = await run(sudoSh(restoreScript));
     c.add(restoreResult);
     if (restoreResult.exitCode !== 0) {

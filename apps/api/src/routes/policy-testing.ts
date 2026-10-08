@@ -7,10 +7,12 @@ import os from 'node:os';
 import { pool } from '../db/pool.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { analyzePolicyTest } from '../services/policy-test-analyzer.js';
-import { compileHostPolicy } from '@segmentra/compiler';
+import { compileHostPolicy, type RuleDirection } from '@segmentra/compiler';
+import { addDestinationSets, compilerDestination, getProtectedDestinations } from '../services/forward-rules.js';
 import { startAuditSession, deployLogOnlyPolicy, restoreAuditSession, retrieveAuditLogs } from '@segmentra/executor';
 import { parseFirewallLogs, groupCommunicationFlows } from '../services/log-parser.js';
 import { getSshCredentialForHost, type MaterializedSshCredential } from '../services/ssh-credentials.js';
+import { createAuditEvent } from '../services/audit.js';
 import {
   ACTIVE_TEST_SESSION_STATUSES,
   buildAuditHost,
@@ -233,7 +235,7 @@ policyTestingRouter.post('/start', requireRole('operator', 'approver', 'admin'),
         const remote = await resolveRemote(r);
         return {
           orderIndex: Number(r.order_index),
-          direction: (r.direction ?? 'IN') as 'IN' | 'OUT' | 'BOTH',
+          direction: (r.direction ?? 'IN') as RuleDirection,
           action: r.action,
           protocol: r.protocol,
           ports: r.ports,
@@ -244,9 +246,12 @@ policyTestingRouter.post('/start', requireRole('operator', 'approver', 'admin'),
           usePolicyInterfaceScope: Boolean(r.use_policy_interface_scope),
           interfaceScope: ruleScope,
           remote,
+          ...compilerDestination(r),
         };
       })
     );
+    await addDestinationSets(rules, sets);
+    const protectedDestinations = await getProtectedDestinations(host.id);
 
     let compiled;
     try {
@@ -264,6 +269,7 @@ policyTestingRouter.post('/start', requireRole('operator', 'approver', 'admin'),
         sets,
         baseline: { mgmtSshCidrs: mgmtCidrs },
         logOnlyMode: true,
+        protectedDestinations,
       });
     } catch (ce: any) {
       if (ce?.name === 'CompileError') throw new Error(`Policy failed to compile for ${host.hostname}: ${ce.message}`);
@@ -358,6 +364,14 @@ policyTestingRouter.post('/sessions/:id/stop', requireRole('operator', 'approver
   const session = sessions[0];
 
   const result = await restoreAndCollectSession(session);
+  await createAuditEvent({
+    actorUserId: req.auth!.userId ?? null,
+    action: result.ok ? 'POLICY_TEST_STOP' : 'POLICY_TEST_RESTORE_FAILED',
+    entityType: 'policy_test_session',
+    entityId: session.id,
+    ipAddress: req.ip,
+    metadata: result.ok ? { hostname: session.hostname, entryCount: result.entryCount, flowCount: result.flowCount } : { hostname: session.hostname, error: result.error }
+  });
   if (!result.ok) {
     return res.status(502).json({
       error: 'restore_failed',
@@ -448,7 +462,9 @@ policyTestingRouter.post('/sessions/:id/analyze', requireRole('operator', 'appro
     const result = await analyzePolicyTest(req.params.id);
     res.json({
       analysis: result,
-      message: `Analysis complete. Coverage: ${result.summary.coveragePercent}%. ${result.summary.matched} flows matched, ${result.summary.unexpectedAllows} would be blocked by default-deny, ${result.summary.unexpectedBlocks} hit DENY rules.`
+      message: result.summary.totalFlows === 0
+        ? 'Analysis complete, but no traffic was captured during the test, so the policy could not be validated. Check that the host logs kernel firewall messages (rsyslog/journald) and that traffic occurred during the test window.'
+        : `Analysis complete. Coverage: ${result.summary.coveragePercent}%. ${result.summary.matched} flows matched, ${result.summary.unexpectedAllows} would be blocked by default-deny, ${result.summary.unexpectedBlocks} hit DENY rules.`
     });
   } catch (e: any) {
     res.status(400).json({ error: e.message });

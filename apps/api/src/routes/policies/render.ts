@@ -1,9 +1,10 @@
 import { Router } from 'express';
 
-import { compileHostPolicy } from '@segmentra/compiler';
+import { compileHostPolicy, type RuleDirection } from '@segmentra/compiler';
 
 import { pool } from '../../db/pool.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
+import { addDestinationSets, compilerDestination, getProtectedDestinations } from '../../services/forward-rules.js';
 
 export const policyRenderRouter = Router();
 policyRenderRouter.use(requireAuth);
@@ -12,7 +13,7 @@ policyRenderRouter.get('/policy-versions/:versionId/render/host/:hostId', requir
   const { versionId, hostId } = req.params;
 
   const [hostRes, ifRes, vRes, rRes] = await Promise.all([
-    pool.query(`SELECT id, hostname, mgmt_ip, firewall_backend FROM hosts WHERE id=$1`, [hostId]),
+    pool.query(`SELECT id, hostname, mgmt_ip, ssh_port, firewall_backend FROM hosts WHERE id=$1`, [hostId]),
     pool.query(`SELECT name, role, enabled FROM host_interfaces WHERE host_id=$1`, [hostId]),
     pool.query(
       `SELECT interface_scope_type, interface_scope_roles, interface_scope_names
@@ -21,7 +22,8 @@ policyRenderRouter.get('/policy-versions/:versionId/render/host/:hostId', requir
     ),
     pool.query(
       `SELECT order_index, action, protocol, ports, source_type, source_value, log_mode, comment,
-              use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names, direction
+              use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names, direction,
+              destination_type, destination_value
        FROM policy_rules
        WHERE policy_version_id=$1
        ORDER BY order_index ASC`,
@@ -90,7 +92,7 @@ policyRenderRouter.get('/policy-versions/:versionId/render/host/:hostId', requir
     const remote = await resolveRemote(r);
     return {
       orderIndex: Number(r.order_index),
-      direction: (r.direction ?? 'IN') as 'IN' | 'OUT' | 'BOTH',
+      direction: (r.direction ?? 'IN') as RuleDirection,
       action: r.action,
       protocol: r.protocol,
       ports: r.ports,
@@ -100,10 +102,13 @@ policyRenderRouter.get('/policy-versions/:versionId/render/host/:hostId', requir
       comment: r.comment,
       usePolicyInterfaceScope: Boolean(r.use_policy_interface_scope),
       interfaceScope: ruleScope,
-      remote
+      remote,
+      ...compilerDestination(r)
     };
   })
   );
+  await addDestinationSets(rRes.rows, sets);
+  const protectedDestinations = await getProtectedDestinations(hostId);
 
   // Get management VLAN setting
   const mgmtVlanRes = await pool.query(
@@ -124,13 +129,15 @@ policyRenderRouter.get('/policy-versions/:versionId/render/host/:hostId', requir
       id: hostRes.rows[0].id,
       hostname: hostRes.rows[0].hostname,
       mgmtIp: hostRes.rows[0].mgmt_ip ? String(hostRes.rows[0].mgmt_ip) : null,
+      sshPort: hostRes.rows[0].ssh_port ? Number(hostRes.rows[0].ssh_port) : undefined,
       firewallBackend: backend,
       interfaces: ifRes.rows.map((i) => ({ name: i.name, role: i.role, enabled: i.enabled }))
     },
     policyInterfaceScope,
     rules,
     sets,
-    baseline: { mgmtSshCidrs }
+    baseline: { mgmtSshCidrs },
+    protectedDestinations
   });
 
   res.json({ backend: compiled.backend, sha256: compiled.sha256, text: compiled.text });

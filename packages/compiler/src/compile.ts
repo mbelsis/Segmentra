@@ -8,9 +8,18 @@ export type InterfaceScope =
   | { type: 'INTERFACE_ROLE'; roles: string[] }
   | { type: 'INTERFACE_NAME'; names: string[] };
 
+export type RuleDirection = 'IN' | 'OUT' | 'BOTH' | 'FORWARD';
+
+export type DestinationType = 'CIDR' | 'TAG' | 'VLAN' | 'HOST' | 'IOT_ASSET';
+
 export type PolicyRule = {
   orderIndex: number;
-  direction: 'IN' | 'OUT' | 'BOTH';
+  /**
+   * IN/OUT/BOTH: traffic to/from the host itself (input/output chains).
+   * FORWARD: traffic routed THROUGH the host (forward chain); requires `destination`.
+   * Interface scopes do not apply to FORWARD rules.
+   */
+  direction: RuleDirection;
   action: 'ALLOW' | 'DENY';
   protocol: 'tcp' | 'udp' | 'icmp' | 'any';
   ports?: string | null;
@@ -21,6 +30,15 @@ export type PolicyRule = {
   usePolicyInterfaceScope: boolean;
   interfaceScope?: InterfaceScope;
   remote: { kind: 'CIDR' } | { kind: 'SET'; setName: string };
+  /** FORWARD rules only: destination type/value as stored on the rule. */
+  destinationType?: DestinationType | null;
+  /** CIDR (or comma-separated CIDRs / "any") for destinationType CIDR; otherwise the entity id. */
+  destinationValue?: string | null;
+  /**
+   * FORWARD rules only (required there, must be absent otherwise): CIDR = use destinationValue,
+   * SET = resolved addresses in `sets[setName]` (and `${setName}_v6` in nft).
+   */
+  destination?: { kind: 'CIDR' } | { kind: 'SET'; setName: string } | null;
 };
 
 export type Host = {
@@ -48,6 +66,13 @@ export type CompileInput = {
    * ends with RETURN (the rest of INPUT and its policy decide).
    */
   defaultInputAction?: 'DROP' | 'ACCEPT';
+  /**
+   * Addresses (IPs/CIDRs) of devices protected by this host acting as a gateway (IoT assets
+   * assigned to it). Forwarded traffic TO these addresses is dropped unless a FORWARD rule
+   * allows it; other forwarded traffic is not affected. Forwarding is only filtered when the
+   * host has FORWARD rules or protected destinations; otherwise the output is unchanged.
+   */
+  protectedDestinations?: string[];
 };
 
 export type CompileOutput = {
@@ -55,8 +80,8 @@ export type CompileOutput = {
   /**
    * nft -f script (nftables, replaces only table inet segmentra) or an
    * `iptables-restore --noflush` fragment declaring only the SEGMENTRA-IN /
-   * SEGMENTRA-OUT chains (iptables, IPv4 only). The executor adds the
-   * INPUT/OUTPUT jumps.
+   * SEGMENTRA-OUT (and, when forwarding is filtered, SEGMENTRA-FWD) chains
+   * (iptables, IPv4 only). The executor adds the INPUT/OUTPUT(/FORWARD) jumps.
    */
   text: string;
   /** sha256 of `text`. */
@@ -173,15 +198,15 @@ function sanitizeCidr(value: string): string {
 }
 
 /**
- * Parse a CIDR-type rule source. Accepts a single address, a comma-separated
+ * Parse a CIDR-type rule source/destination. Accepts a single address, a comma-separated
  * list of addresses, or the keyword "any" (returns null = no address match).
  */
-function parseSourceList(value: string): Addr[] | null {
+function parseAddrList(value: string, what: string): Addr[] | null {
   const v = String(value ?? '').trim();
   if (/^(any|\*)$/i.test(v)) return null;
   const parts = v.split(',').map((p) => p.trim()).filter((p) => p.length > 0);
-  if (parts.length === 0) throw new CompileError(`Invalid source address: "${v}"`);
-  return dedupeAddrs(parts.map((p) => parseAddr(p, 'source address')));
+  if (parts.length === 0) throw new CompileError(`Invalid ${what}: "${v}"`);
+  return dedupeAddrs(parts.map((p) => parseAddr(p, what)));
 }
 
 function dedupeAddrs(addrs: Addr[]): Addr[] {
@@ -314,15 +339,30 @@ type RuleTarget = {
  * target (a rule matching an empty set matches nothing, so it is skipped).
  */
 function resolveTargets(r: PolicyRule, sets: PreparedSets): RuleTarget[] {
-  if (r.remote.kind === 'SET') {
-    const name = validateSetName(r.remote.setName);
+  return resolveAddressSpec(r.remote, r.sourceValue, sets, 'source address');
+}
+
+/** Destination side of a FORWARD rule (same semantics as resolveTargets). */
+function resolveDestTargets(r: PolicyRule, sets: PreparedSets): RuleTarget[] {
+  if (!r.destination) throw new CompileError(`Rule #${r.orderIndex}: FORWARD rules require a destination`);
+  return resolveAddressSpec(r.destination, String(r.destinationValue ?? ''), sets, 'destination address');
+}
+
+function resolveAddressSpec(
+  spec: { kind: 'CIDR' } | { kind: 'SET'; setName: string },
+  cidrValue: string,
+  sets: PreparedSets,
+  what: string
+): RuleTarget[] {
+  if (spec.kind === 'SET') {
+    const name = validateSetName(spec.setName);
     const s = sets[name] ?? { v4: [], v6: [] };
     const targets: RuleTarget[] = [];
     if (s.v4.length > 0) targets.push({ family: 4, nftAddr: `@${name}`, iptAddrs: s.v4 });
     if (s.v6.length > 0) targets.push({ family: 6, nftAddr: `@${name}_v6`, iptAddrs: s.v6 });
     return targets;
   }
-  const list = parseSourceList(r.sourceValue);
+  const list = parseAddrList(cidrValue, what);
   if (list === null) return [{ family: null, nftAddr: null, iptAddrs: [] }];
   const targets: RuleTarget[] = [];
   for (const fam of [4, 6] as Family[]) {
@@ -354,9 +394,109 @@ function rulePorts(r: PolicyRule): Array<[number, number]> | null {
 }
 
 function validateRuleEnums(r: PolicyRule): void {
-  if (!['IN', 'OUT', 'BOTH'].includes(r.direction)) throw new CompileError(`Rule #${r.orderIndex}: invalid direction "${r.direction}"`);
+  if (!['IN', 'OUT', 'BOTH', 'FORWARD'].includes(r.direction)) throw new CompileError(`Rule #${r.orderIndex}: invalid direction "${r.direction}"`);
+  if (r.direction === 'FORWARD') {
+    if (!r.destination || (r.destination.kind !== 'CIDR' && r.destination.kind !== 'SET')) {
+      throw new CompileError(`Rule #${r.orderIndex}: FORWARD rules require a destination`);
+    }
+    if (r.destination.kind === 'CIDR' && String(r.destinationValue ?? '').trim() === '') {
+      throw new CompileError(`Rule #${r.orderIndex}: FORWARD rule has an empty destination address`);
+    }
+  } else if (r.destination) {
+    throw new CompileError(`Rule #${r.orderIndex}: only FORWARD rules may have a destination (direction "${r.direction}")`);
+  }
   if (!['ALLOW', 'DENY'].includes(r.action)) throw new CompileError(`Rule #${r.orderIndex}: invalid action "${r.action}"`);
   if (!['tcp', 'udp', 'icmp', 'any'].includes(r.protocol)) throw new CompileError(`Rule #${r.orderIndex}: invalid protocol "${r.protocol}"`);
+}
+
+// ---------------------------------------------------------------------------
+// Forwarding (FORWARD rules + protected destinations)
+// ---------------------------------------------------------------------------
+
+/** nft set names holding the protected destinations (declared only when non-empty). */
+export const NFT_PROTECTED_SET_V4 = 'protected_v4';
+export const NFT_PROTECTED_SET_V6 = 'protected_v6';
+
+type ProtectedDests = { v4: string[]; v6: string[] };
+
+function prepareProtected(input: CompileInput, sets: PreparedSets): ProtectedDests {
+  for (const reserved of ['protected', NFT_PROTECTED_SET_V4, NFT_PROTECTED_SET_V6]) {
+    if (Object.prototype.hasOwnProperty.call(sets, reserved)) {
+      throw new CompileError(`Set name "${reserved}" is reserved for protected destinations`);
+    }
+  }
+  const raw = input.protectedDestinations ?? [];
+  if (!Array.isArray(raw)) throw new CompileError('protectedDestinations must be an array of addresses');
+  const addrs = dedupeAddrs(raw.map((a) => parseAddr(a, 'protected destination address')));
+  return {
+    v4: addrs.filter((a) => a.family === 4).map((a) => a.text),
+    v6: addrs.filter((a) => a.family === 6).map((a) => a.text)
+  };
+}
+
+/** Forwarding is filtered only when the host has FORWARD rules or protected destinations. */
+function forwardingEnabled(input: CompileInput, prot: ProtectedDests): boolean {
+  return input.rules.some((r) => r.direction === 'FORWARD') || prot.v4.length > 0 || prot.v6.length > 0;
+}
+
+type ForwardMatch = { family: Family | null; src: RuleTarget; dst: RuleTarget };
+
+/**
+ * Source x destination pairs of a FORWARD rule with compatible address families.
+ * Empty sets on either side produce no pairs (the rule can never match).
+ */
+function forwardMatches(r: PolicyRule, sets: PreparedSets): ForwardMatch[] {
+  const src = resolveTargets(r, sets);
+  const dst = resolveDestTargets(r, sets);
+  const out: ForwardMatch[] = [];
+  for (const s of src) {
+    for (const d of dst) {
+      if (s.family !== null && d.family !== null && s.family !== d.family) continue;
+      out.push({ family: s.family ?? d.family, src: s, dst: d });
+    }
+  }
+  return out;
+}
+
+function nftProtoExpr(r: PolicyRule, ports: Array<[number, number]> | null, family: Family | null): string {
+  if (ports) {
+    const elems = ports.map(([lo, hi]) => (lo === hi ? String(lo) : `${lo}-${hi}`)).join(', ');
+    return `${r.protocol} dport { ${elems} }`;
+  }
+  if (r.protocol === 'tcp' || r.protocol === 'udp') return `meta l4proto ${r.protocol}`;
+  if (r.protocol === 'icmp') {
+    if (family === 6) return 'meta l4proto ipv6-icmp';
+    if (family === 4) return 'meta l4proto icmp';
+    return 'meta l4proto { icmp, ipv6-icmp }';
+  }
+  return '';
+}
+
+/** Lines of the nft forward chain (without the chain header). */
+function nftForwardRules(input: CompileInput, sets: PreparedSets, prot: ProtectedDests, logOnly: boolean): string[] {
+  const lines: string[] = [];
+  // Replies of allowed connections (and related ICMP) always pass.
+  lines.push('ct state established,related accept');
+  const rulesSorted = [...input.rules].filter((r) => r.direction === 'FORWARD').sort((a, b) => a.orderIndex - b.orderIndex);
+  for (const r of rulesSorted) {
+    const ports = rulePorts(r);
+    const commentText = sanitizeText(r.comment, 120);
+    const comment = commentText ? `comment "${commentText}"` : '';
+    for (const m of forwardMatches(r, sets)) {
+      const fam = m.family === 6 ? 'ip6' : 'ip';
+      const srcExpr = m.src.nftAddr === null ? '' : `${fam} saddr ${m.src.nftAddr}`;
+      const dstExpr = m.dst.nftAddr === null ? '' : `${fam} daddr ${m.dst.nftAddr}`;
+      const tail = logOnly
+        ? [`log prefix "${sanitizeText(`FW-AUDIT: ${r.action} ${commentText || 'forward rule'}`, 120)}: "`, 'accept']
+        : [r.action === 'ALLOW' ? 'accept' : 'drop'];
+      lines.push([srcExpr, dstExpr, nftProtoExpr(r, ports, m.family), ...tail, comment].filter(Boolean).join(' '));
+    }
+  }
+  // Default deny for traffic to protected devices; everything else forwarded is untouched.
+  const verdict = logOnly ? 'log prefix "FW-AUDIT: DENY: protected-default: " accept' : 'drop';
+  if (prot.v4.length > 0) lines.push(`ip daddr @${NFT_PROTECTED_SET_V4} ${verdict} comment "protected_default_deny"`);
+  if (prot.v6.length > 0) lines.push(`ip6 daddr @${NFT_PROTECTED_SET_V6} ${verdict} comment "protected_default_deny"`);
+  return lines;
 }
 
 // ---------------------------------------------------------------------------
@@ -396,6 +536,7 @@ function compileNft(input: CompileInput, logOnly: boolean): string {
   const rulesSorted = [...input.rules].sort((a, b) => a.orderIndex - b.orderIndex);
   for (const r of rulesSorted) {
     validateRuleEnums(r);
+    if (r.direction === 'FORWARD') continue; // forward chain, see nftForwardRules
     const scope = ruleScope(r, input);
     const ifs = resolveInterfaceNames(input.host, scope);
     const ports = rulePorts(r);
@@ -410,17 +551,7 @@ function compileNft(input: CompileInput, logOnly: boolean): string {
     }
 
     for (const t of targets) {
-      let protoExpr = '';
-      if (ports) {
-        const elems = ports.map(([lo, hi]) => (lo === hi ? String(lo) : `${lo}-${hi}`)).join(', ');
-        protoExpr = `${r.protocol} dport { ${elems} }`;
-      } else if (r.protocol === 'tcp' || r.protocol === 'udp') {
-        protoExpr = `meta l4proto ${r.protocol}`;
-      } else if (r.protocol === 'icmp') {
-        if (t.family === 6) protoExpr = 'meta l4proto ipv6-icmp';
-        else if (t.family === 4) protoExpr = 'meta l4proto icmp';
-        else protoExpr = 'meta l4proto { icmp, ipv6-icmp }';
-      }
+      const protoExpr = nftProtoExpr(r, ports, t.family);
 
       const emit = (chain: 'input' | 'output') => {
         const ifExpr = ifs.length === 0 ? '' : `${chain === 'input' ? 'iifname' : 'oifname'} { ${ifs.map((n) => `"${n}"`).join(', ')} }`;
@@ -443,6 +574,9 @@ function compileNft(input: CompileInput, logOnly: boolean): string {
     outputRules.push('log prefix "FW-AUDIT: ALLOW: catch-all: " accept');
   }
 
+  const prot = prepareProtected(input, sets);
+  const forwardRules = forwardingEnabled(input, prot) ? nftForwardRules(input, sets, prot, logOnly) : null;
+
   const lines: string[] = [];
   lines.push('#!/usr/sbin/nft -f');
   lines.push(`# Managed by Segmentra. Only table inet ${T} is replaced; other tables`);
@@ -460,6 +594,14 @@ function compileNft(input: CompileInput, logOnly: boolean): string {
       lines.push(`  set ${name}_v6 {`, '    type ipv6_addr', '    flags interval', '    auto-merge', `    elements = { ${s.v6.join(', ')} }`, '  }');
     }
   }
+  if (forwardRules) {
+    if (prot.v4.length > 0) {
+      lines.push(`  set ${NFT_PROTECTED_SET_V4} {`, '    type ipv4_addr', '    flags interval', '    auto-merge', `    elements = { ${prot.v4.join(', ')} }`, '  }');
+    }
+    if (prot.v6.length > 0) {
+      lines.push(`  set ${NFT_PROTECTED_SET_V6} {`, '    type ipv6_addr', '    flags interval', '    auto-merge', `    elements = { ${prot.v6.join(', ')} }`, '  }');
+    }
+  }
   const inputPolicy = logOnly || (input.defaultInputAction ?? 'DROP') === 'ACCEPT' ? 'accept' : 'drop';
   lines.push('  chain input {', `    type filter hook input priority 0; policy ${inputPolicy};`);
   for (const r of inputRules) lines.push(`    ${r}`);
@@ -467,6 +609,13 @@ function compileNft(input: CompileInput, logOnly: boolean): string {
   lines.push('  chain output {', '    type filter hook output priority 0; policy accept;');
   for (const r of outputRules) lines.push(`    ${r}`);
   lines.push('  }');
+  if (forwardRules) {
+    // Policy accept: only traffic to protected devices is default-denied; other routed
+    // traffic (Docker, Kubernetes, plain routing) passes as before.
+    lines.push('  chain forward {', '    type filter hook forward priority 0; policy accept;');
+    for (const r of forwardRules) lines.push(`    ${r}`);
+    lines.push('  }');
+  }
   lines.push('}');
   return lines.join('\n') + '\n';
 }
@@ -508,6 +657,8 @@ function iptPortArgs(ports: Array<[number, number]> | null): string[] {
 /** User chains Segmentra owns in the iptables/ip6tables filter table. */
 export const IPT_INPUT_CHAIN = 'SEGMENTRA-IN';
 export const IPT_OUTPUT_CHAIN = 'SEGMENTRA-OUT';
+/** Forward chain, declared only when the host filters forwarded traffic (FORWARD rules / protected destinations). */
+export const IPT_FORWARD_CHAIN = 'SEGMENTRA-FWD';
 /** Prefix of the `-m comment` marker carried by every rule Segmentra emits. */
 export const IPT_COMMENT_PREFIX = 'segmentra';
 /** Header line identifying the chain-scoped iptables fragment format. */
@@ -521,10 +672,11 @@ function iptComment(label: string): string {
 
 /**
  * iptables/ip6tables output is an `iptables-restore --noflush` fragment that
- * declares ONLY Segmentra's own chains (SEGMENTRA-IN / SEGMENTRA-OUT). With
+ * declares ONLY Segmentra's own chains (SEGMENTRA-IN / SEGMENTRA-OUT, plus
+ * SEGMENTRA-FWD when the host filters forwarded traffic). With
  * --noflush, declaring a user chain creates it or flushes just that chain;
  * every other chain (DOCKER*, KUBE-*, f2b-*, ...) and the built-in chain
- * policies are left untouched. The executor inserts the INPUT/OUTPUT jumps
+ * policies are left untouched. The executor inserts the INPUT/OUTPUT(/FORWARD) jumps
  * (idempotently) in the same restore transaction.
  */
 function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Family): string {
@@ -536,18 +688,32 @@ function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Famil
   const push = (s: string) => lines.push(s.replace(/\s+/g, ' ').trim());
   const icmpProto = fam === 6 ? 'ipv6-icmp' : 'icmp';
   const defaultAccept = (input.defaultInputAction ?? 'DROP') === 'ACCEPT';
+  const FWD = IPT_FORWARD_CHAIN;
+  const prot = prepareProtected(input, sets);
+  const withForward = forwardingEnabled(input, prot);
 
   lines.push(IPT_FORMAT_MARKER);
   lines.push(`# Managed by Segmentra (${fam === 6 ? 'ip6tables' : 'iptables'}). Apply with ${fam === 6 ? 'ip6tables' : 'iptables'}-restore --noflush.`);
-  lines.push(`# Only chains ${IN} and ${OUT} are replaced; other chains and built-in policies are untouched.`);
+  if (withForward) {
+    lines.push(`# Only chains ${IN}, ${OUT} and ${FWD} are replaced; other chains and built-in policies are untouched.`);
+  } else {
+    lines.push(`# Only chains ${IN} and ${OUT} are replaced; other chains and built-in policies are untouched.`);
+  }
   lines.push('*filter');
   lines.push(`:${IN} - [0:0]`);
   lines.push(`:${OUT} - [0:0]`);
+  if (withForward) lines.push(`:${FWD} - [0:0]`);
 
-  // Baseline traffic is always accepted (also in log-only mode, where it is logged first).
+  // "Allow" in our chains is RETURN, not ACCEPT: the packet goes back to the built-in chain so
+  // rules of other tools after our jump (fail2ban bans, Docker, admins' own rules) still apply.
+  // This matches nftables semantics, where an accept in table segmentra doesn't override a drop
+  // in another table. Only our final DROP is terminal.
+  const ALLOW = 'RETURN';
+
+  // Baseline traffic is always allowed (also in log-only mode, where it is logged first).
   const baselineAccept = (match: string, label: string) => {
     if (logOnly) push(`-A ${IN} ${match} ${iptComment(label)} -j LOG --log-prefix ${iptLogPrefix(`ALLOW: ${label}`)}`);
-    push(`-A ${IN} ${match} ${iptComment(label)} -j ACCEPT`);
+    push(`-A ${IN} ${match} ${iptComment(label)} -j ${ALLOW}`);
   };
 
   baselineAccept('-i lo', 'loopback');
@@ -555,7 +721,7 @@ function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Famil
   if (fam === 6) {
     // IPv6 neighbor discovery must never be dropped or IPv6 connectivity breaks.
     for (const t of ['neighbour-solicitation', 'neighbour-advertisement', 'router-solicitation', 'router-advertisement']) {
-      push(`-A ${IN} -p ipv6-icmp -m icmp6 --icmpv6-type ${t} ${iptComment('ipv6_nd')} -j ACCEPT`);
+      push(`-A ${IN} -p ipv6-icmp -m icmp6 --icmpv6-type ${t} ${iptComment('ipv6_nd')} -j ${ALLOW}`);
     }
   }
   for (const cidr of fam === 4 ? mgmt.v4 : mgmt.v6) {
@@ -568,10 +734,11 @@ function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Famil
   const rulesSorted = [...input.rules].sort((a, b) => a.orderIndex - b.orderIndex);
   for (const r of rulesSorted) {
     validateRuleEnums(r);
+    if (r.direction === 'FORWARD') continue; // SEGMENTRA-FWD, emitted below
     const scope = ruleScope(r, input);
     const ifNames = resolveInterfaceNames(input.host, scope);
     const ports = rulePorts(r);
-    const action = r.action === 'ALLOW' ? 'ACCEPT' : 'DROP';
+    const action = r.action === 'ALLOW' ? ALLOW : 'DROP';
     const proto = r.protocol === 'any' ? '' : `-p ${r.protocol === 'icmp' ? icmpProto : r.protocol}`;
     const portArgs = iptPortArgs(ports);
     const commentText = sanitizeText(r.comment, 120);
@@ -616,6 +783,48 @@ function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Famil
   }
   // Output default is accept: hand back to the rest of OUTPUT.
   push(`-A ${OUT} ${iptComment('default')} -j RETURN`);
+
+  if (withForward) {
+    // Forwarded traffic: allow = RETURN (the rest of FORWARD, e.g. DOCKER-USER, still applies),
+    // deny = DROP; traffic to protected devices no rule allowed is dropped; anything else
+    // forwarded is handed back to FORWARD unchanged.
+    push(`-A ${FWD} -m conntrack --ctstate ESTABLISHED,RELATED ${iptComment('established')} -j RETURN`);
+    const fwdRules = rulesSorted.filter((r) => r.direction === 'FORWARD');
+    for (const r of fwdRules) {
+      const ports = rulePorts(r);
+      const proto = r.protocol === 'any' ? '' : `-p ${r.protocol === 'icmp' ? icmpProto : r.protocol}`;
+      const commentText = sanitizeText(r.comment, 120);
+      const comment = iptComment(`fwd${r.orderIndex}${commentText ? ` ${commentText}` : ''}`);
+      for (const m of forwardMatches(r, sets)) {
+        if (m.family !== null && m.family !== fam) continue;
+        const srcs = m.src.iptAddrs.length === 0 ? [''] : m.src.iptAddrs;
+        const dsts = m.dst.iptAddrs.length === 0 ? [''] : m.dst.iptAddrs;
+        for (const sa of srcs) {
+          for (const da of dsts) {
+            for (const p of iptPortArgs(ports)) {
+              const match = `-A ${FWD} ${proto} ${sa ? `-s ${sa}` : ''} ${da ? `-d ${da}` : ''} ${p} ${comment}`;
+              if (logOnly) {
+                push(`${match} -j LOG --log-prefix ${iptLogPrefix(`${r.action} ${commentText || 'fwd rule'}`)}`);
+                push(`${match} -j RETURN`);
+              } else {
+                push(`${match} -j ${r.action === 'ALLOW' ? 'RETURN' : 'DROP'}`);
+              }
+            }
+          }
+        }
+      }
+    }
+    for (const addr of fam === 4 ? prot.v4 : prot.v6) {
+      const match = `-A ${FWD} -d ${addr} ${iptComment('protected_default_deny')}`;
+      if (logOnly) {
+        push(`${match} -j LOG --log-prefix "FW-AUDIT: DENY: protected: "`);
+        push(`${match} -j RETURN`);
+      } else {
+        push(`${match} -j DROP`);
+      }
+    }
+    push(`-A ${FWD} ${iptComment('default')} -j RETURN`);
+  }
   lines.push('COMMIT');
   return lines.join('\n') + '\n';
 }

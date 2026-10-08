@@ -63,6 +63,7 @@ export function IntegrationsPage() {
   };
 
   const createIntegration = async () => {
+    setError(''); // clear any stale error from an earlier action
     try {
       const parsed = parseConfigJson(form.config);
       if (!parsed.ok) { setConfigError(parsed.error); return; }
@@ -75,6 +76,7 @@ export function IntegrationsPage() {
   };
 
   const testIntegration = async (id: string) => {
+    setError(''); // clear any stale error from an earlier action
     try {
       const res = await api.integrations.test(id);
       alert(res.message);
@@ -83,6 +85,7 @@ export function IntegrationsPage() {
   };
 
   const syncIntegration = async (id: string) => {
+    setError(''); // clear any stale error from an earlier action
     try {
       const res = await api.integrations.sync(id);
       alert(res.message);
@@ -92,6 +95,7 @@ export function IntegrationsPage() {
 
   const deleteIntegration = async (id: string) => {
     if (!confirm('Delete this integration?')) return;
+    setError(''); // clear any stale error from an earlier action
     try {
       await api.integrations.delete(id);
       if (selected?.id === id) { setSelected(null); setEvents([]); }
@@ -100,6 +104,7 @@ export function IntegrationsPage() {
   };
 
   const toggleEnabled = async (i: any) => {
+    setError(''); // clear any stale error from an earlier action
     try {
       await api.integrations.update(i.id, { enabled: !i.enabled });
       load();

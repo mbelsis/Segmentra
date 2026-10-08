@@ -1,4 +1,4 @@
-import { compileHostPolicy } from '@segmentra/compiler';
+import { compileHostPolicy, type PolicyRule } from '@segmentra/compiler';
 import { pool } from '../db/pool.js';
 import {
   cidrContains,
@@ -11,6 +11,7 @@ import {
   portSpecIntersectsRange,
 } from './ip-utils.js';
 import { createSourceResolver } from './source-resolver.js';
+import { addDestinationSets, compilerDestination, getProtectedDestinations } from './forward-rules.js';
 
 export interface SafetyCheckResult {
   safe: boolean;
@@ -89,7 +90,8 @@ export async function checkDeploymentSafety(params: {
 
   // Get rules, in evaluation order
   const rulesRes = await pool.query(
-    `SELECT order_index, direction, action, protocol, ports, source_type, source_value, comment
+    `SELECT order_index, direction, action, protocol, ports, source_type, source_value, comment,
+            destination_type, destination_value
      FROM policy_rules
      WHERE policy_version_id=$1
      ORDER BY order_index ASC`,
@@ -99,11 +101,18 @@ export async function checkDeploymentSafety(params: {
   // Resolve every rule's remote side to concrete addresses (same semantics as deployment).
   const resolve = createSourceResolver();
   const evalRules: EvalRule[] = [];
+  // FORWARD rules filter traffic routed THROUGH the host; they never affect SSH to the host
+  // itself, so they are only compiled (validated), not part of the lockout analysis.
+  const forwardRows: any[] = [];
   const sets: Record<string, string[]> = {};
   for (const r of rulesRes.rows as any[]) {
     const addrs = await resolve(r.source_type, r.source_value);
     const setName = setNameFor(r.source_type, r.source_value);
     if (r.source_type !== 'CIDR') sets[setName] = addrs;
+    if (r.direction === 'FORWARD') {
+      forwardRows.push(r);
+      continue;
+    }
     evalRules.push({
       orderIndex: Number(r.order_index),
       direction: (r.direction ?? 'IN') as 'IN' | 'OUT' | 'BOTH',
@@ -116,6 +125,7 @@ export async function checkDeploymentSafety(params: {
       addrs,
     });
   }
+  await addDestinationSets(forwardRows, sets);
 
   const userIp = params.userIp ? hostIpOnly(params.userIp.replace(/^::ffff:(?=\d+\.)/i, '')) : null;
   let allHostsPreserved = params.hostIds.length > 0;
@@ -136,8 +146,9 @@ export async function checkDeploymentSafety(params: {
     const host = hostRes.rows[0];
     const sshPort = Number(host.ssh_port) || 22;
 
-    // 1) The policy must compile for this host at all.
+    // 1) The policy must compile for this host at all (incl. FORWARD rules and protected devices).
     try {
+      const protectedDestinations = await getProtectedDestinations(host.id);
       compileHostPolicy({
         host: {
           id: host.id,
@@ -148,7 +159,7 @@ export async function checkDeploymentSafety(params: {
           sshPort,
         },
         policyInterfaceScope,
-        rules: evalRules.map((r) => ({
+        rules: (evalRules.map((r) => ({
           orderIndex: r.orderIndex,
           direction: r.direction,
           action: r.action,
@@ -160,9 +171,23 @@ export async function checkDeploymentSafety(params: {
           comment: r.comment,
           usePolicyInterfaceScope: true,
           remote: r.sourceType === 'CIDR' ? { kind: 'CIDR' as const } : { kind: 'SET' as const, setName: setNameFor(r.sourceType, r.sourceValue) },
-        })),
+        })) as PolicyRule[]).concat(forwardRows.map((r: any) => ({
+          orderIndex: Number(r.order_index),
+          direction: 'FORWARD' as const,
+          action: r.action,
+          protocol: r.protocol,
+          ports: r.ports,
+          sourceType: r.source_type,
+          sourceValue: r.source_value,
+          logMode: 'NONE' as const,
+          comment: r.comment,
+          usePolicyInterfaceScope: true,
+          remote: r.source_type === 'CIDR' ? { kind: 'CIDR' as const } : { kind: 'SET' as const, setName: setNameFor(r.source_type, r.source_value) },
+          ...compilerDestination(r),
+        }))),
         sets,
         baseline: { mgmtSshCidrs },
+        protectedDestinations,
       });
     } catch (e: any) {
       result.errors.push(`Host ${host.hostname}: policy does not compile: ${e?.message ?? String(e)}`);

@@ -327,7 +327,7 @@ export function IoTPage() {
                   <ol style={{ margin: '6px 0 0', paddingLeft: 18, lineHeight: 1.8 }}>
                     <li>Assign a gateway above</li>
                     <li>Create a policy in <a href="/policies" style={{ color: '#8b6914' }}>Policy Sets</a> scoped to <code>iot-gateway</code></li>
-                    <li>Add rules referencing this device's IP ({selectedAsset.ip_address || 'not set'})</li>
+                    <li>Add <code>FORWARD</code> rules with destination "IoT device: {selectedAsset.name}" ({selectedAsset.ip_address || 'IP not set'}) for each allowed flow</li>
                     <li>Approve and deploy to the gateway</li>
                   </ol>
                 </div>
@@ -346,11 +346,16 @@ export function IoTPage() {
             Policies are deployed to gateways using the normal <a href="/policies" style={{ color: '#8b6914' }}>Policy Sets</a> &#8594; Approve &#8594; <a href="/deployments" style={{ color: '#8b6914' }}>Deploy</a> workflow.
             To discover what traffic flows through a gateway, run <a href="/troubleshoot" style={{ color: '#8b6914' }}>Firewall Learning</a> on it.
           </p>
+          <p style={{ color: '#78644e', fontSize: '13px', marginTop: -8, marginBottom: 16, lineHeight: 1.6 }}>
+            <strong>Enforcement:</strong> when a policy is deployed to a gateway, forwarded traffic to its protected devices is
+            <strong> denied by default</strong>; only flows allowed by <code>FORWARD</code> rules (source &#8594; destination, e.g. an IoT device)
+            pass. Other traffic routed through the gateway is not affected. Assigning or removing devices takes effect on the next deployment.
+          </p>
 
           <div style={{ display: 'flex', gap: 20 }}>
             <div style={{ flex: 1 }}>
               <table className="data-table">
-                <thead><tr><th>Hostname</th><th>IP</th><th>Backend</th><th>Protected Devices</th><th>Last Deployed Policy</th><th>Status</th></tr></thead>
+                <thead><tr><th>Hostname</th><th>IP</th><th>Backend</th><th>Protected Devices</th><th>Last Deployed Policy</th><th>Active FORWARD Rules</th><th>Status</th></tr></thead>
                 <tbody>
                   {gateways.map(g => (
                     <tr key={g.id} onClick={() => selectGateway(g)} style={{ cursor: 'pointer', background: selectedGateway?.id === g.id ? '#f0ebe2' : undefined }}>
@@ -360,9 +365,20 @@ export function IoTPage() {
                       <td>
                         <strong>{g.protected_asset_count}</strong> device(s)
                         {g.protected_asset_count === 0 && <span style={{ color: '#97846c', fontSize: '11px', marginLeft: 4 }}>(none assigned)</span>}
+                        {Array.isArray(g.protected_assets) && g.protected_assets.length > 0 && (
+                          <div style={{ fontSize: '11.5px', color: '#78644e', marginTop: 2 }}>
+                            {g.protected_assets.map((a: any) => `${a.name}${a.ip_address ? ` (${a.ip_address})` : ''}${a.enabled === false ? ' [disabled, not enforced]' : ''}`).join(', ')}
+                          </div>
+                        )}
                       </td>
                       <td style={{ fontSize: '12.5px' }}>
                         {g.last_deployment ? `${g.last_deployment.policySetName} v${g.last_deployment.versionNumber}` : <span style={{ color: '#a63d2f' }}>No policy deployed</span>}
+                        {g.last_deployment?.removedByExpiry && <div style={{ fontSize: '11px', color: '#a63d2f' }}>removed by expiry</div>}
+                      </td>
+                      <td style={{ fontSize: '12.5px' }}>
+                        {g.last_deployment && !g.last_deployment.removedByExpiry
+                          ? <strong>{g.last_deployment.forwardRuleCount ?? 0}</strong>
+                          : <span style={{ color: '#97846c' }}>-</span>}
                       </td>
                       <td>
                         {g.last_deployment
@@ -372,7 +388,7 @@ export function IoTPage() {
                     </tr>
                   ))}
                   {gateways.length === 0 && (
-                    <tr><td colSpan={6} className="empty-state">
+                    <tr><td colSpan={7} className="empty-state">
                       No IoT gateways found. Add a host to the <a href="/inventory">Inventory</a> and tag it as <code>iot-gateway</code>.
                     </td></tr>
                   )}
@@ -435,7 +451,7 @@ export function IoTPage() {
                   <strong>Next steps for this gateway:</strong>
                   <ul style={{ margin: '6px 0 0', paddingLeft: 18, lineHeight: 1.8 }}>
                     <li><a href="/troubleshoot" style={{ color: '#8b6914' }}>Run Firewall Learning</a> on this host to discover IoT traffic</li>
-                    <li><a href="/policies" style={{ color: '#8b6914' }}>Create a policy</a> with rules for the IoT device IPs listed above</li>
+                    <li><a href="/policies" style={{ color: '#8b6914' }}>Create a policy</a> with <code>FORWARD</code> rules whose destination is one of the devices listed above (everything else to them is denied)</li>
                     <li><a href="/deployments" style={{ color: '#8b6914' }}>Deploy</a> the policy to this gateway</li>
                   </ul>
                 </div>

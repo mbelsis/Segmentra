@@ -14,6 +14,9 @@ export interface PolicyDiffRule {
   ports?: string;
   sourceType: string;
   sourceValue: string;
+  /** FORWARD rules only */
+  destinationType?: string;
+  destinationValue?: string;
   comment?: string;
 }
 
@@ -107,7 +110,8 @@ export async function comparePolicyVersions(params: {
   const [currentRulesRes, candidateRulesRes] = await Promise.all([
     pool.query(
       `SELECT order_index, direction, action, protocol, ports, source_type, source_value, comment,
-              use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names
+              use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names,
+              destination_type, destination_value
        FROM policy_rules
        WHERE policy_version_id=$1
        ORDER BY order_index ASC`,
@@ -115,7 +119,8 @@ export async function comparePolicyVersions(params: {
     ),
     pool.query(
       `SELECT order_index, direction, action, protocol, ports, source_type, source_value, comment,
-              use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names
+              use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names,
+              destination_type, destination_value
        FROM policy_rules
        WHERE policy_version_id=$1
        ORDER BY order_index ASC`,
@@ -131,6 +136,8 @@ export async function comparePolicyVersions(params: {
     ports: r.ports || null,
     sourceType: r.source_type,
     sourceValue: r.source_value,
+    destinationType: (r.destination_type as string | null) || null,
+    destinationValue: (r.destination_value as string | null) || null,
     comment: r.comment || null,
     orderIndex: Number(r.order_index),
     // Per-rule interface scope only matters when the rule overrides the policy scope.
@@ -145,7 +152,8 @@ export async function comparePolicyVersions(params: {
 
   // Content signature (order is compared separately so one insertion doesn't flag every rule)
   const ruleSignature = (r: ReturnType<typeof normalizeRule>) =>
-    `${r.direction}|${r.action}|${r.protocol}|${(r.ports || '*').replace(/\s+/g, '')}|${r.sourceType}|${r.sourceValue}|${r.interfaceScope ?? 'policy'}`;
+    `${r.direction}|${r.action}|${r.protocol}|${(r.ports || '*').replace(/\s+/g, '')}|${r.sourceType}|${r.sourceValue}|${r.interfaceScope ?? 'policy'}` +
+    (r.destinationType ? `|dst:${r.destinationType}:${r.destinationValue}` : '');
 
   // Reorder detection: give duplicate signatures an occurrence suffix, then find rules common to
   // both versions whose relative order changed (outside the longest common subsequence).
@@ -253,6 +261,8 @@ export async function comparePolicyVersions(params: {
         ports: rule.ports || undefined,
         sourceType: rule.sourceType,
         sourceValue: rule.sourceValue,
+        destinationType: rule.destinationType || undefined,
+        destinationValue: rule.destinationValue || undefined,
         comment: rule.comment || undefined,
         interfaceScope: rule.interfaceScope ?? undefined
       };
@@ -274,6 +284,8 @@ export async function comparePolicyVersions(params: {
         ports: rule.ports || undefined,
         sourceType: rule.sourceType,
         sourceValue: rule.sourceValue,
+        destinationType: rule.destinationType || undefined,
+        destinationValue: rule.destinationValue || undefined,
         comment: rule.comment || undefined,
         interfaceScope: rule.interfaceScope ?? undefined
       };
@@ -295,6 +307,8 @@ export async function comparePolicyVersions(params: {
       ports: rule.ports || undefined,
       sourceType: rule.sourceType,
       sourceValue: rule.sourceValue,
+      destinationType: rule.destinationType || undefined,
+      destinationValue: rule.destinationValue || undefined,
       comment: rule.comment || undefined,
       interfaceScope: rule.interfaceScope ?? undefined
     }));

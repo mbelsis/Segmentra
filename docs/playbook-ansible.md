@@ -33,25 +33,18 @@ The playbook ensures a backup directory exists on each target host:
 - **Permissions**: `0700` (owner read/write/execute only)
 - **Purpose**: Stores backups of current firewall rules before applying new ones
 
-### 2. **Firewall Backend Detection**
+### 2. **Firewall Backend Check**
 
-The playbook automatically detects which firewall backend is available:
-- Checks for `nftables` by running `command -v nft`
-- Falls back to `iptables` if `nftables` is not available
-- This detection determines which backup and apply methods are used
+The backend comes from the compiled policy file (`.nft` or `.iptables`, set by the host's `firewall_backend`). The playbook only checks that the tool it needs is installed: `nft` for nftables, `iptables-restore` for iptables. Having both installed is fine; modern distributions ship `iptables-nft` next to `nft`.
 
-### 3. **Backup Current Rules**
+### 3. **Backup Current Rules (Segmentra state only)**
 
-Before applying new rules, the playbook creates a timestamped backup:
+Before applying, the playbook backs up only what Segmentra owns, using the `segmentra-nft.sh` / `segmentra-iptables.sh` scripts in `playbooks/files/`:
 
-**For nftables hosts:**
-- Backs up `/etc/nftables.conf` (if it exists)
-- Exports current ruleset: `nft list ruleset > /var/backups/segmentra/nft.ruleset.<timestamp>`
+- **nftables:** `table inet segmentra` (or a marker that it didn't exist) to `/var/backups/segmentra/nft.ruleset.<timestamp>`. A full `nft list ruleset` is also saved as `<file>.full`, for reference only.
+- **iptables / ip6tables:** the `SEGMENTRA-IN` / `SEGMENTRA-OUT` chains and whether their `INPUT` / `OUTPUT` jumps existed, to `/var/backups/segmentra/iptables.<timestamp>` (and `ip6tables.<timestamp>`). The full `iptables-save` is kept as `<file>.full`.
 
-**For iptables hosts:**
-- Saves current rules: `iptables-save > /var/backups/segmentra/iptables.<timestamp>`
-
-**Timestamp Format**: `YYYYMMDDHHMMSS` (e.g., `20260108143025`)
+**Timestamp format:** `YYYY-MM-DDTHH-MM-SS`
 
 ### 4. **Policy File Validation**
 
@@ -70,31 +63,14 @@ The compiled policy file is copied from the deployment bundle to the target host
 
 ### 6. **Apply Firewall Rules**
 
-The playbook applies the policy file using the appropriate command:
-
-**For nftables (`.nft` files):**
-```bash
-nft -f /etc/segmentra.policy
-```
-
-**For iptables (`.iptables` files):**
-```bash
-iptables-restore < /etc/segmentra.policy
-```
+- **nftables:** `nft -f /etc/segmentra.policy`. The file replaces `table inet segmentra` atomically; other tables are untouched.
+- **iptables:** `iptables-restore --noflush` fills only `SEGMENTRA-IN` / `SEGMENTRA-OUT`, then a single jump is inserted at the top of `INPUT` / `OUTPUT`. Other chains and the built-in policies are untouched. The IPv6 file (`segmentra_ip6_policy_file`) is applied the same way with `ip6tables-restore`.
 
 ### 7. **Automatic Rollback on Failure**
 
-If applying the rules fails, the playbook automatically attempts to restore the previous backup:
+If applying fails, the playbook restores this run's backup with the same scripts. Only Segmentra's own table or chains are put back to their previous state; Docker, Kubernetes and fail2ban rules are never replaced. The rescue reports whether the rollback itself succeeded.
 
-**For nftables:**
-- Finds the latest backup file: `nft.ruleset.<timestamp>`
-- Restores it: `nft -f <backup_file>`
-
-**For iptables:**
-- Finds the latest backup file: `iptables.<timestamp>`
-- Restores it: `iptables-restore < <backup_file>`
-
-After rollback, the playbook fails with a clear error message: `"Firewall apply failed; rollback attempted"`
+Hosts still on the old full-table iptables design (before chain-based policies) get a full restore of the `filter` table only. The `nat` and other tables are not touched.
 
 ## Inventory File Structure
 

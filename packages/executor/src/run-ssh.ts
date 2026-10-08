@@ -3,6 +3,12 @@ import fs from 'node:fs';
 import { promisify } from 'node:util';
 import { hashLiveRuleset, liveRulesReadCommand } from './read-rules.js';
 import {
+  SEGMENTRA_BACKUP_DIR,
+  installHostScriptsSnippet,
+  scopedBackupSnippet,
+  scopedRestoreSnippet
+} from './firewall-backup.js';
+import {
   LEGACY_POLICY_FILE,
   LEGACY_POLICY_FILE6,
   preserveLegacyPolicyScript,
@@ -53,16 +59,15 @@ export interface SshExecutionResult {
   liveRulesHash?: string;
 }
 
-export const BACKUP_DIR = '/var/backups/segmentra';
+export const BACKUP_DIR = SEGMENTRA_BACKUP_DIR;
 const DEFAULT_ROLLBACK_TIMEOUT_SEC = 120;
-/** iptables-restore input equivalent to "no rules" for the filter table (printf-escaped). */
-const EMPTY_FILTER_TABLE = '*filter\\n:INPUT ACCEPT [0:0]\\n:FORWARD ACCEPT [0:0]\\n:OUTPUT ACCEPT [0:0]\\nCOMMIT\\n';
 
 /**
  * Execute SSH deployment to multiple hosts.
  *
- * Per host: back up the current ruleset (deploy aborts if the backup can't be
- * written), schedule an automatic revert on the host, apply the policy,
+ * Per host: back up Segmentra's current state — table inet segmentra, or the
+ * SEGMENTRA-IN/OUT(/FWD) chains + jumps (deploy aborts if the backup can't be written),
+ * schedule an automatic revert on the host, apply the policy,
  * verify reachability over a NEW SSH connection, and only then cancel the
  * revert. If the host becomes unreachable the revert fires after
  * `rollbackTimeoutSec` seconds.
@@ -120,19 +125,19 @@ export async function runSshDeployment(params: {
 
 type DeployOpts = SshConnectionOptions & { rollbackTimeoutSec: number };
 
-/** Shell snippet (run as root) that atomically restores the backup taken in this run. */
+/**
+ * Shell snippet (run as root) restoring the scoped backup taken in this run: only
+ * table inet segmentra (one atomic nft -f) or SEGMENTRA-IN/OUT(/FWD) + jumps are restored;
+ * other tools' tables/chains are never touched. Uses the script copies installed on the
+ * host in step 3, so it also works unattended (auto-revert via systemd-run / nohup).
+ */
 function buildRestoreScript(backend: 'nft' | 'iptables', paths: BackupPaths): string {
-  if (backend === 'nft') {
-    // rollbackFile = "flush ruleset" + full `nft list ruleset` backup → one atomic nft -f transaction
-    return `nft -f ${shq(paths.rollbackFile)}`;
-  }
-  return (
-    `iptables-restore < ${shq(paths.backupFile)}` +
-    ` && { [ ! -s ${shq(paths.backupFile6)} ] || ! command -v ip6tables-restore >/dev/null 2>&1 || ip6tables-restore < ${shq(paths.backupFile6)}; }`
-  );
+  return backend === 'nft'
+    ? scopedRestoreSnippet('nftables', paths.backupFile, undefined, 'installed')
+    : scopedRestoreSnippet('iptables', paths.backupFile, paths.backupFile6, 'installed');
 }
 
-type BackupPaths = { backupFile: string; backupFile6: string; rollbackFile: string };
+type BackupPaths = { backupFile: string; backupFile6: string };
 
 /** Root shell script applying /etc/segmentra.policy (+ /etc/segmentra.policy6) with the chain-scoped iptables design. */
 function iptablesApplyScript(): string {
@@ -173,54 +178,50 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
     // Step 1: Ensure backup directory exists
     const mkdirResult = await run(sudoSh(`mkdir -p ${shq(BACKUP_DIR)} && chmod 700 ${shq(BACKUP_DIR)}`));
     add(mkdirResult);
-    if (mkdirResult.exitCode !== 0) return fail(mkdirResult.exitCode, 'Error: could not create backup directory');
+    if (mkdirResult.exitCode !== 0) {
+      // This is the first command on the host, so a failure here is usually SSH itself
+      // (unreachable host, timeout, auth) rather than the directory: surface the real error.
+      const detail = (mkdirResult.stderr || mkdirResult.stdout || '').trim().split('\n').pop() || `exit code ${mkdirResult.exitCode}`;
+      const reason = mkdirResult.exitCode === 255 || mkdirResult.exitCode === 124 ? 'SSH connection failed' : 'could not create backup directory';
+      return fail(mkdirResult.exitCode, `Error: ${reason}: ${detail}`);
+    }
 
-    // Step 2: Detect backend
-    const detectResult = await run('command -v nft >/dev/null 2>&1 && echo nft || echo iptables');
+    // Step 2: Make sure the tool for the policy's backend exists. Both may be installed (modern
+    // distros ship iptables-nft next to nft), so only the required tool is checked.
+    const requiredTool = ext === 'nft' ? 'nft' : 'iptables-restore';
+    const detectResult = await run(
+      `PATH="$PATH:/usr/sbin:/sbin"; command -v ${requiredTool} >/dev/null 2>&1 && echo present || echo missing`
+    );
     if (detectResult.exitCode !== 0) {
       add(detectResult);
       return fail(detectResult.exitCode, 'Error: backend detection failed');
     }
-    const detectedBackend = detectResult.stdout.trim() === 'nft' ? 'nft' : 'iptables';
-    stdout += `Detected backend: ${detectedBackend}\n`;
-    if (detectedBackend !== ext) {
-      return fail(1, `Error: Backend mismatch. Detected: ${detectedBackend}, Policy: ${ext}`);
+    stdout += `Backend: ${ext === 'nft' ? 'nftables' : 'iptables'} (${requiredTool} ${detectResult.stdout.trim()})\n`;
+    if (detectResult.stdout.trim() !== 'present') {
+      return fail(1, `Error: ${requiredTool} is not installed on the host, but the policy targets ${ext === 'nft' ? 'nftables' : 'iptables'}`);
     }
 
-    // Step 3: Backup existing rules (as root). The deploy is aborted if this fails.
+    // Step 3: Back up Segmentra's own state (as root). The deploy is aborted if this fails.
+    // Scoped: nft = table inet segmentra only (a full `nft list ruleset` cannot be replayed
+    // on hosts where Docker & co. use iptables-nft); iptables = SEGMENTRA-IN/OUT(/FWD) + jumps
+    // (the full iptables-save is kept next to it as <file>.full). The host scripts are
+    // installed first so the scheduled revert is self-contained.
     const paths: BackupPaths =
       ext === 'nft'
-        ? {
-            backupFile: `${BACKUP_DIR}/nft.ruleset.${timestamp}`,
-            backupFile6: '',
-            rollbackFile: `${BACKUP_DIR}/nft.rollback.${timestamp}`
-          }
-        : {
-            backupFile: `${BACKUP_DIR}/iptables.${timestamp}`,
-            backupFile6: `${BACKUP_DIR}/ip6tables.${timestamp}`,
-            rollbackFile: ''
-          };
-    const backupScript =
+        ? { backupFile: `${BACKUP_DIR}/nft.ruleset.${timestamp}`, backupFile6: '' }
+        : { backupFile: `${BACKUP_DIR}/iptables.${timestamp}`, backupFile6: `${BACKUP_DIR}/ip6tables.${timestamp}` };
+    const backupScript = [
+      'set -e',
+      'umask 077',
+      installHostScriptsSnippet(),
+      ...(ext === 'nft'
+        ? [`if [ -f /etc/nftables.conf ]; then cp /etc/nftables.conf ${shq(`${BACKUP_DIR}/nftables.conf.${timestamp}`)}; fi`]
+        : []),
       ext === 'nft'
-        ? [
-            'set -e',
-            'umask 077',
-            `if [ -f /etc/nftables.conf ]; then cp /etc/nftables.conf ${shq(`${BACKUP_DIR}/nftables.conf.${timestamp}`)}; fi`,
-            `nft list ruleset > ${shq(paths.backupFile)}`,
-            `{ echo 'flush ruleset'; cat ${shq(paths.backupFile)}; } > ${shq(paths.rollbackFile)}`,
-            `test -f ${shq(paths.backupFile)} && test -s ${shq(paths.rollbackFile)}`
-          ].join('\n')
-        : [
-            'set -e',
-            'umask 077',
-            `iptables-save > ${shq(paths.backupFile)}`,
-            // No tables loaded -> empty dump; store an explicit open filter table so a restore really resets policies
-            `if [ ! -s ${shq(paths.backupFile)} ]; then printf ${shq(EMPTY_FILTER_TABLE)} > ${shq(paths.backupFile)}; fi`,
-            `if command -v ip6tables-save >/dev/null 2>&1; then`,
-            `  ip6tables-save > ${shq(paths.backupFile6)}`,
-            `  if [ ! -s ${shq(paths.backupFile6)} ]; then printf ${shq(EMPTY_FILTER_TABLE)} > ${shq(paths.backupFile6)}; fi`,
-            'fi'
-          ].join('\n');
+        ? scopedBackupSnippet('nftables', paths.backupFile, undefined, 'installed')
+        : scopedBackupSnippet('iptables', paths.backupFile, paths.backupFile6, 'installed'),
+      `test -s ${shq(paths.backupFile)}`
+    ].join('\n');
     const backupResult = await run(sudoSh(backupScript));
     add(backupResult);
     if (backupResult.exitCode !== 0) {
@@ -304,11 +305,11 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
             'exit 0'
           ].join('\n')
         );
-    const revertFiredMsg = `The automatic revert already fired; the previous ruleset (${backupPath}) was restored and the deployment is NOT active`;
+    const revertFiredMsg = `The automatic revert already fired; Segmentra's previous state (${backupPath}) was restored and the deployment is NOT active`;
 
     // Step 7: Apply firewall rules (as root; redirects happen inside sudo).
-    // nft: replaces only table inet segmentra. iptables: fills only the SEGMENTRA-IN/OUT
-    // chains (iptables-restore --noflush) and inserts the INPUT/OUTPUT jumps in the same
+    // nft: replaces only table inet segmentra. iptables: fills only the SEGMENTRA-IN/OUT(/FWD)
+    // chains (iptables-restore --noflush) and inserts the INPUT/OUTPUT(/FORWARD) jumps in the same
     // transaction, then cleans up rules left by the legacy full-table design.
     const applyScript = ext === 'nft' ? 'nft -f /etc/segmentra.policy' : iptablesApplyScript();
     const applyResult = await run(sudoSh(applyScript));
@@ -365,7 +366,7 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
     if (cancelResult.exitCode !== 0) {
       return fail(
         cancelResult.exitCode,
-        `Could not cancel the automatic revert (${token}); the previous ruleset will be restored`,
+        `Could not cancel the automatic revert (${token}); Segmentra's previous state (${backupPath}) will be restored`,
         { backupPath, rolledBack: true }
       );
     }

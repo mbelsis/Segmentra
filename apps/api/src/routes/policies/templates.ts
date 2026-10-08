@@ -12,6 +12,8 @@ import {
   protocolSchema,
   ruleCommentSchema,
   sourceTypeSchema,
+  destinationTypeSchema,
+  directionSchema,
   validateRuleSemantics
 } from '../../lib/rule-validation.js';
 
@@ -149,12 +151,14 @@ templatesRouter.delete('/:id', requireRole('operator', 'admin'), async (req, res
 // Template rules CRUD
 const templateRuleSchema = z.object({
   orderIndex: z.number().int().min(0).default(0),
-  direction: z.enum(['IN', 'OUT', 'BOTH']).default('IN'),
+  direction: directionSchema.default('IN'),
   action: z.enum(['ALLOW', 'DENY']).default('ALLOW'),
   protocol: protocolSchema.default('tcp'),
   ports: portsSchema.or(z.literal('')).optional().nullable(),
   sourceType: sourceTypeSchema.default('CIDR'),
   sourceValue: z.string().trim().min(1).default('0.0.0.0/0'),
+  destinationType: destinationTypeSchema.optional().nullable(),
+  destinationValue: z.string().trim().min(1).optional().nullable(),
   logMode: z.enum(['NONE', 'LOG', 'LOG_RATE_LIMITED']).default('NONE'),
   comment: ruleCommentSchema.optional().nullable(),
   usePolicyInterfaceScope: z.boolean().default(true),
@@ -166,12 +170,14 @@ const templateRuleSchema = z.object({
 // Partial (no defaults) for updates, so omitted fields are not overwritten with defaults
 const templateRuleUpdateSchema = z.object({
   orderIndex: z.number().int().min(0),
-  direction: z.enum(['IN', 'OUT', 'BOTH']),
+  direction: directionSchema,
   action: z.enum(['ALLOW', 'DENY']),
   protocol: protocolSchema,
   ports: portsSchema.or(z.literal('')).nullable(),
   sourceType: sourceTypeSchema,
   sourceValue: z.string().trim().min(1),
+  destinationType: destinationTypeSchema.nullable(),
+  destinationValue: z.string().trim().min(1).nullable(),
   logMode: z.enum(['NONE', 'LOG', 'LOG_RATE_LIMITED']),
   comment: ruleCommentSchema.nullable(),
   usePolicyInterfaceScope: z.boolean(),
@@ -188,6 +194,8 @@ const TEMPLATE_RULE_COLUMNS: Record<string, { column: string; nullable: boolean 
   ports: { column: 'ports', nullable: true },
   sourceType: { column: 'source_type', nullable: false },
   sourceValue: { column: 'source_value', nullable: false },
+  destinationType: { column: 'destination_type', nullable: true },
+  destinationValue: { column: 'destination_value', nullable: true },
   logMode: { column: 'log_mode', nullable: false },
   comment: { column: 'comment', nullable: true },
   usePolicyInterfaceScope: { column: 'use_policy_interface_scope', nullable: false },
@@ -203,6 +211,7 @@ function validateStoredTemplateRules(rules: any[]): string[] {
     const label = `Rule #${r.order_index}`;
     if (!protocolSchema.safeParse(r.protocol).success) problems.push(`${label}: invalid protocol '${r.protocol}'`);
     if (!sourceTypeSchema.safeParse(r.source_type).success) problems.push(`${label}: invalid source type '${r.source_type}'`);
+    if (!directionSchema.safeParse(r.direction ?? 'IN').success) problems.push(`${label}: invalid direction '${r.direction}'`);
     if (r.interface_scope_type != null && !interfaceScopeTypeSchema.safeParse(r.interface_scope_type).success) {
       problems.push(`${label}: invalid interface scope type '${r.interface_scope_type}'`);
     }
@@ -215,7 +224,15 @@ function validateStoredTemplateRules(rules: any[]): string[] {
     if (r.comment != null && r.comment !== '' && !ruleCommentSchema.safeParse(r.comment).success) {
       problems.push(`${label}: invalid comment`);
     }
-    for (const p of validateRuleSemantics({ protocol: r.protocol, ports: r.ports, sourceType: r.source_type, sourceValue: r.source_value })) {
+    for (const p of validateRuleSemantics({
+      protocol: r.protocol,
+      ports: r.ports,
+      sourceType: r.source_type,
+      sourceValue: r.source_value,
+      direction: r.direction ?? 'IN',
+      destinationType: r.destination_type ?? null,
+      destinationValue: r.destination_value ?? null
+    })) {
       problems.push(`${label}: ${p}`);
     }
   }
@@ -234,18 +251,29 @@ templatesRouter.post('/:id/rules', requireRole('operator', 'admin'), async (req,
   const parsed = templateRuleSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
   const b = parsed.data;
-  const problems = validateRuleSemantics({ protocol: b.protocol, ports: b.ports ?? null, sourceType: b.sourceType, sourceValue: b.sourceValue });
+  const problems = validateRuleSemantics({
+    protocol: b.protocol,
+    ports: b.ports ?? null,
+    sourceType: b.sourceType,
+    sourceValue: b.sourceValue,
+    direction: b.direction,
+    destinationType: b.destinationType ?? null,
+    destinationValue: b.destinationValue ?? null
+  });
   if (problems.length) return res.status(400).json({ error: 'invalid_rule', message: problems.join('; '), details: problems });
+  const isForward = b.direction === 'FORWARD';
 
   const { rows } = await pool.query(
     `INSERT INTO policy_template_rules
       (policy_template_id, order_index, direction, action, protocol, ports, source_type, source_value,
-       log_mode, comment, use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
+       log_mode, comment, use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names,
+       destination_type, destination_value)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING *`,
     [req.params.id, b.orderIndex, b.direction, b.action, b.protocol, b.ports || null,
      b.sourceType, b.sourceValue, b.logMode, b.comment ?? null,
      b.usePolicyInterfaceScope, b.interfaceScopeType ?? null,
-     b.interfaceScopeRoles ?? null, b.interfaceScopeNames ?? null]
+     b.interfaceScopeRoles ?? null, b.interfaceScopeNames ?? null,
+     isForward ? b.destinationType : null, isForward ? b.destinationValue : null]
   );
   res.status(201).json({ rule: rows[0] });
 });
@@ -270,7 +298,10 @@ templatesRouter.put('/rules/:ruleId', requireRole('operator', 'admin'), async (r
     protocol: (presentKeys.includes('protocol') ? b.protocol : cur.protocol) as string,
     ports: (presentKeys.includes('ports') ? b.ports : cur.ports) as string | null,
     sourceType: (presentKeys.includes('sourceType') ? b.sourceType : cur.source_type) as string,
-    sourceValue: (presentKeys.includes('sourceValue') ? b.sourceValue : cur.source_value) as string
+    sourceValue: (presentKeys.includes('sourceValue') ? b.sourceValue : cur.source_value) as string,
+    direction: (presentKeys.includes('direction') ? b.direction : cur.direction ?? 'IN') as string,
+    destinationType: (presentKeys.includes('destinationType') ? b.destinationType : cur.destination_type) as string | null,
+    destinationValue: (presentKeys.includes('destinationValue') ? b.destinationValue : cur.destination_value) as string | null
   });
   if (problems.length) return res.status(400).json({ error: 'invalid_rule', message: problems.join('; '), details: problems });
 

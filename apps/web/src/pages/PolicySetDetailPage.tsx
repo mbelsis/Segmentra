@@ -199,7 +199,16 @@ export function PolicySetDetailPage() {
                       {v.id}
                     </code>
                   </td>
-                  <td>{getStatusBadge(v.status)}</td>
+                  <td>
+                    {getStatusBadge(v.status)}
+                    {v.active_host_count > 0 ? (
+                      <div style={{ fontSize: '0.78em', color: '#2e7d32', marginTop: 4, fontWeight: 600 }}>
+                        Active on {v.active_host_count} host{v.active_host_count === 1 ? '' : 's'}
+                      </div>
+                    ) : isDeployed ? (
+                      <div style={{ fontSize: '0.78em', color: '#97846c', marginTop: 4 }}>Not active (superseded or removed)</div>
+                    ) : null}
+                  </td>
                   <td style={{ fontSize: '12.5px' }}>
                     {v.approved_by_username ? (
                       <span style={{ color: '#5a7a3a' }}>{v.approved_by_username}</span>
