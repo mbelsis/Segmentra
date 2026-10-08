@@ -137,7 +137,7 @@ export function DashboardPage() {
   }
 
   return (
-    <div style={{ display: 'grid', gap: 24 }}>
+    <div style={{ display: 'grid', gap: 14 }}>
       {/* Header */}
       <div>
         <h2 style={{ margin: 0, marginBottom: 8 }}>Dashboard</h2>
@@ -152,50 +152,50 @@ export function DashboardPage() {
       </div>
 
       {/* Stats Cards - Row 1: Deployments */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginBottom: 12 }}>
-        <div className="card" style={{ padding: 16 }}>
-          <div style={{ fontSize: 11, color: '#97846c', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Total Deployments</div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: '#8b6914' }}>{stats.totalDeployments}</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10 }}>
+        <div className="card stat-card">
+          <div style={{ fontSize: 10.5, color: '#97846c', marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Total Deployments</div>
+          <div style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.2, color: '#8b6914' }}>{stats.totalDeployments}</div>
         </div>
-        <div className="card" style={{ padding: 16 }}>
-          <div style={{ fontSize: 11, color: '#97846c', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Running</div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: stats.runningDeployments > 0 ? '#c47a1a' : '#b8a890' }}>{stats.runningDeployments}</div>
+        <div className="card stat-card">
+          <div style={{ fontSize: 10.5, color: '#97846c', marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Running</div>
+          <div style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.2, color: stats.runningDeployments > 0 ? '#c47a1a' : '#b8a890' }}>{stats.runningDeployments}</div>
         </div>
-        <div className="card" style={{ padding: 16 }}>
-          <div style={{ fontSize: 11, color: '#97846c', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Success Rate</div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: stats.successRate >= 90 ? '#5a7a3a' : stats.successRate >= 70 ? '#c47a1a' : '#a63d2f' }}>{stats.successRate}%</div>
+        <div className="card stat-card">
+          <div style={{ fontSize: 10.5, color: '#97846c', marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Success Rate</div>
+          <div style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.2, color: stats.successRate >= 90 ? '#5a7a3a' : stats.successRate >= 70 ? '#c47a1a' : '#a63d2f' }}>{stats.successRate}%</div>
         </div>
-        <div className="card" style={{ padding: 16 }}>
-          <div style={{ fontSize: 11, color: '#97846c', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Succeeded</div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: '#5a7a3a' }}>{stats.statusBreakdown.find((s) => s.status === 'SUCCEEDED')?.count || 0}</div>
+        <div className="card stat-card">
+          <div style={{ fontSize: 10.5, color: '#97846c', marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Succeeded</div>
+          <div style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.2, color: '#5a7a3a' }}>{stats.statusBreakdown.find((s) => s.status === 'SUCCEEDED')?.count || 0}</div>
         </div>
       </div>
 
       {/* Stats Cards - Row 2: Infrastructure */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginBottom: 12 }}>
-        <div className="card" style={{ padding: 16 }}>
-          <div style={{ fontSize: 11, color: '#97846c', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Managed Hosts</div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: '#5c4633' }}>{(stats as any).enabledHosts ?? '-'}<span style={{ fontSize: 14, fontWeight: 400, color: '#97846c' }}> / {(stats as any).totalHosts ?? '-'}</span></div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10 }}>
+        <div className="card stat-card">
+          <div style={{ fontSize: 10.5, color: '#97846c', marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Managed Hosts</div>
+          <div style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.2, color: '#5c4633' }}>{(stats as any).enabledHosts ?? '-'}<span style={{ fontSize: 14, fontWeight: 400, color: '#97846c' }}> / {(stats as any).totalHosts ?? '-'}</span></div>
           <div style={{ fontSize: 11, color: '#97846c', marginTop: 2 }}>enabled / total</div>
         </div>
-        <div className="card" style={{ padding: 16 }}>
-          <div style={{ fontSize: 11, color: '#97846c', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Policy Sets</div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: '#5c4633' }}>{(stats as any).totalPolicySets ?? '-'}</div>
+        <div className="card stat-card">
+          <div style={{ fontSize: 10.5, color: '#97846c', marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Policy Sets</div>
+          <div style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.2, color: '#5c4633' }}>{(stats as any).totalPolicySets ?? '-'}</div>
         </div>
-        <div className="card" style={{ padding: 16 }}>
-          <div style={{ fontSize: 11, color: '#97846c', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>IoT/OT Assets</div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: '#5c4633' }}>{(stats as any).totalIotAssets ?? 0}</div>
+        <div className="card stat-card">
+          <div style={{ fontSize: 10.5, color: '#97846c', marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>IoT/OT Assets</div>
+          <div style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.2, color: '#5c4633' }}>{(stats as any).totalIotAssets ?? 0}</div>
         </div>
-        <div className="card" style={{ padding: 16 }}>
-          <div style={{ fontSize: 11, color: '#97846c', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Pending Approvals</div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: (stats as any).pendingApprovals > 0 ? '#c47a1a' : '#5a7a3a' }}>{(stats as any).pendingApprovals ?? 0}</div>
+        <div className="card stat-card">
+          <div style={{ fontSize: 10.5, color: '#97846c', marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Pending Approvals</div>
+          <div style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.2, color: (stats as any).pendingApprovals > 0 ? '#c47a1a' : '#5a7a3a' }}>{(stats as any).pendingApprovals ?? 0}</div>
         </div>
       </div>
 
       {/* Stats Cards - Row 3: Security & Intelligence */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: 12 }}>
-        <div className="card" style={{ padding: 16 }}>
-          <div style={{ fontSize: 11, color: '#97846c', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Most Deployed Policy</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
+        <div className="card stat-card">
+          <div style={{ fontSize: 10.5, color: '#97846c', marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Most Deployed Policy</div>
           {(stats as any).mostDeployedPolicy ? (
             <>
               <div style={{ fontSize: 16, fontWeight: 600, color: '#3d2e1e' }}>{(stats as any).mostDeployedPolicy.name}</div>
@@ -205,8 +205,8 @@ export function DashboardPage() {
             <div style={{ fontSize: 14, color: '#b8a890' }}>No deployments yet</div>
           )}
         </div>
-        <div className="card" style={{ padding: 16 }}>
-          <div style={{ fontSize: 11, color: '#97846c', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Last Security Audit</div>
+        <div className="card stat-card">
+          <div style={{ fontSize: 10.5, color: '#97846c', marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Last Security Audit</div>
           {(stats as any).lastSecurityAudit ? (
             <>
               <div style={{ fontSize: 13, color: '#3d2e1e' }}>{new Date((stats as any).lastSecurityAudit.timestamp).toLocaleString()}</div>
@@ -223,9 +223,9 @@ export function DashboardPage() {
             <div style={{ fontSize: 14, color: '#b8a890' }}>No audit run yet</div>
           )}
         </div>
-        <div className="card" style={{ padding: 16 }}>
-          <div style={{ fontSize: 11, color: '#97846c', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Expiring Deployments</div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: (stats as any).expiringDeployments > 0 ? '#c47a1a' : '#5a7a3a' }}>{(stats as any).expiringDeployments ?? 0}</div>
+        <div className="card stat-card">
+          <div style={{ fontSize: 10.5, color: '#97846c', marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>Expiring Deployments</div>
+          <div style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.2, color: (stats as any).expiringDeployments > 0 ? '#c47a1a' : '#5a7a3a' }}>{(stats as any).expiringDeployments ?? 0}</div>
           <div style={{ fontSize: 11, color: '#97846c', marginTop: 2 }}>within 7 days</div>
         </div>
       </div>

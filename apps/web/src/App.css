@@ -148,6 +148,11 @@ h1, h2, h3, h4, h5, h6 {
   transition: box-shadow 0.15s ease;
 }
 
+.card.stat-card {
+  padding: 10px 14px;
+  margin-bottom: 0;
+}
+
 .card:hover {
   box-shadow: 0 1px 4px rgba(41, 32, 24, 0.08);
 }

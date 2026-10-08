@@ -24,6 +24,66 @@ The platform enables:
 
 ---
 
+## Screenshots
+
+Click an image to open it full size.
+
+<table>
+  <tr>
+    <td align="center" width="33%">
+      <a href="screehsots/Screenshot%202026-10-08%20at%204.23.36%20PM.png"><img src="screehsots/Screenshot%202026-10-08%20at%204.23.36%20PM.png" alt="Dashboard" width="100%"></a><br>
+      <b>Dashboard</b><br>
+      <sub>Deployment statistics, managed hosts, pending approvals and the latest security audit</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="screehsots/Screenshot%202026-10-08%20at%204.23.44%20PM.png"><img src="screehsots/Screenshot%202026-10-08%20at%204.23.44%20PM.png" alt="Policy Sets" width="100%"></a><br>
+      <b>Policy Sets</b><br>
+      <sub>Policies with their scope (tag, VLAN or host list) and version status</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="screehsots/Screenshot%202026-10-08%20at%204.23.52%20PM.png"><img src="screehsots/Screenshot%202026-10-08%20at%204.23.52%20PM.png" alt="Policy Templates" width="100%"></a><br>
+      <b>Policy Templates</b><br>
+      <sub>Reusable rule sets, optionally auto-applied when a host gets a tag</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="screehsots/Screenshot%202026-10-08%20at%204.24.09%20PM.png"><img src="screehsots/Screenshot%202026-10-08%20at%204.24.09%20PM.png" alt="Inventory" width="100%"></a><br>
+      <b>Inventory</b><br>
+      <sub>Hosts with tags, VLAN, firewall backend, effective SSH credential and compliance</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="screehsots/Screenshot%202026-10-08%20at%204.24.21%20PM.png"><img src="screehsots/Screenshot%202026-10-08%20at%204.24.21%20PM.png" alt="Topology" width="100%"></a><br>
+      <b>Topology</b><br>
+      <sub>Draw allowed and denied flows between groups and generate policies from them</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="screehsots/Screenshot%202026-10-08%20at%204.24.31%20PM.png"><img src="screehsots/Screenshot%202026-10-08%20at%204.24.31%20PM.png" alt="Troubleshoot" width="100%"></a><br>
+      <b>Troubleshoot</b><br>
+      <sub>Firewall Learning (log-only traffic discovery) and the communication simulator</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="screehsots/Screenshot%202026-10-08%20at%204.24.38%20PM.png"><img src="screehsots/Screenshot%202026-10-08%20at%204.24.38%20PM.png" alt="Policy Impact Analysis" width="100%"></a><br>
+      <b>Policy Impact Analysis</b><br>
+      <sub>Test a policy against real traffic in log-only mode before enforcing it</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="screehsots/Screenshot%202026-10-08%20at%204.24.48%20PM.png"><img src="screehsots/Screenshot%202026-10-08%20at%204.24.48%20PM.png" alt="Security Audit" width="100%"></a><br>
+      <b>Security Audit</b><br>
+      <sub>Findings by severity, e.g. hosts without a deployed policy</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="screehsots/Screenshot%202026-10-08%20at%204.24.59%20PM.png"><img src="screehsots/Screenshot%202026-10-08%20at%204.24.59%20PM.png" alt="Audit Log" width="100%"></a><br>
+      <b>Audit Log</b><br>
+      <sub>Every change and deployment, with actor and details</sub>
+    </td>
+  </tr>
+</table>
+
+---
+
 ## Features & Capabilities
 
 ### Authentication & Authorization
