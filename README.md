@@ -242,6 +242,18 @@ Typical lifecycle of a version: `DRAFT` → `PENDING_APPROVAL` → `APPROVED` (o
 - **Development**: `admin` / `admin123` (created by the seed when `SEGMENTRA_ADMIN_PASSWORD` is not set — change it after first login)
 - **Production** (`NODE_ENV=production`): `admin` / the value of `SEGMENTRA_ADMIN_PASSWORD` (min. 12 chars). Without it the seed refuses to create the default admin; use `SEGMENTRA_BOOTSTRAP_TOKEN` instead if you only use LDAP.
 
+### Docker
+
+Production runs entirely in Docker; the images are built from this repository (no Node.js needed on the host):
+
+```bash
+./install.sh --production        # creates .env with generated secrets, builds and starts everything
+# or manually, after creating .env:
+docker compose up -d --build     # build the images and start db, API, web (nginx) and Ansible runner
+```
+
+Then open `http://<host>` (port 80). To upgrade: `git pull && docker compose up -d --build` (migrations run automatically). See [Building the Docker Images](docs/installation.md#building-the-docker-images) and [Upgrading](docs/installation.md#upgrading-to-a-new-version) for what each image contains, rebuilding single images and pushing to a registry.
+
 For detailed installation instructions, see [installation.md](docs/installation.md).
 
 ---

@@ -257,6 +257,51 @@ The nginx container proxies `/api/*` requests to the backend automatically.
 docker compose exec -T segmentra-app node demo-data/seed-demo-data.js
 ```
 
+### Building the Docker Images
+
+`docker compose up -d --build` builds all three images from this repository. You don't need Node.js on the Docker host: everything is compiled inside the images.
+
+| Image (compose service) | Dockerfile | Build context | What it contains |
+|---|---|---|---|
+| `segmentra-app` | `infra/app/Dockerfile` | repository root | Multi-stage: builds the TypeScript workspaces (shared, compiler, executor, api), then a slim non-root runtime (`node` user) with production dependencies, the DB migrations and seed, `ssh`/`scp`/`sshpass` for the SSH executor and the Docker CLI for the Ansible executor. The entrypoint checks secrets, runs migrations and the seed, then starts the API. Build arg `NODE_IMAGE` (default `node:20-bookworm-slim`). |
+| `segmentra-web` | `infra/web/Dockerfile` | repository root | Builds the React UI with Vite (API base URL `/api`) and serves it with nginx, which also proxies `/api/` to `segmentra-app`. |
+| `segmentra-ansible-runner` | `infra/ansible-runner/Dockerfile` | `infra/ansible-runner` | Python + Ansible, `openssh-client` and `sshpass`, the `apply-firewall.yml` playbook and its helper scripts. Host keys are trusted on first use and kept on a volume. |
+
+`.dockerignore` keeps `node_modules`, build output, `.env`, keys and local data out of the build context, so secrets are never baked into an image.
+
+Useful commands:
+
+```bash
+# Build (or rebuild) all images without starting them
+docker compose build
+
+# Rebuild a single image after changing its code, then restart only that service
+docker compose build segmentra-app
+docker compose up -d segmentra-app
+
+# Force a clean rebuild (ignore the build cache)
+docker compose build --no-cache
+
+# Build the API image on its own, e.g. to push to a registry
+docker build -f infra/app/Dockerfile -t registry.example.com/segmentra-app:1.0.0 .
+docker build -f infra/web/Dockerfile -t registry.example.com/segmentra-web:1.0.0 .
+docker build -t registry.example.com/segmentra-ansible-runner:1.0.0 infra/ansible-runner
+```
+
+If you push images to a registry, replace the `build:` entries in `docker-compose.yml` with `image:` references on the target host, and keep the same environment variables and volumes.
+
+### Upgrading to a New Version
+
+```bash
+git pull                       # get the new version
+docker compose up -d --build   # rebuild changed images and recreate their containers
+docker compose logs -f segmentra-app
+```
+
+- **Database migrations run automatically** when `segmentra-app` starts. New tables and columns are created; existing data is kept. Back up the database first (see [Database Backup](#database-backup)).
+- Volumes (database, deployment bundles, SSH known_hosts) and `.env` are kept across rebuilds. **Don't regenerate `.env`**: a new `SEGMENTRA_KEK_B64` would make stored SSH and LDAP secrets unreadable.
+- Managed hosts are not changed by an upgrade. New firewall behaviour (for example chain-based iptables rules) applies to a host the next time a policy is deployed to it.
+
 ---
 
 ## Managing Services
