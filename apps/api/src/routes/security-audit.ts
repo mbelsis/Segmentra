@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, type Request, type Response } from 'express';
 
 import { pool } from '../db/pool.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
@@ -8,8 +8,10 @@ import { sendNotification } from '../services/notifications.js';
 export const securityAuditRouter = Router();
 securityAuditRouter.use(requireAuth, requireRole('viewer', 'operator', 'approver', 'admin'));
 
-// Run a new security scan and persist results
-securityAuditRouter.get('/scan', async (req, res) => {
+// Run a new security scan and persist results. This writes a result row, an audit event and
+// may send notifications, so it is restricted to operator/admin. POST is the preferred verb;
+// GET is kept for backward compatibility with existing clients.
+const runScan = async (req: Request, res: Response) => {
   try {
     const result = await runExcessiveRulesAudit();
 
@@ -31,9 +33,10 @@ securityAuditRouter.get('/scan', async (req, res) => {
       [userId, savedRows[0].id, JSON.stringify({ summary: result.summary })]
     );
 
-    // Send notification if critical findings
+    // Send notification if critical findings — fire-and-forget so a slow webhook never
+    // delays (or fails) the scan response.
     if (result.summary.critical > 0 || result.summary.high > 0) {
-      await sendNotification({
+      void sendNotification({
         eventType: 'EXCESSIVE_RULES_DETECTED',
         subject: `Security Audit: ${result.summary.critical} critical, ${result.summary.high} high findings`,
         body: {
@@ -43,14 +46,19 @@ securityAuditRouter.get('/scan', async (req, res) => {
           total: result.summary.total,
           triggeredBy: req.auth!.username,
         },
+      }).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error('[SecurityAudit] Notification failed:', err);
       });
     }
 
     res.json({ ...result, scanId: savedRows[0].id, scannedAt: savedRows[0].created_at });
   } catch (e: any) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: 'scan_failed', message: e.message });
   }
-});
+};
+securityAuditRouter.post('/scan', requireRole('operator', 'admin'), runScan);
+securityAuditRouter.get('/scan', requireRole('operator', 'admin'), runScan);
 
 // Get the latest scan results (without re-running)
 securityAuditRouter.get('/latest', async (_req, res) => {

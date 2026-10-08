@@ -71,7 +71,15 @@ tagsRouter.delete('/:id', requireRole('operator', 'admin'), async (req, res) => 
     return res.status(400).json({ error: 'cannot_delete_system_tag', message: `The tag "${existing[0].name}" is a system tag required for platform operation and cannot be deleted.` });
   }
 
-  const { rowCount } = await pool.query(`DELETE FROM tags WHERE id=$1`, [req.params.id]);
+  let rowCount: number | null;
+  try {
+    ({ rowCount } = await pool.query(`DELETE FROM tags WHERE id=$1`, [req.params.id]));
+  } catch (e: any) {
+    if (e?.code === '23503') {
+      return res.status(409).json({ error: 'tag_in_use', message: 'Tag is referenced by policy sets or other records. Remove those references first.' });
+    }
+    throw e;
+  }
   if (!rowCount) return res.status(404).json({ error: 'not_found' });
 
   await pool.query(

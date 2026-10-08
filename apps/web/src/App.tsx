@@ -52,11 +52,14 @@ function App() {
           <Route path="kubernetes" element={<KubernetesPage />} />
           <Route path="iot" element={<IoTPage />} />
           <Route path="security-audit" element={<SecurityAuditPage />} />
+          {/* Audit log: API allows every authenticated role to read */}
+          <Route path="audit" element={<AuditPage />} />
+          {/* Templates: readable by every role; create/edit gated inside the page */}
+          <Route path="policy-templates" element={<PolicyTemplatesPage />} />
 
           {/* Operator + Admin only */}
-          <Route path="policy-templates" element={<RequireRole roles={['operator', 'admin']}><PolicyTemplatesPage /></RequireRole>} />
           <Route path="topology" element={<RequireRole roles={['operator', 'admin']}><TopologyPage /></RequireRole>} />
-          <Route path="policy-testing" element={<RequireRole roles={['operator', 'admin']}><PolicyTestPage /></RequireRole>} />
+          <Route path="policy-testing" element={<RequireRole roles={['operator', 'approver', 'admin']}><PolicyTestPage /></RequireRole>} />
 
           {/* Approver + Admin only */}
           <Route path="approvals" element={<RequireRole roles={['approver', 'admin']}><ApprovalsPage /></RequireRole>} />
@@ -64,7 +67,6 @@ function App() {
           {/* Admin only */}
           <Route path="integrations" element={<RequireRole roles={['admin']}><IntegrationsPage /></RequireRole>} />
           <Route path="notifications" element={<RequireRole roles={['admin']}><NotificationsPage /></RequireRole>} />
-          <Route path="audit" element={<RequireRole roles={['admin']}><AuditPage /></RequireRole>} />
           <Route path="admin" element={<RequireRole roles={['admin']}><AdminPage /></RequireRole>} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />

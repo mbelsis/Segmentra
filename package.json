@@ -7,11 +7,10 @@
   ],
   "scripts": {
     "dev": "npm run dev -w apps/api",
-    "build": "npm run build -ws",
+    "build": "npm run build -w @segmentra/shared && npm run build:self -w @segmentra/compiler && npm run build -w @segmentra/executor && npm run build:self -w @segmentra/api && npm run build -w web",
     "db:migrate": "npm run migrate:up -w @segmentra/db",
     "db:seed": "npm run seed -w @segmentra/db",
-    "lint": "npm run lint -ws",
-    "format": "npm run format -ws",
+    "lint": "npm run lint --workspaces --if-present",
     "test:integration:ssh-docker": "node ./tests/run-docker-ssh-integration.mjs"
   },
   "engines": {

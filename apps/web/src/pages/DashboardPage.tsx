@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   PieChart,
@@ -60,6 +60,11 @@ function getStatusColor(status: string): string {
       return '#2196F3';
     case 'QUEUED':
       return '#FF9800';
+    case 'SCHEDULED':
+      return '#7E57C2';
+    case 'PAUSED':
+    case 'PARTIAL':
+      return '#c47a1a';
     default:
       return '#757575';
   }
@@ -74,33 +79,45 @@ export function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [me, setMe] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string>('');
   const navigate = useNavigate();
+  const runningRef = useRef(0);
+  const inFlightRef = useRef(false);
+
+  const loadData = useCallback(async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    try {
+      const [meRes, statsRes] = await Promise.all([
+        api.me().catch(() => null),
+        api.dashboardStats()
+      ]);
+      if (meRes) setMe(meRes.user);
+      // Only replace stats on success; failures keep the last good data.
+      setStats(statsRes);
+      runningRef.current = statsRes.runningDeployments ?? 0;
+      setLoadError('');
+    } catch (e: any) {
+      setLoadError(String(e?.message ?? e));
+    } finally {
+      inFlightRef.current = false;
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     loadData();
-    // Refresh every 5 seconds if there are running deployments
+    // Stable interval: poll every 5s while deployments are running, otherwise
+    // every 30s. A failed poll never stops polling.
+    let ticks = 0;
     const interval = setInterval(() => {
-      if (stats?.runningDeployments && stats.runningDeployments > 0) {
+      ticks++;
+      if (runningRef.current > 0 || ticks % 6 === 0) {
         loadData();
       }
     }, 5000);
     return () => clearInterval(interval);
-  }, [stats?.runningDeployments]);
-
-  async function loadData() {
-    try {
-      const [meRes, statsRes] = await Promise.all([
-        api.me().catch(() => ({ user: null })),
-        api.dashboardStats().catch(() => null)
-      ]);
-      setMe(meRes.user);
-      setStats(statsRes);
-    } catch (e) {
-      console.error('Failed to load dashboard data', e);
-    } finally {
-      setLoading(false);
-    }
-  }
+  }, [loadData]);
 
   if (loading) {
     return (
@@ -113,7 +130,8 @@ export function DashboardPage() {
   if (!stats) {
     return (
       <div style={{ padding: 40, textAlign: 'center' }}>
-        <div style={{ color: '#f44336' }}>Failed to load dashboard data</div>
+        <div style={{ color: '#f44336' }}>Failed to load dashboard data{loadError ? `: ${loadError}` : ''}</div>
+        <button style={{ marginTop: 12 }} onClick={() => loadData()}>Retry</button>
       </div>
     );
   }
@@ -126,6 +144,11 @@ export function DashboardPage() {
         <div style={{ opacity: 0.7, fontSize: 14 }}>
           Welcome back, <strong>{me?.username ?? 'unknown'}</strong>
         </div>
+        {loadError && (
+          <div style={{ marginTop: 8, padding: '6px 10px', background: '#fff3e0', border: '1px solid #ff9800', borderRadius: 6, fontSize: 13, color: '#8a5a00' }}>
+            Couldn't refresh dashboard ({loadError}). Showing last loaded data; will retry automatically.
+          </div>
+        )}
       </div>
 
       {/* Stats Cards - Row 1: Deployments */}

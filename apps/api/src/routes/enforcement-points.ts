@@ -8,7 +8,7 @@ export const enforcementPointsRouter = Router();
 enforcementPointsRouter.use(requireAuth);
 
 // List enforcement points
-enforcementPointsRouter.get('/', requireRole('viewer', 'operator', 'admin'), async (_req, res) => {
+enforcementPointsRouter.get('/', requireRole('viewer', 'operator', 'approver', 'admin'), async (_req, res) => {
   const { rows } = await pool.query(
     `SELECT ep.*,
        (SELECT COUNT(*)::int FROM enforcement_acls ea WHERE ea.enforcement_point_id = ep.id) as acl_count
@@ -18,7 +18,7 @@ enforcementPointsRouter.get('/', requireRole('viewer', 'operator', 'admin'), asy
 });
 
 // Get single enforcement point
-enforcementPointsRouter.get('/:id', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+enforcementPointsRouter.get('/:id', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const { rows } = await pool.query(`SELECT * FROM enforcement_points WHERE id = $1`, [req.params.id]);
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
 
@@ -124,18 +124,30 @@ enforcementPointsRouter.post('/:id/deploy-acl', requireRole('operator', 'admin')
     aclConfig: z.string().min(1),
   });
   const parsed = bodySchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
   const b = parsed.data;
 
   const { rows: ep } = await pool.query(`SELECT * FROM enforcement_points WHERE id = $1`, [req.params.id]);
   if (!ep[0]) return res.status(404).json({ error: 'not_found' });
 
+  const pvRes = await pool.query(`SELECT status FROM policy_versions WHERE id = $1`, [b.policyVersionId]);
+  if (!pvRes.rows[0]) return res.status(404).json({ error: 'policy_version_not_found' });
+  if (!['APPROVED', 'DEPLOYED'].includes(pvRes.rows[0].status)) {
+    return res.status(409).json({
+      error: 'policy_version_not_approved',
+      message: `Policy version is ${pvRes.rows[0].status}; only APPROVED or DEPLOYED versions can be exported to an enforcement point.`
+    });
+  }
+
   const crypto = await import('node:crypto');
   const hash = crypto.createHash('sha256').update(b.aclConfig).digest('hex');
 
+  // Segmentra has no device adapter that pushes ACLs to network gear, so nothing is applied
+  // here: the ACL is recorded as PENDING for manual deployment. deployed_hash holds the hash of
+  // the generated config; deployed_at stays NULL until someone confirms it was applied.
   const { rows } = await pool.query(
     `INSERT INTO enforcement_acls (enforcement_point_id, policy_version_id, acl_name, acl_config, status, deployed_hash, deployed_at)
-     VALUES ($1, $2, $3, $4, 'DEPLOYED', $5, now()) RETURNING *`,
+     VALUES ($1, $2, $3, $4, 'PENDING', $5, NULL) RETURNING *`,
     [req.params.id, b.policyVersionId, b.aclName, b.aclConfig, hash]
   );
 
@@ -143,15 +155,19 @@ enforcementPointsRouter.post('/:id/deploy-acl', requireRole('operator', 'admin')
   const userId = userRes.rows[0]?.id ?? null;
   await pool.query(
     `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
-     VALUES ($1, 'ACL_DEPLOY', 'enforcement_acl', $2, $3)`,
-    [userId, rows[0].id, JSON.stringify({ enforcementPointId: req.params.id, aclName: b.aclName })]
+     VALUES ($1, 'ACL_RECORD', 'enforcement_acl', $2, $3)`,
+    [userId, rows[0].id, JSON.stringify({ enforcementPointId: req.params.id, aclName: b.aclName, status: 'PENDING', hash })]
   );
 
-  res.status(201).json({ acl: rows[0] });
+  res.status(201).json({
+    acl: rows[0],
+    deployed: false,
+    message: 'ACL recorded for manual deployment (status PENDING). Segmentra does not push configuration to this device; apply it on the device and record completion there.'
+  });
 });
 
 // List ACLs for enforcement point
-enforcementPointsRouter.get('/:id/acls', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+enforcementPointsRouter.get('/:id/acls', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const { rows } = await pool.query(
     `SELECT ea.*, pv.version_number, ps.name as policy_set_name
      FROM enforcement_acls ea

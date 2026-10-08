@@ -1,6 +1,22 @@
-import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { promisify } from 'node:util';
+import { hashLiveRuleset, liveRulesReadCommand } from './read-rules.js';
+import {
+  LEGACY_POLICY_FILE,
+  LEGACY_POLICY_FILE6,
+  preserveLegacyPolicyScript,
+  retireLegacyPolicyScript,
+  segmentraIptablesCommand
+} from './iptables-scripts.js';
+import {
+  runSshCommand,
+  scpUpload,
+  shq,
+  sudoSh,
+  type ExecResult,
+  type SshConnectionOptions
+} from './ssh-options.js';
 
 const writeFile = promisify(fs.writeFile);
 
@@ -13,6 +29,8 @@ export interface SshHost {
   privateKeyPath?: string;
   password?: string;
   policyFilePath: string; // local path to policy file
+  /** iptables backend only: local path to the ip6tables-restore file (CompileOutput.ip6tablesRules). */
+  ip6PolicyFilePath?: string;
   backend: 'nftables' | 'iptables';
 }
 
@@ -23,64 +41,36 @@ export interface SshExecutionResult {
   stdout: string;
   stderr: string;
   skipped?: boolean; // true if skipped due to cancellation
+  /** Remote path of the pre-deployment backup created in this run. */
+  backupPath?: string;
+  /** True if the previous ruleset was restored (apply failure) or an automatic revert is pending/fired. */
+  rolledBack?: boolean;
+  /**
+   * "v2:"-prefixed sha256 of Segmentra's own live state (nft table / SEGMENTRA chains +
+   * jumps) read back after a successful apply; identical to readHostFirewallRules().rulesHash
+   * (see hashLiveRuleset).
+   */
+  liveRulesHash?: string;
 }
 
-/**
- * Build SSH options array. Uses a known_hosts file if provided,
- * otherwise falls back to StrictHostKeyChecking=no.
- */
-function buildSshOptions(host: { hostname?: string; ip: string; port: number; username: string; authMethod?: 'key' | 'password'; privateKeyPath?: string }, knownHostsPath?: string): string[] {
-  const opts: string[] = [];
-  if (knownHostsPath && fs.existsSync(knownHostsPath)) {
-    opts.push('-o', `UserKnownHostsFile=${knownHostsPath}`);
-    opts.push('-o', 'StrictHostKeyChecking=yes');
-  } else {
-    opts.push('-o', 'StrictHostKeyChecking=no');
-    opts.push('-o', 'UserKnownHostsFile=/dev/null');
-  }
-  opts.push(
-    '-o', 'LogLevel=ERROR',
-    '-o', 'ConnectTimeout=30'
-  );
-  if ((host.authMethod ?? 'key') === 'key') {
-    if (!host.privateKeyPath) throw new Error(`Missing privateKeyPath for host ${host.hostname ?? host.ip}`);
-    opts.push('-i', host.privateKeyPath);
-  } else {
-    opts.push('-o', 'PubkeyAuthentication=no', '-o', 'PreferredAuthentications=password,keyboard-interactive');
-  }
-  opts.push('-p', String(host.port), `${host.username}@${host.ip}`);
-  return opts;
-}
-
-function buildScpOptions(host: { hostname?: string; ip: string; port: number; username: string; authMethod?: 'key' | 'password'; privateKeyPath?: string }, knownHostsPath?: string): string[] {
-  const opts: string[] = [];
-  if (knownHostsPath && fs.existsSync(knownHostsPath)) {
-    opts.push('-o', `UserKnownHostsFile=${knownHostsPath}`);
-    opts.push('-o', 'StrictHostKeyChecking=yes');
-  } else {
-    opts.push('-o', 'StrictHostKeyChecking=no');
-    opts.push('-o', 'UserKnownHostsFile=/dev/null');
-  }
-  opts.push(
-    '-o', 'LogLevel=ERROR',
-    '-o', 'ConnectTimeout=30'
-  );
-  if ((host.authMethod ?? 'key') === 'key') {
-    if (!host.privateKeyPath) throw new Error(`Missing privateKeyPath for host ${host.hostname ?? host.ip}`);
-    opts.push('-i', host.privateKeyPath);
-  } else {
-    opts.push('-o', 'PubkeyAuthentication=no', '-o', 'PreferredAuthentications=password,keyboard-interactive');
-  }
-  opts.push('-P', String(host.port));
-  return opts;
-}
+export const BACKUP_DIR = '/var/backups/segmentra';
+const DEFAULT_ROLLBACK_TIMEOUT_SEC = 120;
+/** iptables-restore input equivalent to "no rules" for the filter table (printf-escaped). */
+const EMPTY_FILTER_TABLE = '*filter\\n:INPUT ACCEPT [0:0]\\n:FORWARD ACCEPT [0:0]\\n:OUTPUT ACCEPT [0:0]\\nCOMMIT\\n';
 
 /**
  * Execute SSH deployment to multiple hosts.
  *
+ * Per host: back up the current ruleset (deploy aborts if the backup can't be
+ * written), schedule an automatic revert on the host, apply the policy,
+ * verify reachability over a NEW SSH connection, and only then cancel the
+ * revert. If the host becomes unreachable the revert fires after
+ * `rollbackTimeoutSec` seconds.
+ *
  * @param shouldContinue - Optional callback checked between hosts. Return false to stop.
- *                         This allows the deployment to be cancelled/stopped mid-execution.
- * @param knownHostsPath - Optional path to a known_hosts file for SSH host key verification.
+ * @param knownHostsPath - Optional known_hosts file (strict checking if it exists).
+ * @param rollbackTimeoutSec - Seconds before the automatic revert fires (default 120).
+ * @param commandTimeoutMs - Per-SSH-command timeout (default 5 minutes).
  */
 export async function runSshDeployment(params: {
   hosts: SshHost[];
@@ -88,201 +78,315 @@ export async function runSshDeployment(params: {
   stderrPath?: string;
   shouldContinue?: () => Promise<boolean>;
   knownHostsPath?: string;
+  rollbackTimeoutSec?: number;
+  commandTimeoutMs?: number;
 }): Promise<SshExecutionResult[]> {
   const results: SshExecutionResult[] = [];
   const allStdout: string[] = [];
   const allStderr: string[] = [];
 
   for (const host of params.hosts) {
-    // Check if we should continue before each host
     if (params.shouldContinue) {
       const cont = await params.shouldContinue();
       if (!cont) {
-        // Mark remaining hosts as skipped
         results.push({
           hostname: host.hostname,
           success: false,
           exitCode: 0,
           stdout: 'Skipped: deployment was stopped before this host was processed',
           stderr: '',
-          skipped: true,
+          skipped: true
         });
         allStdout.push(`=== ${host.hostname} ===\nSkipped (deployment stopped)\n`);
         continue;
       }
     }
 
-    const result = await deployToHost(host, params.knownHostsPath);
+    const result = await deployToHost(host, {
+      knownHostsPath: params.knownHostsPath,
+      timeoutMs: params.commandTimeoutMs,
+      rollbackTimeoutSec: params.rollbackTimeoutSec ?? DEFAULT_ROLLBACK_TIMEOUT_SEC
+    });
     results.push(result);
     allStdout.push(`=== ${host.hostname} ===\n${result.stdout}\n`);
     allStderr.push(`=== ${host.hostname} ===\n${result.stderr}\n`);
   }
 
-  if (params.stdoutPath) {
-    await writeFile(params.stdoutPath, allStdout.join('\n'), 'utf8');
-  }
-  if (params.stderrPath) {
-    await writeFile(params.stderrPath, allStderr.join('\n'), 'utf8');
-  }
+  if (params.stdoutPath) await writeFile(params.stdoutPath, allStdout.join('\n'), 'utf8');
+  if (params.stderrPath) await writeFile(params.stderrPath, allStderr.join('\n'), 'utf8');
 
   return results;
 }
 
-async function deployToHost(host: SshHost, knownHostsPath?: string): Promise<SshExecutionResult> {
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-  const backupDir = '/var/backups/segmentra';
-  const remotePolicyPath = '/tmp/segmentra.policy';
-  const ext = host.backend === 'nftables' ? 'nft' : 'iptables';
+type DeployOpts = SshConnectionOptions & { rollbackTimeoutSec: number };
 
-  const sshOptions = buildSshOptions(host, knownHostsPath);
+/** Shell snippet (run as root) that atomically restores the backup taken in this run. */
+function buildRestoreScript(backend: 'nft' | 'iptables', paths: BackupPaths): string {
+  if (backend === 'nft') {
+    // rollbackFile = "flush ruleset" + full `nft list ruleset` backup → one atomic nft -f transaction
+    return `nft -f ${shq(paths.rollbackFile)}`;
+  }
+  return (
+    `iptables-restore < ${shq(paths.backupFile)}` +
+    ` && { [ ! -s ${shq(paths.backupFile6)} ] || ! command -v ip6tables-restore >/dev/null 2>&1 || ip6tables-restore < ${shq(paths.backupFile6)}; }`
+  );
+}
+
+type BackupPaths = { backupFile: string; backupFile6: string; rollbackFile: string };
+
+/** Root shell script applying /etc/segmentra.policy (+ /etc/segmentra.policy6) with the chain-scoped iptables design. */
+function iptablesApplyScript(): string {
+  return [
+    'set -e',
+    segmentraIptablesCommand(['apply', 'iptables', '/etc/segmentra.policy', LEGACY_POLICY_FILE]),
+    'if [ -f /etc/segmentra.policy6 ]; then',
+    '  if command -v ip6tables-restore >/dev/null 2>&1; then',
+    `    ${segmentraIptablesCommand(['apply', 'ip6tables', '/etc/segmentra.policy6', LEGACY_POLICY_FILE6])}`,
+    '  else echo "warning: ip6tables-restore not found; IPv6 rules not applied" >&2; fi',
+    'fi'
+  ].join('\n');
+}
+
+async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecutionResult> {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+  const nonce = crypto.randomBytes(4).toString('hex');
+  const ext = host.backend === 'nftables' ? 'nft' : 'iptables';
+  const remoteUpload = `.segmentra-${timestamp}-${nonce}.policy`; // in the SSH user's home (not world-writable /tmp)
+  const remoteUpload6 = `.segmentra-${timestamp}-${nonce}.policy6`;
+  const unit = `segmentra-revert-${timestamp.replace(/[^0-9A-Za-z]/g, '')}-${nonce}`;
+  const run = (cmd: string, o: { timeoutMs?: number } = {}) =>
+    runSshCommand(host, cmd, { knownHostsPath: opts.knownHostsPath, timeoutMs: o.timeoutMs ?? opts.timeoutMs });
 
   let stdout = '';
   let stderr = '';
+  const add = (r: ExecResult) => { stdout += r.stdout; stderr += r.stderr; };
+  const fail = (exitCode: number, msg: string, extra: Partial<SshExecutionResult> = {}): SshExecutionResult => ({
+    hostname: host.hostname,
+    success: false,
+    exitCode: exitCode || 1,
+    stdout,
+    stderr: stderr + `\n${msg}\n`,
+    ...extra
+  });
 
   try {
     // Step 1: Ensure backup directory exists
-    const mkdirCmd = `sudo mkdir -p ${backupDir} && sudo chmod 700 ${backupDir}`;
-    const mkdirResult = await execSsh(sshOptions, mkdirCmd, host.password);
-    stdout += mkdirResult.stdout;
-    stderr += mkdirResult.stderr;
-    if (mkdirResult.exitCode !== 0) {
-      return { hostname: host.hostname, success: false, exitCode: mkdirResult.exitCode, stdout, stderr };
-    }
+    const mkdirResult = await run(sudoSh(`mkdir -p ${shq(BACKUP_DIR)} && chmod 700 ${shq(BACKUP_DIR)}`));
+    add(mkdirResult);
+    if (mkdirResult.exitCode !== 0) return fail(mkdirResult.exitCode, 'Error: could not create backup directory');
 
     // Step 2: Detect backend
-    const detectCmd = 'command -v nft >/dev/null 2>&1 && echo nft || echo iptables';
-    const detectResult = await execSsh(sshOptions, detectCmd, host.password);
-    const detectedBackend = detectResult.stdout.trim();
+    const detectResult = await run('command -v nft >/dev/null 2>&1 && echo nft || echo iptables');
+    if (detectResult.exitCode !== 0) {
+      add(detectResult);
+      return fail(detectResult.exitCode, 'Error: backend detection failed');
+    }
+    const detectedBackend = detectResult.stdout.trim() === 'nft' ? 'nft' : 'iptables';
     stdout += `Detected backend: ${detectedBackend}\n`;
-
-    // Step 3: Backup existing rules
-    if (detectedBackend === 'nft') {
-      const backupCmd = `
-        if [ -f /etc/nftables.conf ]; then
-          sudo cp /etc/nftables.conf ${backupDir}/nftables.conf.${timestamp}
-        fi
-        sudo nft list ruleset > ${backupDir}/nft.ruleset.${timestamp} 2>&1 || true
-      `;
-      const backupResult = await execSsh(sshOptions, backupCmd, host.password);
-      stdout += backupResult.stdout;
-      stderr += backupResult.stderr;
-    } else {
-      const backupCmd = `sudo iptables-save > ${backupDir}/iptables.${timestamp} 2>&1 || true`;
-      const backupResult = await execSsh(sshOptions, backupCmd, host.password);
-      stdout += backupResult.stdout;
-      stderr += backupResult.stderr;
+    if (detectedBackend !== ext) {
+      return fail(1, `Error: Backend mismatch. Detected: ${detectedBackend}, Policy: ${ext}`);
     }
 
-    // Step 4: Copy policy file to remote host
-    const scpOpts = buildScpOptions(host, knownHostsPath);
-    scpOpts.push(host.policyFilePath, `${host.username}@${host.ip}:${remotePolicyPath}`);
+    // Step 3: Backup existing rules (as root). The deploy is aborted if this fails.
+    const paths: BackupPaths =
+      ext === 'nft'
+        ? {
+            backupFile: `${BACKUP_DIR}/nft.ruleset.${timestamp}`,
+            backupFile6: '',
+            rollbackFile: `${BACKUP_DIR}/nft.rollback.${timestamp}`
+          }
+        : {
+            backupFile: `${BACKUP_DIR}/iptables.${timestamp}`,
+            backupFile6: `${BACKUP_DIR}/ip6tables.${timestamp}`,
+            rollbackFile: ''
+          };
+    const backupScript =
+      ext === 'nft'
+        ? [
+            'set -e',
+            'umask 077',
+            `if [ -f /etc/nftables.conf ]; then cp /etc/nftables.conf ${shq(`${BACKUP_DIR}/nftables.conf.${timestamp}`)}; fi`,
+            `nft list ruleset > ${shq(paths.backupFile)}`,
+            `{ echo 'flush ruleset'; cat ${shq(paths.backupFile)}; } > ${shq(paths.rollbackFile)}`,
+            `test -f ${shq(paths.backupFile)} && test -s ${shq(paths.rollbackFile)}`
+          ].join('\n')
+        : [
+            'set -e',
+            'umask 077',
+            `iptables-save > ${shq(paths.backupFile)}`,
+            // No tables loaded -> empty dump; store an explicit open filter table so a restore really resets policies
+            `if [ ! -s ${shq(paths.backupFile)} ]; then printf ${shq(EMPTY_FILTER_TABLE)} > ${shq(paths.backupFile)}; fi`,
+            `if command -v ip6tables-save >/dev/null 2>&1; then`,
+            `  ip6tables-save > ${shq(paths.backupFile6)}`,
+            `  if [ ! -s ${shq(paths.backupFile6)} ]; then printf ${shq(EMPTY_FILTER_TABLE)} > ${shq(paths.backupFile6)}; fi`,
+            'fi'
+          ].join('\n');
+    const backupResult = await run(sudoSh(backupScript));
+    add(backupResult);
+    if (backupResult.exitCode !== 0) {
+      return fail(backupResult.exitCode, 'Error: failed to back up current firewall rules; deployment aborted (no changes made)');
+    }
+    stdout += `Backup written: ${paths.backupFile}\n`;
+    const backupPath = paths.backupFile;
 
-    const scpResult = await execScp(scpOpts, host.password);
-    stdout += scpResult.stdout;
-    stderr += scpResult.stderr;
-    if (scpResult.exitCode !== 0) {
-      return { hostname: host.hostname, success: false, exitCode: scpResult.exitCode, stdout, stderr };
+    // Step 4: Upload policy file(s) to the SSH user's home directory
+    const scpResult = await scpUpload(host, host.policyFilePath, remoteUpload, opts);
+    add(scpResult);
+    if (scpResult.exitCode !== 0) return fail(scpResult.exitCode, 'Error: policy upload failed', { backupPath });
+
+    const hasV6 = ext === 'iptables' && !!host.ip6PolicyFilePath && fs.existsSync(host.ip6PolicyFilePath);
+    if (hasV6) {
+      const scp6 = await scpUpload(host, host.ip6PolicyFilePath!, remoteUpload6, opts);
+      add(scp6);
+      if (scp6.exitCode !== 0) return fail(scp6.exitCode, 'Error: IPv6 policy upload failed', { backupPath });
     }
 
-    // Step 5: Move policy file to secure location
-    const setupCmd = `sudo mv ${remotePolicyPath} /etc/segmentra.policy && sudo chmod 600 /etc/segmentra.policy`;
-    const setupResult = await execSsh(sshOptions, setupCmd, host.password);
-    stdout += setupResult.stdout;
-    stderr += setupResult.stderr;
-    if (setupResult.exitCode !== 0) {
-      return { hostname: host.hostname, success: false, exitCode: setupResult.exitCode, stdout, stderr };
-    }
+    // Step 5: Install policy file(s) to a root-owned location. Paths are relative
+    // to the SSH user's home, so resolve $HOME before switching to root.
+    const installScript = [
+      'set -e',
+      // Keep a copy of a legacy (full-table design) policy so its rules can be identified and cleaned up
+      ...(ext === 'iptables' ? [preserveLegacyPolicyScript()] : []),
+      `install -m 600 -o root "$1/${remoteUpload}" /etc/segmentra.policy`,
+      `rm -f "$1/${remoteUpload}"`,
+      hasV6
+        ? `install -m 600 -o root "$1/${remoteUpload6}" /etc/segmentra.policy6 && rm -f "$1/${remoteUpload6}"`
+        : 'rm -f /etc/segmentra.policy6'
+    ].join('\n');
+    const setupResult = await run(`sudo -n sh -c ${shq(installScript)} segmentra "$HOME"`);
+    add(setupResult);
+    if (setupResult.exitCode !== 0) return fail(setupResult.exitCode, 'Error: failed to install policy file', { backupPath });
 
-    // Step 6: Apply firewall rules
-    let applyCmd: string;
-    if (detectedBackend === 'nft' && ext === 'nft') {
-      applyCmd = 'sudo nft -f /etc/segmentra.policy';
-    } else if (detectedBackend !== 'nft' && ext === 'iptables') {
-      applyCmd = 'sudo iptables-restore < /etc/segmentra.policy';
-    } else {
-      return {
-        hostname: host.hostname,
-        success: false,
-        exitCode: 1,
-        stdout,
-        stderr: stderr + `\nError: Backend mismatch. Detected: ${detectedBackend}, Policy: ${ext}\n`
-      };
+    // Step 6: Schedule automatic revert (lockout protection). The revert touches
+    // a marker file when it fires so a late cancel can detect that it already ran.
+    const restoreScript = buildRestoreScript(ext, paths);
+    const marker = `${BACKUP_DIR}/revert-fired.${timestamp}-${nonce}`;
+    const firingScript = `touch ${shq(marker)}; ${restoreScript}`;
+    const delay = Math.max(30, Math.floor(opts.rollbackTimeoutSec));
+    const watchdog = `sleep ${delay}; ${firingScript}`;
+    const scheduleScript = [
+      'if command -v systemd-run >/dev/null 2>&1 && [ -d /run/systemd/system ] &&',
+      `   systemd-run --quiet --unit=${unit} --on-active=${delay} --timer-property=AccuracySec=1s /bin/sh -c ${shq(firingScript)} >/dev/null 2>&1; then`,
+      `  echo "systemd:${unit}"`,
+      'else',
+      `  nohup sh -c ${shq(watchdog)} >/dev/null 2>&1 </dev/null &`,
+      '  echo "pid:$!"',
+      'fi'
+    ].join('\n');
+    const scheduledAt = Date.now();
+    const deadline = scheduledAt + delay * 1000;
+    const schedResult = await run(sudoSh(scheduleScript));
+    add(schedResult);
+    const token = (schedResult.stdout.trim().split('\n').pop() ?? '').trim();
+    if (schedResult.exitCode !== 0 || !/^(systemd:[A-Za-z0-9-]+|pid:\d+)$/.test(token)) {
+      return fail(schedResult.exitCode, 'Error: could not schedule automatic revert; deployment aborted (no changes made)', { backupPath });
     }
+    stdout += `Automatic revert scheduled in ${delay}s (${token})\n`;
+    // Exit code 9 = the revert already fired (or is firing); the deployment has been undone.
+    const cancelCmd = token.startsWith('systemd:')
+      ? sudoSh(
+          [
+            `if [ -e ${shq(marker)} ]; then exit 9; fi`,
+            `systemctl stop ${shq(`${unit}.timer`)} || exit 1`,
+            `systemctl reset-failed ${shq(`${unit}.timer`)} ${shq(`${unit}.service`)} >/dev/null 2>&1`,
+            `if [ -e ${shq(marker)} ]; then exit 9; fi`,
+            'exit 0'
+          ].join('\n')
+        )
+      : sudoSh(
+          [
+            `pid=${token.slice(4)}`,
+            `if [ -e ${shq(marker)} ] || ! kill -0 "$pid" 2>/dev/null; then exit 9; fi`,
+            'kill "$pid" 2>/dev/null',
+            'sleep 1',
+            'if kill -0 "$pid" 2>/dev/null; then exit 1; fi',
+            `if [ -e ${shq(marker)} ]; then exit 9; fi`,
+            'exit 0'
+          ].join('\n')
+        );
+    const revertFiredMsg = `The automatic revert already fired; the previous ruleset (${backupPath}) was restored and the deployment is NOT active`;
 
-    const applyResult = await execSsh(sshOptions, applyCmd, host.password);
-    stdout += applyResult.stdout;
-    stderr += applyResult.stderr;
+    // Step 7: Apply firewall rules (as root; redirects happen inside sudo).
+    // nft: replaces only table inet segmentra. iptables: fills only the SEGMENTRA-IN/OUT
+    // chains (iptables-restore --noflush) and inserts the INPUT/OUTPUT jumps in the same
+    // transaction, then cleans up rules left by the legacy full-table design.
+    const applyScript = ext === 'nft' ? 'nft -f /etc/segmentra.policy' : iptablesApplyScript();
+    const applyResult = await run(sudoSh(applyScript));
+    add(applyResult);
 
     if (applyResult.exitCode !== 0) {
-      // Rollback on failure
-      stdout += '\n=== Rollback attempt ===\n';
-      if (detectedBackend === 'nft') {
-        const rollbackCmd = `
-          latest=$(ls -1t ${backupDir}/nft.ruleset.* 2>/dev/null | head -n 1)
-          if [ -n "$latest" ]; then
-            sudo nft -f "$latest" 2>&1 || true
-          fi
-        `;
-        const rollbackResult = await execSsh(sshOptions, rollbackCmd, host.password);
-        stdout += rollbackResult.stdout;
-        stderr += rollbackResult.stderr;
+      stdout += '\n=== Rollback (apply failed) ===\n';
+      const rb = await run(sudoSh(restoreScript));
+      add(rb);
+      if (rb.exitCode === 0) {
+        stdout += `Restored ${backupPath}\n`;
+        const c = await run(cancelCmd);
+        add(c);
       } else {
-        const rollbackCmd = `
-          latest=$(ls -1t ${backupDir}/iptables.* 2>/dev/null | head -n 1)
-          if [ -n "$latest" ]; then
-            sudo iptables-restore < "$latest" 2>&1 || true
-          fi
-        `;
-        const rollbackResult = await execSsh(sshOptions, rollbackCmd, host.password);
-        stdout += rollbackResult.stdout;
-        stderr += rollbackResult.stderr;
+        stderr += `Immediate rollback failed; automatic revert will retry within ${delay}s\n`;
       }
-
-      return {
-        hostname: host.hostname,
-        success: false,
-        exitCode: applyResult.exitCode,
-        stdout,
-        stderr: stderr + '\nFirewall apply failed; rollback attempted\n'
-      };
+      return fail(applyResult.exitCode, 'Firewall apply failed; rollback attempted', { backupPath, rolledBack: true });
     }
 
-    return { hostname: host.hostname, success: true, exitCode: 0, stdout, stderr };
+    // Step 8: Verify reachability over a NEW SSH connection, finishing well
+    // before the revert deadline (otherwise a successful probe could just be
+    // the revert having restored access).
+    const marginMs = 8_000;
+    let reachable = false;
+    for (let attempt = 1; attempt <= 3 && !reachable; attempt++) {
+      const remaining = deadline - Date.now() - marginMs;
+      if (remaining < 3_000) break;
+      const probe = await run('echo segmentra-ok', { timeoutMs: Math.min(20_000, remaining) });
+      reachable = probe.exitCode === 0 && probe.stdout.includes('segmentra-ok') && Date.now() < deadline - marginMs / 2;
+      if (!reachable) {
+        stderr += `Reachability check ${attempt} failed: ${probe.stderr.trim() || `exit ${probe.exitCode}`}\n`;
+        if (attempt < 3 && deadline - Date.now() - marginMs > 5_000) await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
+    if (!reachable) {
+      return fail(
+        1,
+        `Host not reachable over a new SSH connection after apply; the automatic revert restores ${backupPath} ${delay}s after scheduling`,
+        { backupPath, rolledBack: true }
+      );
+    }
+
+    // Step 9: Cancel the revert (verifying it has not fired yet)
+    let cancelResult = await run(cancelCmd);
+    for (let attempt = 2; attempt <= 3 && cancelResult.exitCode !== 0 && cancelResult.exitCode !== 9; attempt++) {
+      stderr += `Cancel attempt ${attempt - 1} failed: ${cancelResult.stderr.trim()}\n`;
+      await new Promise((r) => setTimeout(r, 1000));
+      cancelResult = await run(cancelCmd);
+    }
+    add(cancelResult);
+    if (cancelResult.exitCode === 9) {
+      return fail(9, revertFiredMsg, { backupPath, rolledBack: true });
+    }
+    if (cancelResult.exitCode !== 0) {
+      return fail(
+        cancelResult.exitCode,
+        `Could not cancel the automatic revert (${token}); the previous ruleset will be restored`,
+        { backupPath, rolledBack: true }
+      );
+    }
+    stdout += 'Reachability verified; automatic revert cancelled\n';
+    if (ext === 'iptables') {
+      // Migration from the legacy design is confirmed; never match against the legacy policy again.
+      const retire = await run(sudoSh(retireLegacyPolicyScript()));
+      if (retire.exitCode !== 0) stderr += `Warning: could not retire legacy policy files: ${retire.stderr.trim()}\n`;
+    }
+
+    // Step 10: Read back live ruleset for drift detection (same read + normalization as readHostFirewallRules)
+    let liveRulesHash: string | undefined;
+    const live = await run(liveRulesReadCommand(ext === 'nft' ? 'nftables' : 'iptables'));
+    if (live.exitCode === 0) {
+      liveRulesHash = hashLiveRuleset(ext === 'nft' ? 'nftables' : 'iptables', live.stdout);
+    } else {
+      stderr += `Warning: could not read back live ruleset: ${live.stdout.trim()} ${live.stderr.trim()}\n`;
+    }
+
+    return { hostname: host.hostname, success: true, exitCode: 0, stdout, stderr, backupPath, liveRulesHash };
   } catch (error: any) {
-    return {
-      hostname: host.hostname,
-      success: false,
-      exitCode: 1,
-      stdout,
-      stderr: stderr + `\nException: ${error.message}\n`
-    };
+    return fail(1, `Exception: ${error.message}`);
   }
-}
-
-function execSsh(sshOptions: string[], command: string, password?: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
-    const args = password ? ['-p', password, 'ssh', ...sshOptions, command] : [...sshOptions, command];
-    const child = spawn(password ? 'sshpass' : 'ssh', args);
-    let stdout = '';
-    let stderr = '';
-
-    child.stdout.on('data', (data) => { stdout += data.toString(); });
-    child.stderr.on('data', (data) => { stderr += data.toString(); });
-    child.on('close', (code) => { resolve({ exitCode: code ?? 1, stdout, stderr }); });
-    child.on('error', (error) => { resolve({ exitCode: 1, stdout, stderr: stderr + error.message }); });
-  });
-}
-
-function execScp(scpOptions: string[], password?: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
-    const args = password ? ['-p', password, 'scp', ...scpOptions] : scpOptions;
-    const child = spawn(password ? 'sshpass' : 'scp', args);
-    let stdout = '';
-    let stderr = '';
-
-    child.stdout.on('data', (data) => { stdout += data.toString(); });
-    child.stderr.on('data', (data) => { stderr += data.toString(); });
-    child.on('close', (code) => { resolve({ exitCode: code ?? 1, stdout, stderr }); });
-    child.on('error', (error) => { resolve({ exitCode: 1, stdout, stderr: stderr + error.message }); });
-  });
 }

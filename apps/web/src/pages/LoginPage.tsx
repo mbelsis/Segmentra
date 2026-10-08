@@ -1,11 +1,21 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 
 import { api } from '../lib/api';
 import { getToken, setToken } from '../lib/auth';
 
+/** Only allow same-origin relative paths (e.g. "/deployments"), never "//host" or absolute URLs. */
+function safeNext(raw: string | null): string {
+  if (!raw) return '/';
+  if (!raw.startsWith('/') || raw.startsWith('//') || raw.startsWith('/\\')) return '/';
+  if (raw.startsWith('/login')) return '/';
+  return raw;
+}
+
 export function LoginPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const next = safeNext(searchParams.get('next'));
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -16,9 +26,9 @@ export function LoginPage() {
     if (!token) return;
     api
       .me()
-      .then(() => navigate('/', { replace: true }))
+      .then(() => navigate(next, { replace: true }))
       .catch(() => undefined);
-  }, [navigate]);
+  }, [navigate, next]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -27,7 +37,7 @@ export function LoginPage() {
     try {
       const r = await api.login(username, password);
       setToken(r.token);
-      navigate('/', { replace: true });
+      navigate(next, { replace: true });
     } catch (e: any) {
       setError(String(e?.message ?? e));
     } finally {

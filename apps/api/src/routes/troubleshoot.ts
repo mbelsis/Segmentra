@@ -3,10 +3,11 @@ import { z } from 'zod';
 import { pool } from '../db/pool.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { compileHostPolicy } from '@segmentra/compiler';
-import { startAuditSession, deployLogOnlyPolicy, restoreAuditSession, retrieveAuditLogs, type AuditSshHost } from '@segmentra/executor';
-import { readSecretPlaintext } from '../services/secrets.js';
-import { parseFirewallLogs, groupCommunicationFlows } from '../services/log-parser.js';
-import { processExpiredAuditSessions } from '../services/audit-scheduler.js';
+import { startAuditSession, deployLogOnlyPolicy } from '@segmentra/executor';
+import { buildAuditHost, restoreAuditSessionById } from '../services/audit-scheduler.js';
+import { cidrContains, isValidCidr, isValidIp, portSpecIncludes } from '../services/ip-utils.js';
+import { createSourceResolver } from '../services/source-resolver.js';
+import { getSshCredentialForHost, type MaterializedSshCredential } from '../services/ssh-credentials.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -14,33 +15,13 @@ import os from 'node:os';
 export const troubleshootRouter = Router();
 troubleshootRouter.use(requireAuth, requireRole('viewer', 'operator', 'approver', 'admin'));
 
-// Helper function to check if an IP matches a CIDR
+// Helper function to check if an IP matches a CIDR (IPv4/IPv6; "any" matches everything)
 function ipMatchesCidr(ip: string, cidr: string): boolean {
-  try {
-    // Remove CIDR notation if present in IP
-    const cleanIp = ip.split('/')[0];
-    
-    const [cidrIp, prefix] = cidr.split('/');
-    const prefixLen = prefix ? parseInt(prefix, 10) : 32;
-    
-    if (prefixLen < 0 || prefixLen > 32) return false;
-    
-    // Simple CIDR matching (for IPv4)
-    const ipParts = cleanIp.split('.').map(Number);
-    const cidrParts = cidrIp.split('.').map(Number);
-    
-    if (ipParts.length !== 4 || cidrParts.length !== 4) return false;
-    if (ipParts.some(p => isNaN(p) || p < 0 || p > 255)) return false;
-    if (cidrParts.some(p => isNaN(p) || p < 0 || p > 255)) return false;
-    
-    const mask = prefixLen === 0 ? 0 : (0xFFFFFFFF << (32 - prefixLen)) >>> 0;
-    const ipNum = (ipParts[0] << 24) + (ipParts[1] << 16) + (ipParts[2] << 8) + ipParts[3];
-    const cidrNum = (cidrParts[0] << 24) + (cidrParts[1] << 16) + (cidrParts[2] << 8) + cidrParts[3];
-    
-    return (ipNum & mask) === (cidrNum & mask);
-  } catch {
-    return false;
-  }
+  const target = String(ip).split('/')[0];
+  return String(cidr ?? '')
+    .split(',')
+    .map((c) => c.trim())
+    .some((c) => (/^(any|\*)$/i.test(c) ? true : cidrContains(c, target)));
 }
 
 // Search policies by IP address
@@ -298,320 +279,199 @@ troubleshootRouter.get('/policy-versions/:versionId/hosts', async (req, res) => 
   });
 });
 
-// Helper function to check if a port matches a port specification
-function portMatches(port: number | null, portSpec: string | null): boolean {
-  if (!portSpec || port === null) return true; // No port filter means match all
-  
-  const parts = portSpec.split(',');
-  for (const part of parts) {
-    const trimmed = part.trim();
-    if (trimmed.includes('-')) {
-      // Port range
-      const [start, end] = trimmed.split('-').map(p => parseInt(p.trim(), 10));
-      if (!isNaN(start) && !isNaN(end) && port >= start && port <= end) {
-        return true;
-      }
-    } else {
-      // Single port
-      const portNum = parseInt(trimmed, 10);
-      if (!isNaN(portNum) && port === portNum) {
-        return true;
-      }
-    }
-  }
-  return false;
+type SimRule = {
+  id: string;
+  order_index: number;
+  direction: string;
+  action: 'ALLOW' | 'DENY';
+  protocol: string;
+  ports: string | null;
+  source_type: string;
+  source_value: string;
+  comment: string | null;
+};
+
+/** The policy actually enforced on a host: its most recent successful deployment
+ *  (each deployment replaces the whole Segmentra table). */
+async function effectivePolicyForHost(hostId: string) {
+  const { rows } = await pool.query(
+    `SELECT d.policy_version_id, d.id AS deployment_id, d.status AS deployment_status,
+            pv.version_number, pv.status AS version_status, ps.name AS policy_set_name
+       FROM deployments d
+       JOIN deployment_hosts dh ON dh.deployment_id = d.id
+       JOIN policy_versions pv ON pv.id = d.policy_version_id
+       JOIN policy_sets ps ON ps.id = pv.policy_set_id
+      WHERE dh.host_id = $1 AND dh.status = 'SUCCEEDED' AND pv.status IN ('APPROVED','DEPLOYED')
+      ORDER BY COALESCE(dh.finished_at, d.finished_at, d.created_at) DESC
+      LIMIT 1`,
+    [hostId]
+  );
+  if (!rows[0]) return null;
+  const rulesRes = await pool.query(
+    `SELECT * FROM policy_rules WHERE policy_version_id = $1 ORDER BY order_index ASC, id ASC`,
+    [rows[0].policy_version_id]
+  );
+  return { policy: rows[0], rules: rulesRes.rows as SimRule[] };
 }
 
-// Simulate communication between two IPs
+async function managementCidrs(): Promise<string[]> {
+  const mgmtVlanRes = await pool.query(`SELECT value FROM system_settings WHERE key='management_vlan_id'`);
+  const mgmtVlanId = mgmtVlanRes.rows[0]?.value || null;
+  if (!mgmtVlanId) return [];
+  const vlanRes = await pool.query(`SELECT subnet FROM vlans WHERE id=$1`, [mgmtVlanId]);
+  const subnet = vlanRes.rows[0]?.subnet ? String(vlanRes.rows[0].subnet) : null;
+  return subnet && isValidCidr(subnet) ? [subnet] : [];
+}
+
+// Simulate communication between two IPs.
+// Mirrors the compiled firewall: rules are evaluated in order_index order and the FIRST match
+// wins. Inbound on the destination: management SSH baseline first, default DROP. Outbound on
+// the source: default ACCEPT. A host without a deployed policy does not filter traffic.
 troubleshootRouter.post('/simulate-communication', requireRole('operator', 'admin'), async (req, res) => {
   const sourceIp = String(req.body.sourceIp ?? '').trim();
   const sourcePort = req.body.sourcePort ? parseInt(String(req.body.sourcePort), 10) : null;
   const destIp = String(req.body.destIp ?? '').trim();
-  const destPort = req.body.destPort ? parseInt(String(req.body.destPort), 10) : null;
+  const destPortRaw = req.body.destPort ? parseInt(String(req.body.destPort), 10) : null;
+  const destPort = destPortRaw !== null && Number.isFinite(destPortRaw) ? destPortRaw : null;
   const protocol = String(req.body.protocol ?? 'tcp').toLowerCase();
 
   if (!sourceIp || !destIp) {
     return res.status(400).json({ error: 'source_ip_and_dest_ip_required', message: 'Source IP and destination IP are required' });
   }
-
-  // Find hosts for source and destination IPs
-  const sourceHostRes = await pool.query(
-    `SELECT id, hostname, mgmt_ip FROM hosts WHERE mgmt_ip::text = $1 OR mgmt_ip::text LIKE $2`,
-    [sourceIp, `${sourceIp}/%`]
-  );
-  const sourceHost = sourceHostRes.rows[0];
-
-  const destHostRes = await pool.query(
-    `SELECT id, hostname, mgmt_ip FROM hosts WHERE mgmt_ip::text = $1 OR mgmt_ip::text LIKE $2`,
-    [destIp, `${destIp}/%`]
-  );
-  const destHost = destHostRes.rows[0];
-
-  // Get all deployed policies for source host (if exists)
-  const sourcePolicies: any[] = [];
-  if (sourceHost) {
-    const sourceDeploymentsRes = await pool.query(
-      `SELECT DISTINCT d.policy_version_id, d.id as deployment_id, d.status as deployment_status,
-              pv.version_number, pv.status as version_status, ps.name as policy_set_name
-       FROM deployments d
-       JOIN deployment_hosts dh ON dh.deployment_id = d.id
-       JOIN policy_versions pv ON pv.id = d.policy_version_id
-       JOIN policy_sets ps ON ps.id = pv.policy_set_id
-       WHERE dh.host_id = $1 AND dh.status = 'SUCCEEDED' AND pv.status = 'APPROVED'
-       ORDER BY d.created_at DESC`,
-      [sourceHost.id]
-    );
-    sourcePolicies.push(...sourceDeploymentsRes.rows);
+  if (!isValidIp(sourceIp) || !isValidIp(destIp)) {
+    return res.status(400).json({ error: 'invalid_ip', message: 'Source and destination must be valid IP addresses' });
+  }
+  if (!['tcp', 'udp', 'icmp'].includes(protocol)) {
+    return res.status(400).json({ error: 'invalid_protocol', message: 'protocol must be tcp, udp or icmp' });
+  }
+  if (destPort !== null && (destPort < 1 || destPort > 65535)) {
+    return res.status(400).json({ error: 'invalid_port' });
   }
 
-  // Get all deployed policies for destination host (if exists)
-  const destPolicies: any[] = [];
-  if (destHost) {
-    const destDeploymentsRes = await pool.query(
-      `SELECT DISTINCT d.policy_version_id, d.id as deployment_id, d.status as deployment_status,
-              pv.version_number, pv.status as version_status, ps.name as policy_set_name
-       FROM deployments d
-       JOIN deployment_hosts dh ON dh.deployment_id = d.id
-       JOIN policy_versions pv ON pv.id = d.policy_version_id
-       JOIN policy_sets ps ON ps.id = pv.policy_set_id
-       WHERE dh.host_id = $1 AND dh.status = 'SUCCEEDED' AND pv.status = 'APPROVED'
-       ORDER BY d.created_at DESC`,
-      [destHost.id]
-    );
-    destPolicies.push(...destDeploymentsRes.rows);
-  }
+  const findHost = async (ip: string) =>
+    (await pool.query(
+      `SELECT id, hostname, mgmt_ip, ssh_port FROM hosts WHERE host(mgmt_ip) = $1 ORDER BY enabled DESC, hostname LIMIT 1`,
+      [ip]
+    )).rows[0] ?? null;
+  const sourceHost = await findHost(sourceIp);
+  const destHost = await findHost(destIp);
 
-  // Check rules that would affect this communication
-  const blockingRules: any[] = [];
-  const allowingRules: any[] = [];
+  const resolve = createSourceResolver();
+  const notes: string[] = [];
 
-  // Check source host policies (OUT direction)
-  for (const policy of sourcePolicies) {
-    const rulesRes = await pool.query(
-      `SELECT * FROM policy_rules WHERE policy_version_id = $1 ORDER BY order_index ASC`,
-      [policy.policy_version_id]
-    );
-
-    for (const rule of rulesRes.rows) {
-      // Check if rule applies to OUT direction (source host sending to destination)
-      if (rule.direction === 'OUT' || rule.direction === 'BOTH') {
-        // Check if destination IP matches rule source
-        let sourceMatches = false;
-        
-        if (rule.source_type === 'CIDR') {
-          sourceMatches = ipMatchesCidr(destIp, rule.source_value);
-        } else if (rule.source_type === 'HOST') {
-          const hostRes = await pool.query(`SELECT mgmt_ip FROM hosts WHERE id=$1`, [rule.source_value]);
-          if (hostRes.rows[0]?.mgmt_ip) {
-            const hostIp = String(hostRes.rows[0].mgmt_ip).split('/')[0];
-            sourceMatches = hostIp === destIp;
-          }
-        } else if (rule.source_type === 'TAG') {
-          const hostsRes = await pool.query(
-            `SELECT DISTINCT h.mgmt_ip FROM hosts h
-             JOIN host_tags ht ON ht.host_id = h.id
-             WHERE ht.tag_id = $1 AND h.mgmt_ip IS NOT NULL`,
-            [rule.source_value]
-          );
-          for (const host of hostsRes.rows) {
-            const hostIp = String(host.mgmt_ip).split('/')[0];
-            if (hostIp === destIp) {
-              sourceMatches = true;
-              break;
-            }
-          }
-        } else if (rule.source_type === 'VLAN') {
-          const hostsRes = await pool.query(
-            `SELECT mgmt_ip FROM hosts WHERE vlan_id = $1 AND mgmt_ip IS NOT NULL`,
-            [rule.source_value]
-          );
-          for (const host of hostsRes.rows) {
-            const hostIp = String(host.mgmt_ip).split('/')[0];
-            if (hostIp === destIp) {
-              sourceMatches = true;
-              break;
-            }
-          }
-        }
-
-        if (sourceMatches) {
-          // Check protocol match
-          const protocolMatch = rule.protocol === 'any' || rule.protocol === protocol;
-          
-          // Check port match (for TCP/UDP)
-          const portMatch = (protocol === 'tcp' || protocol === 'udp') 
-            ? portMatches(destPort, rule.ports) 
-            : true;
-
-          if (protocolMatch && portMatch) {
-            const ruleInfo = {
-              rule: {
-                id: rule.id,
-                orderIndex: rule.order_index,
-                action: rule.action,
-                protocol: rule.protocol,
-                ports: rule.ports,
-                sourceType: rule.source_type,
-                sourceValue: rule.source_value,
-                direction: rule.direction,
-                comment: rule.comment
-              },
-              policyVersion: {
-                id: policy.policy_version_id,
-                versionNumber: policy.version_number,
-                status: policy.version_status,
-                policySetName: policy.policy_set_name
-              },
-              host: {
-                id: sourceHost.id,
-                hostname: sourceHost.hostname,
-                mgmtIp: sourceHost.mgmt_ip
-              },
-              appliesTo: 'source',
-              direction: 'OUT'
-            };
-
-            if (rule.action === 'DENY') {
-              blockingRules.push(ruleInfo);
-            } else {
-              allowingRules.push(ruleInfo);
-            }
-          }
-        }
+  const ruleMatches = async (rule: SimRule, remoteIp: string): Promise<boolean> => {
+    if (rule.protocol !== 'any' && rule.protocol !== protocol) return false;
+    if (rule.ports && String(rule.ports).trim()) {
+      if (protocol !== 'tcp' && protocol !== 'udp') return false;
+      if (destPort === null) {
+        notes.push(`Rule #${rule.order_index} restricts ports (${rule.ports}); no destination port given, so it was treated as not matching`);
+        return false;
       }
+      if (!portSpecIncludes(rule.ports, destPort)) return false;
     }
-  }
+    const addrs = await resolve(rule.source_type, rule.source_value);
+    return addrs.some((a) => cidrContains(a, remoteIp));
+  };
 
-  // Check destination host policies (IN direction)
-  for (const policy of destPolicies) {
-    const rulesRes = await pool.query(
-      `SELECT * FROM policy_rules WHERE policy_version_id = $1 ORDER BY order_index ASC`,
-      [policy.policy_version_id]
-    );
-
-    for (const rule of rulesRes.rows) {
-      // Check if rule applies to IN direction (destination host receiving from source)
-      if (rule.direction === 'IN' || rule.direction === 'BOTH') {
-        // Check if source IP matches rule source
-        let sourceMatches = false;
-        
-        if (rule.source_type === 'CIDR') {
-          sourceMatches = ipMatchesCidr(sourceIp, rule.source_value);
-        } else if (rule.source_type === 'HOST') {
-          const hostRes = await pool.query(`SELECT mgmt_ip FROM hosts WHERE id=$1`, [rule.source_value]);
-          if (hostRes.rows[0]?.mgmt_ip) {
-            const hostIp = String(hostRes.rows[0].mgmt_ip).split('/')[0];
-            sourceMatches = hostIp === sourceIp;
-          }
-        } else if (rule.source_type === 'TAG') {
-          const hostsRes = await pool.query(
-            `SELECT DISTINCT h.mgmt_ip FROM hosts h
-             JOIN host_tags ht ON ht.host_id = h.id
-             WHERE ht.tag_id = $1 AND h.mgmt_ip IS NOT NULL`,
-            [rule.source_value]
-          );
-          for (const host of hostsRes.rows) {
-            const hostIp = String(host.mgmt_ip).split('/')[0];
-            if (hostIp === sourceIp) {
-              sourceMatches = true;
-              break;
-            }
-          }
-        } else if (rule.source_type === 'VLAN') {
-          const hostsRes = await pool.query(
-            `SELECT mgmt_ip FROM hosts WHERE vlan_id = $1 AND mgmt_ip IS NOT NULL`,
-            [rule.source_value]
-          );
-          for (const host of hostsRes.rows) {
-            const hostIp = String(host.mgmt_ip).split('/')[0];
-            if (hostIp === sourceIp) {
-              sourceMatches = true;
-              break;
-            }
-          }
-        }
-
-        if (sourceMatches) {
-          // Check protocol match
-          const protocolMatch = rule.protocol === 'any' || rule.protocol === protocol;
-          
-          // Check port match (for TCP/UDP)
-          const portMatch = (protocol === 'tcp' || protocol === 'udp') 
-            ? portMatches(destPort, rule.ports) 
-            : true;
-
-          if (protocolMatch && portMatch) {
-            const ruleInfo = {
-              rule: {
-                id: rule.id,
-                orderIndex: rule.order_index,
-                action: rule.action,
-                protocol: rule.protocol,
-                ports: rule.ports,
-                sourceType: rule.source_type,
-                sourceValue: rule.source_value,
-                direction: rule.direction,
-                comment: rule.comment
-              },
-              policyVersion: {
-                id: policy.policy_version_id,
-                versionNumber: policy.version_number,
-                status: policy.version_status,
-                policySetName: policy.policy_set_name
-              },
-              host: {
-                id: destHost.id,
-                hostname: destHost.hostname,
-                mgmtIp: destHost.mgmt_ip
-              },
-              appliesTo: 'destination',
-              direction: 'IN'
-            };
-
-            if (rule.action === 'DENY') {
-              blockingRules.push(ruleInfo);
-            } else {
-              allowingRules.push(ruleInfo);
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // Determine final result: blocked if any DENY rule comes before ALLOW rules
-  // Sort by order index to determine precedence
-  const allRules = [...blockingRules, ...allowingRules].sort((a, b) => {
-    // If rules are on different hosts, check both
-    if (a.host.id !== b.host.id) {
-      // Source host rules (OUT) are checked first, then destination (IN)
-      if (a.appliesTo === 'source' && b.appliesTo === 'destination') return -1;
-      if (a.appliesTo === 'destination' && b.appliesTo === 'source') return 1;
-    }
-    return a.rule.orderIndex - b.rule.orderIndex;
+  const ruleInfoOf = (rule: SimRule, policy: any, host: any, appliesTo: 'source' | 'destination') => ({
+    rule: {
+      id: rule.id,
+      orderIndex: rule.order_index,
+      action: rule.action,
+      protocol: rule.protocol,
+      ports: rule.ports,
+      sourceType: rule.source_type,
+      sourceValue: rule.source_value,
+      direction: rule.direction,
+      comment: rule.comment
+    },
+    policyVersion: {
+      id: policy.policy_version_id,
+      versionNumber: policy.version_number,
+      status: policy.version_status,
+      policySetName: policy.policy_set_name
+    },
+    host: { id: host.id, hostname: host.hostname, mgmtIp: host.mgmt_ip },
+    appliesTo,
+    direction: appliesTo === 'source' ? 'OUT' : 'IN'
   });
 
-  let wouldBlock = false;
-  let blockingRule: any = null;
-  
-  // Check if any DENY rule comes before an ALLOW rule
-  for (const ruleInfo of allRules) {
-    if (ruleInfo.rule.action === 'DENY') {
-      wouldBlock = true;
-      blockingRule = ruleInfo;
-      break; // First DENY rule blocks
-    } else if (ruleInfo.rule.action === 'ALLOW') {
-      // If we find an ALLOW before any DENY, communication is allowed
-      // But we need to check if there's a DENY later that would override
-      // For simplicity, we'll say if there's any DENY rule, it blocks
-      // (In reality, firewall rules are evaluated in order)
+  const blockingRules: any[] = [];
+  const allowingRules: any[] = [];
+  const allRules: any[] = [];
+
+  type SideResult = {
+    managed: boolean;
+    decision: 'ALLOW' | 'DENY';
+    decidedBy: 'rule' | 'baseline' | 'default_policy' | 'no_policy';
+    defaultAction: 'ACCEPT' | 'DROP' | null;
+    matchedRule: any | null;
+    policyVersion: any | null;
+  };
+
+  // Outbound on the source host (default ACCEPT).
+  let sourceSide: SideResult = { managed: false, decision: 'ALLOW', decidedBy: 'no_policy', defaultAction: null, matchedRule: null, policyVersion: null };
+  if (sourceHost) {
+    const eff = await effectivePolicyForHost(sourceHost.id);
+    if (eff) {
+      sourceSide = { managed: true, decision: 'ALLOW', decidedBy: 'default_policy', defaultAction: 'ACCEPT', matchedRule: null, policyVersion: eff.policy };
+      for (const rule of eff.rules) {
+        if (rule.direction !== 'OUT' && rule.direction !== 'BOTH') continue;
+        if (!(await ruleMatches(rule, destIp))) continue;
+        const info = ruleInfoOf(rule, eff.policy, sourceHost, 'source');
+        allRules.push(info);
+        (rule.action === 'DENY' ? blockingRules : allowingRules).push(info);
+        if (!sourceSide.matchedRule) {
+          sourceSide = { ...sourceSide, decision: rule.action, decidedBy: 'rule', matchedRule: info };
+        }
+      }
     }
   }
 
-  // If no rules match, default is typically DENY (default policy)
-  if (allRules.length === 0) {
-    wouldBlock = true; // Default deny policy
+  // Inbound on the destination host (baseline first, default DROP).
+  let destSide: SideResult = { managed: false, decision: 'ALLOW', decidedBy: 'no_policy', defaultAction: null, matchedRule: null, policyVersion: null };
+  if (destHost) {
+    const eff = await effectivePolicyForHost(destHost.id);
+    if (eff) {
+      destSide = { managed: true, decision: 'DENY', decidedBy: 'default_policy', defaultAction: 'DROP', matchedRule: null, policyVersion: eff.policy };
+      const sshPort = Number(destHost.ssh_port) || 22;
+      const mgmt = await managementCidrs();
+      const baselineSsh =
+        protocol === 'tcp' && destPort === sshPort && (mgmt.length === 0 || mgmt.some((c) => cidrContains(c, sourceIp)));
+      if (baselineSsh) {
+        destSide = { ...destSide, decision: 'ALLOW', decidedBy: 'baseline' };
+        notes.push(`Management SSH baseline (tcp/${sshPort}) accepts this traffic before any policy rule`);
+      }
+      for (const rule of eff.rules) {
+        if (rule.direction !== 'IN' && rule.direction !== 'BOTH') continue;
+        if (!(await ruleMatches(rule, sourceIp))) continue;
+        const info = ruleInfoOf(rule, eff.policy, destHost, 'destination');
+        allRules.push(info);
+        (rule.action === 'DENY' ? blockingRules : allowingRules).push(info);
+        if (destSide.decidedBy !== 'baseline' && !destSide.matchedRule) {
+          destSide = { ...destSide, decision: rule.action, decidedBy: 'rule', matchedRule: info };
+        }
+      }
+    }
   }
+
+  const wouldBlock = sourceSide.decision === 'DENY' || destSide.decision === 'DENY';
+  let blockingRule: any = null;
+  let reason: string;
+  if (!sourceSide.managed && !destSide.managed) {
+    reason = 'allowed (no policy)';
+  } else if (sourceSide.decision === 'DENY') {
+    blockingRule = sourceSide.matchedRule;
+    reason = `blocked outbound on ${sourceHost.hostname} by rule #${sourceSide.matchedRule?.rule.orderIndex}`;
+  } else if (destSide.decision === 'DENY') {
+    blockingRule = destSide.matchedRule;
+    reason = destSide.decidedBy === 'rule'
+      ? `blocked inbound on ${destHost.hostname} by rule #${destSide.matchedRule?.rule.orderIndex}`
+      : `blocked inbound on ${destHost.hostname} by the default DROP policy (no rule matched)`;
+  } else {
+    reason = 'allowed';
+  }
+  if (sourceHost || destHost) notes.push('Interface scopes are not considered by the simulator');
 
   res.json({
     sourceIp,
@@ -619,57 +479,48 @@ troubleshootRouter.post('/simulate-communication', requireRole('operator', 'admi
     destIp,
     destPort,
     protocol,
-    sourceHost: sourceHost ? {
-      id: sourceHost.id,
-      hostname: sourceHost.hostname,
-      mgmtIp: sourceHost.mgmt_ip
-    } : null,
-    destHost: destHost ? {
-      id: destHost.id,
-      hostname: destHost.hostname,
-      mgmtIp: destHost.mgmt_ip
-    } : null,
+    sourceHost: sourceHost ? { id: sourceHost.id, hostname: sourceHost.hostname, mgmtIp: sourceHost.mgmt_ip } : null,
+    destHost: destHost ? { id: destHost.id, hostname: destHost.hostname, mgmtIp: destHost.mgmt_ip } : null,
     wouldBlock,
+    verdict: wouldBlock ? 'blocked' : 'allowed',
+    reason,
     blockingRule,
+    source: sourceSide,
+    destination: destSide,
     blockingRules,
     allowingRules,
-    allRules
+    allRules,
+    notes: Array.from(new Set(notes))
   });
 });
 
 // Firewall Audit Endpoints
 
 const startAuditSchema = z.object({
-  hosts: z.array(z.string().uuid()),
+  hosts: z.array(z.string().uuid()).min(1),
   durationMinutes: z.number().int().min(1).max(1440) // Max 24 hours
 });
 
-// Start audit session(s)
+type AuditStartResult = {
+  hostId: string;
+  hostname: string | null;
+  status: 'RUNNING' | 'FAILED' | 'RESTORE_PENDING';
+  sessionId: string | null;
+  error?: string;
+};
+
+// Start audit session(s). Every host is processed independently; the response lists the
+// outcome per host (HTTP 201 if all started, 207 if any failed).
 troubleshootRouter.post('/audit/start', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = startAuditSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: 'invalid_body', message: parsed.error.message });
   }
   const { hosts: hostIds, durationMinutes } = parsed.data;
+  const userId = req.auth!.userId ?? null;
 
-  // Get user ID
-  const userRes = await pool.query(`SELECT id FROM users WHERE username=$1 LIMIT 1`, [req.auth!.username]);
-  const userId = userRes.rows[0]?.id || null;
-
-  // Get SSH credentials
-  const credRes = await pool.query(
-    `SELECT * FROM ssh_credentials WHERE scope_type='GLOBAL' ORDER BY created_at DESC LIMIT 1`
-  );
-  const cred = credRes.rows[0];
-  if (!cred) {
-    return res.status(400).json({ error: 'missing_ssh_credential', message: 'SSH credentials are required' });
-  }
-
-  const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
-
-  // Get hosts
   const hostRes = await pool.query(
-    `SELECT h.*, 
+    `SELECT h.*,
             (SELECT array_agg(json_build_object('name', hi.name, 'role', hi.role, 'enabled', hi.enabled))
              FROM host_interfaces hi WHERE hi.host_id = h.id) as interfaces
      FROM hosts h
@@ -677,31 +528,35 @@ troubleshootRouter.post('/audit/start', requireRole('operator', 'admin'), async 
     [hostIds]
   );
 
-  if (hostRes.rows.length === 0) {
-    return res.status(400).json({ error: 'no_hosts_found', message: 'No enabled hosts found' });
+  const results: AuditStartResult[] = [];
+  const found = new Set(hostRes.rows.map((h: any) => h.id));
+  for (const id of new Set(hostIds)) {
+    if (!found.has(id)) results.push({ hostId: id, hostname: null, status: 'FAILED', sessionId: null, error: 'host not found or disabled' });
   }
 
-  const sessions = [];
-  const scheduledRestoreAt = new Date(Date.now() + durationMinutes * 60 * 1000);
-
-  // Get management VLAN CIDRs for baseline
-  const mgmtVlanRes = await pool.query(
-    `SELECT value FROM system_settings WHERE key='management_vlan_id'`
+  const busy = await pool.query(
+    `SELECT DISTINCT host_id FROM firewall_audit_sessions WHERE host_id = ANY($1::uuid[]) AND status IN ('PENDING','RUNNING')`,
+    [hostIds]
   );
-  const mgmtVlanId = mgmtVlanRes.rows[0]?.value || null;
-  const mgmtSshCidrs: string[] = [];
-  if (mgmtVlanId) {
-    const vlanRes = await pool.query(`SELECT subnet FROM vlans WHERE id=$1`, [mgmtVlanId]);
-    if (vlanRes.rows[0]?.subnet) {
-      mgmtSshCidrs.push(vlanRes.rows[0].subnet);
-    }
-  }
+  const busyHosts = new Set(busy.rows.map((r: any) => r.host_id));
+
+  const sessions: any[] = [];
+  const scheduledRestoreAt = new Date(Date.now() + durationMinutes * 60 * 1000);
+  const mgmtSshCidrs = await managementCidrs();
 
   for (const host of hostRes.rows) {
-    const tempKeyPath = path.join(os.tmpdir(), `audit_key_${host.id}_${Date.now()}`);
+    if (busyHosts.has(host.id)) {
+      results.push({ hostId: host.id, hostname: host.hostname, status: 'FAILED', sessionId: null, error: 'an audit session is already active for this host' });
+      continue;
+    }
+    if (!host.mgmt_ip) {
+      results.push({ hostId: host.id, hostname: host.hostname, status: 'FAILED', sessionId: null, error: 'host has no management IP' });
+      continue;
+    }
+
     const logFilePath = `/var/log/segmentra-audit-${host.hostname}-${Date.now()}.log`;
 
-    // Create DB record FIRST so the scheduler can restore on failure
+    // Create DB record FIRST so the scheduler can restore if we crash mid-way
     const sessionRes = await pool.query(
       `INSERT INTO firewall_audit_sessions
        (host_id, status, duration_minutes, started_at, scheduled_restore_at, backup_path, log_file_path, created_by)
@@ -710,44 +565,33 @@ troubleshootRouter.post('/audit/start', requireRole('operator', 'admin'), async 
       [host.id, durationMinutes, scheduledRestoreAt, logFilePath, userId]
     );
     const sessionId = sessionRes.rows[0].id;
+    let cred: MaterializedSshCredential | null = null;
+    let backupPath: string | null = null;
+    let policyFilePath: string | null = null;
 
     try {
-      fs.writeFileSync(tempKeyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
-
-      const auditHost: AuditSshHost = {
-        hostname: host.hostname,
-        ip: String(host.mgmt_ip),
-        port: host.ssh_port || 22,
-        username: cred.username,
-        privateKeyPath: tempKeyPath,
-        backend: host.firewall_backend === 'iptables' ? 'iptables' : 'nftables'
-      };
+      cred = await getSshCredentialForHost(host.id);
+      const auditHost = buildAuditHost(host, cred);
 
       // Start audit session (backup rules, configure logging)
       const startResult = await startAuditSession(auditHost, logFilePath);
-
-      if (!startResult.success) {
-        throw new Error(`Failed to start audit: ${startResult.stderr}`);
+      if (startResult.backupPath) {
+        backupPath = startResult.backupPath;
+        await pool.query(`UPDATE firewall_audit_sessions SET backup_path = $2 WHERE id = $1`, [sessionId, backupPath]);
       }
-
-      // Update session with backup path
-      await pool.query(
-        `UPDATE firewall_audit_sessions SET backup_path = $2 WHERE id = $1`,
-        [sessionId, startResult.backupPath]
-      );
+      if (!startResult.success) {
+        throw new Error(`Failed to start audit: ${(startResult.stderr || '').trim()}`);
+      }
 
       // Compile log-only policy
       const compiled = compileHostPolicy({
         host: {
           id: host.id,
           hostname: host.hostname,
-          mgmtIp: host.mgmt_ip ? String(host.mgmt_ip) : null,
+          mgmtIp: String(host.mgmt_ip),
           firewallBackend: auditHost.backend,
-          interfaces: (host.interfaces || []).map((i: any) => ({
-            name: i.name,
-            role: i.role,
-            enabled: i.enabled
-          }))
+          interfaces: (host.interfaces || []).map((i: any) => ({ name: i.name, role: i.role, enabled: i.enabled })),
+          sshPort: Number(host.ssh_port) || 22
         },
         policyInterfaceScope: { type: 'ALL_INTERFACES' as const },
         rules: [],
@@ -756,70 +600,63 @@ troubleshootRouter.post('/audit/start', requireRole('operator', 'admin'), async 
         logOnlyMode: true
       });
 
-      // Deploy log-only policy
-      const policyFilePath = path.join(os.tmpdir(), `audit_policy_${host.id}_${Date.now()}.${compiled.backend === 'nftables' ? 'nft' : 'iptables'}`);
+      policyFilePath = path.join(os.tmpdir(), `audit_policy_${host.id}_${Date.now()}.${compiled.backend === 'nftables' ? 'nft' : 'iptables'}`);
       const deployResult = await deployLogOnlyPolicy(auditHost, compiled.text, policyFilePath);
-
       if (!deployResult.success) {
-        throw new Error(`Failed to deploy log-only policy: ${deployResult.stderr}`);
+        throw new Error(`Failed to deploy log-only policy: ${(deployResult.stderr || '').trim()}`);
       }
 
-      // Success — mark session as RUNNING
-      await pool.query(
-        `UPDATE firewall_audit_sessions SET status = 'RUNNING' WHERE id = $1`,
-        [sessionId]
-      );
-
-      sessions.push({ ...sessionRes.rows[0], status: 'RUNNING', backup_path: startResult.backupPath });
-
-      // Clean up temp files
-      if (fs.existsSync(tempKeyPath)) fs.unlinkSync(tempKeyPath);
-      if (fs.existsSync(policyFilePath)) fs.unlinkSync(policyFilePath);
-
+      await pool.query(`UPDATE firewall_audit_sessions SET status = 'RUNNING' WHERE id = $1`, [sessionId]);
+      sessions.push({ ...sessionRes.rows[0], status: 'RUNNING', backup_path: backupPath });
+      results.push({ hostId: host.id, hostname: host.hostname, status: 'RUNNING', sessionId });
     } catch (error: any) {
-      // On failure, try to restore the host if we have a backup
-      try {
-        if (fs.existsSync(tempKeyPath)) {
-          const backupRes = await pool.query(`SELECT backup_path FROM firewall_audit_sessions WHERE id = $1`, [sessionId]);
-          const backupPath = backupRes.rows[0]?.backup_path;
-          if (backupPath) {
-            const auditHost: AuditSshHost = {
-              hostname: host.hostname,
-              ip: String(host.mgmt_ip),
-              port: host.ssh_port || 22,
-              username: cred.username,
-              privateKeyPath: tempKeyPath,
-              backend: (host.firewall_backend === 'iptables' ? 'iptables' : 'nftables') as 'nftables' | 'iptables'
-            };
-            await restoreAuditSession(auditHost, backupPath);
-            // eslint-disable-next-line no-console
-            console.log(`[Audit] Restored ${host.hostname} after failure`);
-          }
+      const message = error?.message ?? String(error);
+      if (backupPath) {
+        // The host may already be modified: hand the session to the restore path. If the
+        // immediate restore fails, the session stays RUNNING and the scheduler retries.
+        await pool.query(`UPDATE firewall_audit_sessions SET status = 'RUNNING', scheduled_restore_at = now() WHERE id = $1`, [sessionId]);
+        const outcome = await restoreAuditSessionById(sessionId, { finalStatus: 'CANCELLED', collectLogs: false });
+        if (outcome?.success) {
+          await pool.query(
+            `UPDATE firewall_audit_sessions
+                SET status = 'FAILED', log_data = COALESCE(log_data, '{}'::jsonb) || jsonb_build_object('error', $2::text)
+              WHERE id = $1`,
+            [sessionId, message]
+          );
+          results.push({ hostId: host.id, hostname: host.hostname, status: 'FAILED', sessionId, error: `${message} (original rules restored)` });
+        } else {
+          results.push({
+            hostId: host.id,
+            hostname: host.hostname,
+            status: 'RESTORE_PENDING',
+            sessionId,
+            error: `${message}; immediate restore failed (${outcome && !outcome.success ? outcome.error : 'session busy'}) — the scheduler will keep retrying`
+          });
         }
-      } catch (restoreErr: any) {
-        // eslint-disable-next-line no-console
-        console.error(`[Audit] Failed to restore ${host.hostname}:`, restoreErr.message);
+      } else {
+        // Nothing was changed on the host.
+        await pool.query(
+          `UPDATE firewall_audit_sessions
+              SET status = 'FAILED', log_data = COALESCE(log_data, '{}'::jsonb) || jsonb_build_object('error', $2::text)
+            WHERE id = $1`,
+          [sessionId, message]
+        );
+        results.push({ hostId: host.id, hostname: host.hostname, status: 'FAILED', sessionId, error: message });
       }
-
-      // Mark session as FAILED in DB
-      await pool.query(
-        `UPDATE firewall_audit_sessions SET status = 'FAILED' WHERE id = $1`,
-        [sessionId]
-      );
-
-      // Clean up temp key
-      if (fs.existsSync(tempKeyPath)) {
-        try { fs.unlinkSync(tempKeyPath); } catch {}
+    } finally {
+      cred?.cleanup();
+      if (policyFilePath) {
+        try { if (fs.existsSync(policyFilePath)) fs.unlinkSync(policyFilePath); } catch { /* ignore */ }
       }
-
-      return res.status(500).json({
-        error: 'audit_start_failed',
-        message: `Failed to start audit for ${host.hostname}: ${error.message}. Host has been restored.`
-      });
     }
   }
 
-  res.status(201).json({ sessions });
+  const failed = results.filter((r) => r.status !== 'RUNNING').length;
+  res.status(failed === 0 ? 201 : 207).json({
+    sessions,
+    results,
+    summary: { requested: new Set(hostIds).size, started: results.length - failed, failed }
+  });
 });
 
 // List all audit sessions
@@ -851,83 +688,19 @@ troubleshootRouter.get('/audit/sessions/:id', async (req, res) => {
 
 // Manually trigger restore
 troubleshootRouter.post('/audit/sessions/:id/restore', requireRole('operator', 'admin'), async (req, res) => {
-  const sessionRes = await pool.query(
-    `SELECT fas.*, h.hostname, h.mgmt_ip, h.ssh_port, h.firewall_backend
-     FROM firewall_audit_sessions fas
-     JOIN hosts h ON h.id = fas.host_id
-     WHERE fas.id = $1 AND fas.status = 'RUNNING'`,
-    [req.params.id]
-  );
-
-  if (!sessionRes.rows[0]) {
+  const outcome = await restoreAuditSessionById(req.params.id, { finalStatus: 'COMPLETED', collectLogs: true });
+  if (!outcome) {
     return res.status(404).json({ error: 'not_found', message: 'Session not found or not running' });
   }
-
-  const session = sessionRes.rows[0];
-
-  // Get SSH credentials
-  const credRes = await pool.query(
-    `SELECT * FROM ssh_credentials WHERE scope_type='GLOBAL' ORDER BY created_at DESC LIMIT 1`
-  );
-  const cred = credRes.rows[0];
-  if (!cred) {
-    return res.status(400).json({ error: 'missing_ssh_credential' });
+  if (!outcome.success) {
+    return res.status(502).json({
+      error: 'restore_failed',
+      message: `${outcome.error}. The session remains RUNNING and will be retried automatically.`,
+      attempts: outcome.attempts,
+      nextAttemptAt: outcome.nextAttemptAt
+    });
   }
-
-  const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
-  const tempKeyPath = path.join(os.tmpdir(), `audit_restore_${session.id}_${Date.now()}`);
-
-  try {
-    fs.writeFileSync(tempKeyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
-
-    const auditHost: AuditSshHost = {
-      hostname: session.hostname,
-      ip: String(session.mgmt_ip),
-      port: session.ssh_port || 22,
-      username: cred.username,
-      privateKeyPath: tempKeyPath,
-      backend: session.firewall_backend === 'iptables' ? 'iptables' : 'nftables'
-    };
-
-    // Restore original rules
-    const restoreResult = await restoreAuditSession(auditHost, session.backup_path);
-
-    if (!restoreResult.success) {
-      throw new Error(`Restore failed: ${restoreResult.stderr}`);
-    }
-
-    // Retrieve and parse logs
-    let logContent = '';
-    if (session.log_file_path) {
-      const localLogPath = path.join(os.tmpdir(), `audit_log_${session.id}_${Date.now()}.log`);
-      const retrieveResult = await retrieveAuditLogs(auditHost, session.log_file_path, localLogPath);
-      
-      if (retrieveResult.success && fs.existsSync(localLogPath)) {
-        logContent = fs.readFileSync(localLogPath, 'utf8');
-        fs.unlinkSync(localLogPath);
-      }
-    }
-
-    const parsedEntries = parseFirewallLogs(logContent);
-    const flows = groupCommunicationFlows(parsedEntries);
-
-    // Update session
-    await pool.query(
-      `UPDATE firewall_audit_sessions 
-       SET status = 'COMPLETED', restored_at = now(), log_data = $1
-       WHERE id = $2`,
-      [JSON.stringify({ entries: parsedEntries, flows }), session.id]
-    );
-
-    res.json({ success: true, flows, entryCount: parsedEntries.length });
-
-  } catch (error: any) {
-    res.status(500).json({ error: 'restore_failed', message: error.message });
-  } finally {
-    if (fs.existsSync(tempKeyPath)) {
-      try { fs.unlinkSync(tempKeyPath); } catch {}
-    }
-  }
+  res.json({ success: true, flows: outcome.flows, entryCount: outcome.entryCount });
 });
 
 // Get parsed log data
@@ -944,61 +717,17 @@ troubleshootRouter.get('/audit/sessions/:id/logs', async (req, res) => {
 
 // Cancel running session
 troubleshootRouter.post('/audit/sessions/:id/cancel', requireRole('operator', 'admin'), async (req, res) => {
-  const sessionRes = await pool.query(
-    `SELECT fas.*, h.hostname, h.mgmt_ip, h.ssh_port, h.firewall_backend
-     FROM firewall_audit_sessions fas
-     JOIN hosts h ON h.id = fas.host_id
-     WHERE fas.id = $1 AND fas.status = 'RUNNING'`,
-    [req.params.id]
-  );
-
-  if (!sessionRes.rows[0]) {
+  const outcome = await restoreAuditSessionById(req.params.id, { finalStatus: 'CANCELLED', collectLogs: false });
+  if (!outcome) {
     return res.status(404).json({ error: 'not_found', message: 'Session not found or not running' });
   }
-
-  const session = sessionRes.rows[0];
-
-  // Get SSH credentials
-  const credRes = await pool.query(
-    `SELECT * FROM ssh_credentials WHERE scope_type='GLOBAL' ORDER BY created_at DESC LIMIT 1`
-  );
-  const cred = credRes.rows[0];
-  if (!cred) {
-    return res.status(400).json({ error: 'missing_ssh_credential' });
+  if (!outcome.success) {
+    return res.status(502).json({
+      error: 'cancel_failed',
+      message: `Could not restore the original firewall rules: ${outcome.error}. The session remains RUNNING and the restore will be retried automatically.`,
+      attempts: outcome.attempts,
+      nextAttemptAt: outcome.nextAttemptAt
+    });
   }
-
-  const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
-  const tempKeyPath = path.join(os.tmpdir(), `audit_cancel_${session.id}_${Date.now()}`);
-
-  try {
-    fs.writeFileSync(tempKeyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
-
-    const auditHost: AuditSshHost = {
-      hostname: session.hostname,
-      ip: String(session.mgmt_ip),
-      port: session.ssh_port || 22,
-      username: cred.username,
-      privateKeyPath: tempKeyPath,
-      backend: session.firewall_backend === 'iptables' ? 'iptables' : 'nftables'
-    };
-
-    // Restore original rules
-    await restoreAuditSession(auditHost, session.backup_path);
-
-    // Update session status
-    await pool.query(
-      `UPDATE firewall_audit_sessions SET status = 'CANCELLED' WHERE id = $1`,
-      [session.id]
-    );
-
-    res.json({ success: true });
-
-  } catch (error: any) {
-    res.status(500).json({ error: 'cancel_failed', message: error.message });
-  } finally {
-    if (fs.existsSync(tempKeyPath)) {
-      try { fs.unlinkSync(tempKeyPath); } catch {}
-    }
-  }
+  res.json({ success: true });
 });
-

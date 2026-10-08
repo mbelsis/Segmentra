@@ -1,5 +1,20 @@
 import { useState, useEffect } from 'react';
-import { api } from '../lib/api';
+import { api, errorMessage } from '../lib/api';
+
+/** Parse a JSON object from a textarea. Returns an error message instead of silently falling back to {}. */
+function parseConfigJson(text: string): { ok: true; value: Record<string, unknown> } | { ok: false; error: string } {
+  if (!text.trim()) return { ok: false, error: 'Configuration JSON is required (use {} if none is needed).' };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e: any) {
+    return { ok: false, error: `Configuration is not valid JSON: ${e?.message ?? e}` };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, error: 'Configuration must be a JSON object, e.g. {"key": "value"}.' };
+  }
+  return { ok: true, value: parsed as Record<string, unknown> };
+}
 
 const INTEGRATION_TYPES = [
   { value: 'siem', label: 'SIEM (Syslog Forwarder)', active: true, hint: 'Config: {"host": "siem.company.com", "port": 514, "protocol": "udp", "facility": 13, "severity": 6}' },
@@ -18,6 +33,7 @@ export function IntegrationsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [tab, setTab] = useState<'list' | 'threat'>('list');
   const [form, setForm] = useState({ type: 'siem', provider: '', name: '', description: '', enabled: false, config: '{}' });
+  const [configError, setConfigError] = useState('');
 
   const load = async () => {
     setLoading(true);
@@ -48,13 +64,14 @@ export function IntegrationsPage() {
 
   const createIntegration = async () => {
     try {
-      let config = {};
-      try { config = JSON.parse(form.config); } catch { /* keep empty */ }
-      await api.integrations.create({ type: form.type, provider: form.provider, name: form.name, description: form.description || undefined, enabled: form.enabled, config });
+      const parsed = parseConfigJson(form.config);
+      if (!parsed.ok) { setConfigError(parsed.error); return; }
+      setConfigError('');
+      await api.integrations.create({ type: form.type, provider: form.provider, name: form.name, description: form.description || undefined, enabled: form.enabled, config: parsed.value });
       setShowCreate(false);
       setForm({ type: 'siem', provider: '', name: '', description: '', enabled: false, config: '{}' });
       load();
-    } catch (e: any) { setError(e.message); }
+    } catch (e: any) { setError(errorMessage(e)); }
   };
 
   const testIntegration = async (id: string) => {
@@ -142,10 +159,11 @@ export function IntegrationsPage() {
               <textarea
                 placeholder={INTEGRATION_TYPES.find(t => t.value === form.type)?.hint || '{"key": "value"}'}
                 value={form.config}
-                onChange={e => setForm(f => ({ ...f, config: e.target.value }))}
+                onChange={e => { setConfigError(''); setForm(f => ({ ...f, config: e.target.value })); }}
                 rows={4}
                 style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '13px' }}
               />
+              {configError && <div style={{ color: '#a63d2f', fontSize: '12.5px', marginTop: 4 }}>{configError}</div>}
               {form.type === 'siem' && (
                 <small>Forward all audit events as RFC 5424 syslog messages. Protocol: udp (default) or tcp. Facility: 13=audit (default). Severity: 6=info (default).</small>
               )}

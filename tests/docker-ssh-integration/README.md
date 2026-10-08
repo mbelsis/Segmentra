@@ -24,6 +24,6 @@ What it verifies:
 
 Notes:
 - The script recreates the integration project from scratch on each run unless `--keep` is passed.
-- The entry script lives at [run-docker-ssh-integration.mjs](/C:/Users/mbelsis/Documents/GitHub/Segmentra/tests/run-docker-ssh-integration.mjs).
-- It uses the isolated stack defined in [docker-compose.yml](/C:/Users/mbelsis/Documents/GitHub/Segmentra/tests/docker-ssh-integration/docker-compose.yml).
+- The entry script lives at [run-docker-ssh-integration.mjs](../run-docker-ssh-integration.mjs).
+- It uses the isolated stack defined in [docker-compose.yml](docker-compose.yml).
 - The password-auth path is intended for this SSH-direct Dockerized integration flow. The script forces the app to use the `ssh` executor.

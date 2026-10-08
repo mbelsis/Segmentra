@@ -1,6 +1,80 @@
-import { getToken } from './auth';
+import { clearToken, getToken } from './auth';
 
 const API_BASE = (import.meta as any).env?.VITE_API_URL || '/api';
+
+/**
+ * Error thrown for non-2xx API responses. `message` stays a human-readable
+ * string (so existing `e.message` usages keep working) while the structured
+ * response is available via `status`, `code`, `details` and `body`.
+ */
+export class ApiError extends Error {
+  status: number;
+  code: string | undefined;
+  details: any;
+  body: any;
+
+  constructor(message: string, status: number, body: any) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.body = body;
+    this.code = body && typeof body === 'object' ? body.error : undefined;
+    this.details = body && typeof body === 'object' ? body.details : undefined;
+  }
+}
+
+export function isApiError(e: unknown): e is ApiError {
+  return e instanceof ApiError;
+}
+
+/** Format zod-style `details` (array of issues) into a readable string, if present. */
+export function formatErrorDetails(e: unknown): string | null {
+  if (!isApiError(e) || !e.details) return null;
+  const d = e.details;
+  if (Array.isArray(d)) {
+    const parts = d.map((issue: any) => {
+      if (issue && typeof issue === 'object') {
+        const path = Array.isArray(issue.path) && issue.path.length ? `${issue.path.join('.')}: ` : '';
+        return `${path}${issue.message ?? JSON.stringify(issue)}`;
+      }
+      return String(issue);
+    });
+    return parts.join('; ');
+  }
+  if (typeof d === 'object') {
+    // zod flatten() shape: { formErrors: [], fieldErrors: { field: [msg] } }
+    if (d.fieldErrors || d.formErrors) {
+      const parts: string[] = [...(d.formErrors ?? [])];
+      for (const [k, v] of Object.entries(d.fieldErrors ?? {})) {
+        parts.push(`${k}: ${(v as string[]).join(', ')}`);
+      }
+      return parts.join('; ') || null;
+    }
+    return JSON.stringify(d);
+  }
+  return String(d);
+}
+
+/** Human-readable message including validation details when available. */
+export function errorMessage(e: unknown): string {
+  const base = String((e as any)?.message ?? e);
+  const details = formatErrorDetails(e);
+  return details ? `${base} (${details})` : base;
+}
+
+let redirectingToLogin = false;
+
+function handleUnauthorized(path: string) {
+  // Login failures are 401s too; let the login page show the error.
+  if (path.startsWith('/auth/login')) return;
+  clearToken();
+  if (redirectingToLogin) return;
+  if (typeof window === 'undefined') return;
+  if (window.location.pathname.startsWith('/login')) return;
+  redirectingToLogin = true;
+  const next = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  window.location.assign(`/login?next=${encodeURIComponent(next)}`);
+}
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = getToken();
@@ -11,24 +85,65 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const resp = await fetch(`${API_BASE}${path}`, { ...init, headers });
   if (!resp.ok) {
     let errorMessage = `${resp.status} ${resp.statusText}`;
+    let body: any = undefined;
     try {
       const text = await resp.text();
       try {
         const json = JSON.parse(text);
-        if (json.error) {
+        body = json;
+        if (json && json.error) {
           errorMessage = json.message || json.error;
-        } else if (json.message) {
+        } else if (json && json.message) {
           errorMessage = json.message;
         }
       } catch {
+        body = text || undefined;
         if (text) errorMessage = `${errorMessage}: ${text}`;
       }
     } catch {
       // Could not read response body
     }
-    throw new Error(errorMessage);
+    // Only treat auth-middleware failures as session expiry (not e.g. a wrong
+    // current password on change-password, which is also a 401).
+    const code = body && typeof body === 'object' ? body.error : undefined;
+    if (resp.status === 401 && token && code !== 'invalid_current_password' && code !== 'invalid_credentials') {
+      handleUnauthorized(path);
+    }
+    throw new ApiError(errorMessage, resp.status, body);
   }
+  if (resp.status === 204) return undefined as T;
   return (await resp.json()) as T;
+}
+
+type HostListParams = { hostname?: string; ip?: string; tag?: string; vlan?: string; enabled?: boolean; page?: number; limit?: number };
+
+function fetchHosts(params?: HostListParams) {
+  const query = new URLSearchParams();
+  if (params?.hostname) query.append('hostname', params.hostname);
+  if (params?.ip) query.append('ip', params.ip);
+  if (params?.tag) query.append('tag', params.tag);
+  if (params?.vlan) query.append('vlan', params.vlan);
+  if (params?.enabled !== undefined) query.append('enabled', String(params.enabled));
+  if (params?.page) query.append('page', String(params.page));
+  if (params?.limit) query.append('limit', String(params.limit));
+  const queryString = query.toString();
+  return request<{ hosts: any[]; pagination: { page: number; limit: number; total: number; totalPages: number } }>(`/hosts${queryString ? `?${queryString}` : ''}`);
+}
+
+/** Fetch every host matching the filters by paging through the hosts endpoint. */
+async function fetchAllHosts(params?: Omit<HostListParams, 'page' | 'limit'>): Promise<{ hosts: any[] }> {
+  const limit = 100;
+  const all: any[] = [];
+  let page = 1;
+  // Hard stop to avoid infinite loops if the server misbehaves.
+  for (let i = 0; i < 1000; i++) {
+    const res = await fetchHosts({ ...params, page, limit });
+    all.push(...(res.hosts ?? []));
+    const totalPages = res.pagination?.totalPages ?? 1;
+    if (page >= totalPages || (res.hosts ?? []).length === 0) break;
+    page++;
+  }
+  return { hosts: all };
 }
 
 export const api = {
@@ -38,18 +153,9 @@ export const api = {
   changePassword: (currentPassword: string, newPassword: string) =>
     request<{ ok: boolean }>('/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
 
-  hosts: (params?: { hostname?: string; ip?: string; tag?: string; vlan?: string; enabled?: boolean; page?: number; limit?: number }) => {
-    const query = new URLSearchParams();
-    if (params?.hostname) query.append('hostname', params.hostname);
-    if (params?.ip) query.append('ip', params.ip);
-    if (params?.tag) query.append('tag', params.tag);
-    if (params?.vlan) query.append('vlan', params.vlan);
-    if (params?.enabled !== undefined) query.append('enabled', String(params.enabled));
-    if (params?.page) query.append('page', String(params.page));
-    if (params?.limit) query.append('limit', String(params.limit));
-    const queryString = query.toString();
-    return request<{ hosts: any[]; pagination: { page: number; limit: number; total: number; totalPages: number } }>(`/hosts${queryString ? `?${queryString}` : ''}`);
-  },
+  hosts: (params?: HostListParams) => fetchHosts(params),
+  /** All hosts (pages through the API). Use for pickers. */
+  allHosts: (params?: Omit<HostListParams, 'page' | 'limit'>) => fetchAllHosts(params),
   createHost: (b: any) => request<{ host: any }>('/hosts', { method: 'POST', body: JSON.stringify(b) }),
   updateHost: (id: string, b: any) => request<{ host: any }>(`/hosts/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
   deleteHost: (id: string) => request<{ ok: boolean }>(`/hosts/${id}`, { method: 'DELETE' }),
@@ -71,6 +177,7 @@ export const api = {
   policySets: () => request<{ policySets: any[] }>('/policy-sets'),
   policySet: (id: string) => request<{ policySet: any }>(`/policy-sets/${id}`),
   createPolicySet: (b: any) => request<{ policySet: any }>('/policy-sets', { method: 'POST', body: JSON.stringify(b) }),
+  deletePolicySet: (id: string) => request<{ ok: boolean }>(`/policy-sets/${id}`, { method: 'DELETE' }),
   versions: (policySetId: string) => request<{ versions: any[] }>(`/policy-sets/${policySetId}/versions`),
   createVersion: (policySetId: string, b: any) =>
     request<{ version: any }>(`/policy-sets/${policySetId}/versions`, { method: 'POST', body: JSON.stringify(b) }),
@@ -135,6 +242,7 @@ export const api = {
   resumeDeployment: (deploymentId: string) => request<{ ok: boolean }>(`/deployments/${deploymentId}/resume`, { method: 'POST' }),
   stopDeployment: (deploymentId: string) => request<{ ok: boolean }>(`/deployments/${deploymentId}/stop`, { method: 'POST' }),
   cancelDeployment: (deploymentId: string) => request<{ ok: boolean }>(`/deployments/${deploymentId}/cancel`, { method: 'POST' }),
+  approveDeployment: (deploymentId: string) => request<{ deployment: any }>(`/deployments/${deploymentId}/approve`, { method: 'POST' }),
   deploymentHosts: (deploymentId: string) => request<{ hosts: any[] }>(`/deployments/${deploymentId}/hosts`),
 
   audit: (params?: { actor?: string; action?: string; entityType?: string; from?: string; to?: string }) => {
@@ -371,6 +479,8 @@ export const api = {
     list: () => request<{ tagRules: any[] }>('/tag-rules'),
     get: (id: string) => request<{ tagRule: any; matchedHosts: any[] }>(`/tag-rules/${id}`),
     create: (b: any) => request<{ tagRule: any }>('/tag-rules', { method: 'POST', body: JSON.stringify(b) }),
+    /** Dry-run: which hosts would match this rule (no writes). */
+    preview: (b: any) => request<{ hosts: Array<{ id: string; hostname: string }> }>('/tag-rules/preview', { method: 'POST', body: JSON.stringify(b) }),
     update: (id: string, b: any) => request<{ tagRule: any }>(`/tag-rules/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
     delete: (id: string) => request<{ ok: boolean }>(`/tag-rules/${id}`, { method: 'DELETE' }),
     evaluate: (id: string) => request<{ matched: number; total: number }>(`/tag-rules/${id}/evaluate`, { method: 'POST' }),
@@ -551,4 +661,5 @@ export const api = {
   },
 };
 
-
+export const previewTagRule = (b: any) => api.tagRules.preview(b);
+export const deletePolicySet = (id: string) => api.deletePolicySet(id);

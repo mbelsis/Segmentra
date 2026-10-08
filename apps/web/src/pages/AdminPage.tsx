@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-import { api } from '../lib/api';
+import { api, errorMessage } from '../lib/api';
 
 export function AdminPage() {
   const [ldap, setLdap] = useState<any>(null);
@@ -15,6 +15,8 @@ export function AdminPage() {
   const [bindPassword, setBindPassword] = useState('');
   const [useLdaps, setUseLdaps] = useState(true);
   const [ldapEnabled, setLdapEnabled] = useState(false);
+  const [userFilter, setUserFilter] = useState('(sAMAccountName={{username}})');
+  const [groupFilter, setGroupFilter] = useState('');
 
   // AD Group mapping form state
   const [adGroupDn, setAdGroupDn] = useState('');
@@ -29,6 +31,9 @@ export function AdminPage() {
 
   // Executor setting
   const [executor, setExecutor] = useState<'ansible' | 'ssh'>('ansible');
+  // null = not loaded yet / failed to load; save is disabled until the real value is known
+  const [executorLoaded, setExecutorLoaded] = useState(false);
+  const [executorError, setExecutorError] = useState<string>('');
 
   // Management VLAN setting
   const [managementVlan, setManagementVlan] = useState<any>(null);
@@ -52,7 +57,10 @@ export function AdminPage() {
       const [ldapRes, sshRes, executorRes, mgmtVlanRes, vlansRes] = await Promise.all([
         api.ldapSettings().catch(() => ({ ldapSettings: null })),
         api.sshCredentials().catch(() => ({ sshCredentials: [] })),
-        api.executorSetting().catch(() => ({ executor: 'ansible' })),
+        api.executorSetting().then(
+          (r) => ({ ok: true as const, executor: r.executor }),
+          (e: any) => ({ ok: false as const, error: String(e?.message ?? e) })
+        ),
         api.managementVlanSetting().catch(() => ({ managementVlan: null })),
         api.vlans().catch(() => ({ vlans: [] }))
       ]);
@@ -66,10 +74,19 @@ export function AdminPage() {
         setBindDn(ldapSettings.bind_dn || '');
         setUseLdaps(ldapSettings.use_ldaps !== false);
         setLdapEnabled(ldapSettings.enabled !== false);
+        setUserFilter(ldapSettings.user_filter ?? '');
+        setGroupFilter(ldapSettings.group_filter ?? '');
       }
       
       setSshCreds(sshRes.sshCredentials || []);
-      setExecutor(executorRes.executor === 'ssh' ? 'ssh' : 'ansible');
+      if (executorRes.ok) {
+        setExecutor(executorRes.executor === 'ssh' ? 'ssh' : 'ansible');
+        setExecutorLoaded(true);
+        setExecutorError('');
+      } else {
+        setExecutorLoaded(false);
+        setExecutorError(`Could not load the current executor setting: ${executorRes.error}`);
+      }
       
       setManagementVlan(mgmtVlanRes.managementVlan);
       setVlans(vlansRes.vlans || []);
@@ -128,6 +145,10 @@ export function AdminPage() {
       setError('Username, display name, and password are required');
       return;
     }
+    if (userForm.password.length < 8) {
+      setError('Password must be at least 8 characters');
+      return;
+    }
     setLoading(true); setError(''); setSuccess('');
     try {
       await api.users.create({
@@ -143,7 +164,7 @@ export function AdminPage() {
       setUserForm({ username: '', displayName: '', email: '', password: '', roles: ['viewer'], isActive: true });
       loadData();
       setTimeout(() => setSuccess(''), 3000);
-    } catch (e: any) { setError(String(e?.message ?? e)); }
+    } catch (e: any) { setError(errorMessage(e)); }
     finally { setLoading(false); }
   }
 
@@ -151,24 +172,28 @@ export function AdminPage() {
     if (!editingUser) return;
     setLoading(true); setError(''); setSuccess('');
     try {
-      await api.users.update(editingUser.id, {
+      // Only send email when it changed: '' (cleared) -> explicit null, unchanged -> omitted.
+      const newEmail = userForm.email.trim();
+      const oldEmail = (editingUser.email ?? '').trim();
+      const body: any = {
         displayName: userForm.displayName.trim() || undefined,
-        email: userForm.email.trim() || undefined,
         roles: userForm.roles,
         isActive: userForm.isActive,
-      });
+      };
+      if (newEmail !== oldEmail) body.email = newEmail === '' ? null : newEmail;
+      await api.users.update(editingUser.id, body);
       setSuccess(`User "${editingUser.username}" updated`);
       setEditingUser(null);
       setShowUserForm(false);
       loadData();
       setTimeout(() => setSuccess(''), 3000);
-    } catch (e: any) { setError(String(e?.message ?? e)); }
+    } catch (e: any) { setError(errorMessage(e)); }
     finally { setLoading(false); }
   }
 
   async function resetUserPassword() {
-    if (!resetPasswordUserId || !newPassword.trim()) {
-      setError('Password must be at least 6 characters');
+    if (!resetPasswordUserId || newPassword.length < 8) {
+      setError('Password must be at least 8 characters');
       return;
     }
     setLoading(true); setError(''); setSuccess('');
@@ -217,16 +242,23 @@ export function AdminPage() {
     setSuccess('');
     
     try {
-      const r = await api.putLdapSettings({
+      const body: any = {
         enabled: ldapEnabled,
         url: url.trim(),
         baseDn: baseDn.trim(),
         bindDn: bindDn.trim() || undefined,
-        bindPassword: bindPassword.trim() || undefined,
-        userFilter: '(sAMAccountName={{username}})',
+        userFilter: userFilter.trim() || undefined,
+        groupFilter: groupFilter.trim() || undefined,
         useLdaps: useLdaps
-      });
+      };
+      // Omit bindPassword entirely when blank so the API keeps the existing secret.
+      if (bindPassword !== '') body.bindPassword = bindPassword;
+      const r = await api.putLdapSettings(body);
       setLdap(r.ldapSettings);
+      if (r.ldapSettings) {
+        setUserFilter(r.ldapSettings.user_filter ?? userFilter);
+        setGroupFilter(r.ldapSettings.group_filter ?? groupFilter);
+      }
       setSuccess('LDAP settings saved successfully');
       setBindPassword(''); // Clear password field
       setTimeout(() => setSuccess(''), 3000);
@@ -452,10 +484,15 @@ export function AdminPage() {
         <div className="form-grid">
           <div className="form-group">
             <label>Executor Type *</label>
+            {executorError && (
+              <div className="error-banner" style={{ marginBottom: 8 }}>
+                {executorError} <button type="button" className="btn-small" onClick={() => loadData()}>Retry</button>
+              </div>
+            )}
             <select
               value={executor}
               onChange={(e) => setExecutor(e.target.value as 'ansible' | 'ssh')}
-              disabled={loading}
+              disabled={loading || !executorLoaded}
             >
               <option value="ansible">Ansible (Recommended) - Better error handling, rollback, and parallel execution</option>
               <option value="ssh">SSH Direct - Lightweight direct SSH execution</option>
@@ -472,7 +509,8 @@ export function AdminPage() {
           <button
             onClick={saveExecutorSetting}
             className="btn-primary"
-            disabled={loading}
+            disabled={loading || !executorLoaded}
+            title={!executorLoaded ? 'Current setting has not been loaded' : undefined}
           >
             {loading ? 'Saving...' : 'Save Executor Setting'}
           </button>
@@ -542,6 +580,8 @@ export function AdminPage() {
               <div><strong>URL:</strong> <code>{ldap.url}</code></div>
               <div><strong>Base DN:</strong> <code>{ldap.base_dn}</code></div>
               {ldap.bind_dn && <div><strong>Bind DN:</strong> <code>{ldap.bind_dn}</code></div>}
+              {ldap.user_filter && <div><strong>User Filter:</strong> <code>{ldap.user_filter}</code></div>}
+              {ldap.group_filter && <div><strong>Group Filter:</strong> <code>{ldap.group_filter}</code></div>}
               <div><strong>LDAPS:</strong> {ldap.use_ldaps ? 'Yes' : 'No'}</div>
               {ldap.created_at && <div><strong>Created:</strong> {new Date(ldap.created_at).toLocaleString()}</div>}
             </div>
@@ -591,14 +631,35 @@ export function AdminPage() {
             <small>Optional: Service account DN for bind operations</small>
           </div>
           <div className="form-group">
-            <label>Bind Password</label>
+            <label>Bind Password {ldap && <span style={{ fontWeight: 'normal', color: '#97846c' }}>(unchanged — leave blank to keep)</span>}</label>
             <input
               type="password"
               value={bindPassword}
               onChange={(e) => setBindPassword(e.target.value)}
-              placeholder="Leave empty to keep existing password"
+              placeholder={ldap ? '(unchanged — leave blank to keep)' : 'Bind password'}
+              autoComplete="new-password"
             />
-            <small>Password for bind DN (stored encrypted). Leave empty to keep existing.</small>
+            <small>Password for bind DN (stored encrypted). Leave empty to keep the existing password.</small>
+          </div>
+          <div className="form-group">
+            <label>User Filter</label>
+            <input
+              type="text"
+              value={userFilter}
+              onChange={(e) => setUserFilter(e.target.value)}
+              placeholder="(sAMAccountName={{username}})"
+            />
+            <small>LDAP filter used to find the user; {'{{username}}'} is replaced with the login name.</small>
+          </div>
+          <div className="form-group">
+            <label>Group Filter</label>
+            <input
+              type="text"
+              value={groupFilter}
+              onChange={(e) => setGroupFilter(e.target.value)}
+              placeholder="Optional"
+            />
+            <small>Optional LDAP filter for group membership lookups.</small>
           </div>
           <div className="form-group">
             <label>Use LDAPS</label>

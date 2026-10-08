@@ -1,10 +1,14 @@
 import { useState, useEffect } from 'react';
 import { api } from '../lib/api';
+import { useAuth, hasRole } from '../lib/auth-context';
 
 const ASSET_TYPES = ['plc', 'hmi', 'sensor', 'camera', 'printer', 'hvac', 'medical', 'other'];
 const CRITICALITY_COLORS: Record<string, string> = { critical: '#a63d2f', high: '#c47a1a', medium: '#8b6914', low: '#5a7a3a' };
 
 export function IoTPage() {
+  const { roles } = useAuth();
+  // Asset create/update/delete, gateway assignment and tagging are operator/admin only in the API
+  const canEdit = hasRole(roles, 'operator', 'admin');
   const [assets, setAssets] = useState<any[]>([]);
   const [gateways, setGateways] = useState<any[]>([]);
   const [selectedGateway, setSelectedGateway] = useState<any>(null);
@@ -196,11 +200,11 @@ export function IoTPage() {
               <option value="">All Gateways</option>
               {allGatewayHosts.map(g => <option key={g.id} value={g.id}>{g.hostname}</option>)}
             </select>
-            <button onClick={() => setShowCreate(true)} className="btn-primary" style={{ marginLeft: 'auto' }}>+ Add IoT Asset</button>
+            {canEdit && <button onClick={() => setShowCreate(true)} className="btn-primary" style={{ marginLeft: 'auto' }}>+ Add IoT Asset</button>}
           </div>
 
           {/* Create form */}
-          {showCreate && (
+          {canEdit && showCreate && (
             <div className="card" style={{ border: '2px solid #8b6914' }}>
               <h3>Add IoT/OT Asset</h3>
               <div className="form-grid" style={{ gridTemplateColumns: '1fr 1fr 1fr' }}>
@@ -271,7 +275,7 @@ export function IoTPage() {
                           : <span style={{ color: '#a63d2f', fontWeight: 600 }}>Unprotected</span>}
                       </td>
                       <td onClick={e => e.stopPropagation()}>
-                        <button onClick={() => deleteAsset(a.id)} className="btn-small btn-danger" style={{ padding: '2px 8px', minHeight: 'auto' }}>Del</button>
+                        {canEdit && <button onClick={() => deleteAsset(a.id)} className="btn-small btn-danger" style={{ padding: '2px 8px', minHeight: 'auto' }}>Del</button>}
                       </td>
                     </tr>
                   ))}
@@ -300,14 +304,14 @@ export function IoTPage() {
                   {assetGateways.length > 0 ? assetGateways.map(g => (
                     <div key={g.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid #f0ebe2', fontSize: '13px' }}>
                       <span>{g.hostname} <code style={{ fontSize: '11px' }}>({g.mgmt_ip})</code></span>
-                      <button onClick={() => removeGateway(selectedAsset.id, g.id)} className="btn-small btn-danger" style={{ padding: '1px 6px', minHeight: 'auto', fontSize: '11px' }}>x</button>
+                      {canEdit && <button onClick={() => removeGateway(selectedAsset.id, g.id)} className="btn-small btn-danger" style={{ padding: '1px 6px', minHeight: 'auto', fontSize: '11px' }}>x</button>}
                     </div>
                   )) : (
                     <div style={{ padding: 10, background: '#faf0ee', borderRadius: 6, fontSize: '13px', color: '#a63d2f', borderLeft: '3px solid #a63d2f' }}>
                       No gateway assigned — this device is <strong>unprotected</strong>. Assign a gateway below.
                     </div>
                   )}
-                  {allGatewayHosts.length > 0 && (
+                  {canEdit && allGatewayHosts.length > 0 && (
                     <div style={{ marginTop: 10 }}>
                       <select onChange={e => { if (e.target.value) { assignGateway(selectedAsset.id, e.target.value); e.target.value = ''; } }} style={{ fontSize: '12.5px', width: '100%' }}>
                         <option value="">+ Assign gateway...</option>

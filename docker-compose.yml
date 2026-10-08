@@ -1,39 +1,91 @@
+# Segmentra full stack (production-style).
+#
+# Required environment (e.g. in a .env file next to this file — never commit it):
+#   JWT_SECRET          >= 32 random chars          (openssl rand -hex 32)
+#   SEGMENTRA_KEK_B64   32 random bytes, base64     (openssl rand -base64 32)
+#                       Set it BEFORE storing any secrets; changing it later makes
+#                       existing SSH keys/passwords and LDAP bind passwords undecryptable.
+#   POSTGRES_PASSWORD   database password (defaults to "segmentra" for local dev only)
+#   SEGMENTRA_ADMIN_PASSWORD  password for the initial "admin" user (>= 12 chars).
+#                       Without it no default admin is created in production.
+# The API container refuses to start without JWT_SECRET / SEGMENTRA_KEK_B64.
+# (They are not marked required here with ${VAR:?} so that `docker compose up -d segmentra-db`,
+# used by the local dev scripts, keeps working without them.)
+#
+# SECURITY: the API container mounts /var/run/docker.sock so the Ansible executor can run
+# `docker exec segmentra-ansible-runner ansible-playbook ...`. Access to the Docker socket
+# is equivalent to root on the Docker host. If you only use the SSH executor
+# (Admin > Settings > executor = ssh), remove the docker.sock mount and the group_add entry.
+
 services:
   segmentra-db:
     image: postgres:16
     environment:
       POSTGRES_USER: ${DB_USER:-segmentra}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-segmentra}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-${DB_PASSWORD:-segmentra}}
       POSTGRES_DB: ${DB_NAME:-segmentra}
     ports:
-      - "${DB_PORT:-15432}:5432"
+      # Bound to localhost only; the API reaches the DB over the compose network.
+      - "127.0.0.1:${DB_PORT:-15432}:5432"
     volumes:
       - segmentra_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
 
   segmentra-ansible-runner:
     build:
       context: ./infra/ansible-runner
+    # Must match ANSIBLE_RUNNER_CONTAINER (API default: segmentra-ansible-runner).
+    container_name: segmentra-ansible-runner
     volumes:
       - segmentra_bundles:/bundles
-    command: ["sleep", "infinity"]
+      - segmentra_ansible_ssh:/runner/ssh
+    restart: unless-stopped
 
   segmentra-app:
     build:
       context: .
       dockerfile: ./infra/app/Dockerfile
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgres://segmentra:segmentra@segmentra-db:5432/segmentra}
-      JWT_SECRET: ${JWT_SECRET:-change-me-to-a-long-random-string}
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:-postgres://${DB_USER:-segmentra}:${POSTGRES_PASSWORD:-${DB_PASSWORD:-segmentra}}@segmentra-db:5432/${DB_NAME:-segmentra}}
+      JWT_SECRET: ${JWT_SECRET:-}
       SEGMENTRA_KEK_B64: ${SEGMENTRA_KEK_B64:-}
+      SEGMENTRA_ADMIN_PASSWORD: ${SEGMENTRA_ADMIN_PASSWORD:-}
+      SEGMENTRA_BOOTSTRAP_TOKEN: ${SEGMENTRA_BOOTSTRAP_TOKEN:-}
+      CORS_ORIGIN: ${CORS_ORIGIN:-}
+      # nginx (segmentra-web) is the only proxy in front of the API.
+      TRUST_PROXY: ${TRUST_PROXY:-1}
+      SEGMENTRA_ALLOW_PRIVATE_WEBHOOKS: ${SEGMENTRA_ALLOW_PRIVATE_WEBHOOKS:-}
+      # Shared with segmentra-ansible-runner at the same path; the API writes
+      # /bundles/<deploymentId>/inventory.ini which the runner reads.
       BUNDLES_DIR: /bundles
       ANSIBLE_RUNNER_CONTAINER: segmentra-ansible-runner
+      SEGMENTRA_KNOWN_HOSTS: /home/node/.ssh/known_hosts
     ports:
-      - "${API_PORT:-8080}:8080"
+      # Published on localhost only by default: browsers go through segmentra-web (nginx),
+      # and TRUST_PROXY=1 would let direct clients spoof X-Forwarded-For. Set
+      # API_BIND=0.0.0.0 only if you need direct API access (and then review TRUST_PROXY).
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-8080}:8080"
     depends_on:
-      - segmentra-db
+      segmentra-db:
+        condition: service_healthy
+      segmentra-ansible-runner:
+        condition: service_started
+    # Group owning /var/run/docker.sock on the host (`stat -c %g /var/run/docker.sock`),
+    # so the non-root API user can use the Docker CLI. Remove with the socket mount below.
+    group_add:
+      - "${DOCKER_GID:-999}"
     volumes:
       - segmentra_bundles:/bundles
+      - segmentra_ssh_known_hosts:/home/node/.ssh
+      # Root-equivalent access to the Docker host -- required only by the Ansible executor.
       - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
 
   segmentra-web:
     build:
@@ -43,7 +95,10 @@ services:
       - "${WEB_PORT:-80}:80"
     depends_on:
       - segmentra-app
+    restart: unless-stopped
 
 volumes:
   segmentra_pgdata:
   segmentra_bundles:
+  segmentra_ansible_ssh:
+  segmentra_ssh_known_hosts:

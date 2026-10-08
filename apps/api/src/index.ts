@@ -1,9 +1,13 @@
 import 'dotenv/config';
+import './lib/async-errors.js';
 
 import cors from 'cors';
 import express from 'express';
 
-import { env } from './lib/env.js';
+import { ZodError } from 'zod';
+
+import { env, parseTrustProxy } from './lib/env.js';
+import { warnIfKekDerivedFromJwtSecret } from './services/crypto.js';
 import { authRouter } from './routes/auth.js';
 import { adminRouter } from './routes/admin.js';
 import { healthRouter } from './routes/health.js';
@@ -27,9 +31,14 @@ import { enforcementPointsRouter } from './routes/enforcement-points.js';
 import { notificationsRouter } from './routes/notifications.js';
 import { securityAuditRouter } from './routes/security-audit.js';
 
+warnIfKekDerivedFromJwtSecret();
+
 const app = express();
+// Behind a reverse proxy, set TRUST_PROXY so req.ip (used by the login rate limiter) is the client IP.
+const trustProxy = parseTrustProxy(env.TRUST_PROXY);
+if (trustProxy !== undefined) app.set('trust proxy', trustProxy);
 // CORS: restrict origins in production via CORS_ORIGIN env var
-const corsOrigin = process.env.CORS_ORIGIN;
+const corsOrigin = env.CORS_ORIGIN;
 app.use(cors(corsOrigin ? { origin: corsOrigin.split(',').map(s => s.trim()), credentials: true } : {}));
 app.use(express.json({ limit: '1mb' }));
 
@@ -56,30 +65,78 @@ app.use('/api/enforcement-points', enforcementPointsRouter);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/security-audit', securityAuditRouter);
 
+const isProduction = env.NODE_ENV === 'production';
+
+/** Map known error types (pg, zod, body-parser) to a client-facing status + payload. */
+function mapError(err: any): { status: number; body: Record<string, unknown> } | null {
+  if (err instanceof ZodError) {
+    return { status: 400, body: { error: 'invalid_body', details: err.issues } };
+  }
+  // body-parser errors (malformed JSON, payload too large)
+  if (err && typeof err.status === 'number' && err.status >= 400 && err.status < 500 && err.type) {
+    return { status: err.status, body: { error: err.type === 'entity.parse.failed' ? 'invalid_json' : String(err.type) } };
+  }
+  const code = typeof err?.code === 'string' ? err.code : null;
+  switch (code) {
+    case '22P02': // invalid_text_representation (e.g. malformed uuid)
+    case '22007': // invalid_datetime_format
+    case '22008': // datetime_field_overflow
+      return { status: 400, body: { error: 'invalid_input', message: 'One or more values have an invalid format.' } };
+    case '23505':
+      return { status: 409, body: { error: 'conflict', message: 'A record with these values already exists.', constraint: err.constraint } };
+    case '23503':
+      return {
+        status: 409,
+        body: {
+          error: 'referenced_by_other_records',
+          message: 'This record is in use by other records (or references a record that does not exist) and cannot be changed or deleted.',
+          constraint: err.constraint
+        }
+      };
+    case '23502':
+      return { status: 400, body: { error: 'missing_required_field', message: `A required field is missing${err.column ? `: ${err.column}` : ''}.` } };
+    case '23514':
+      return { status: 400, body: { error: 'constraint_violation', message: 'A value violates a data constraint.', constraint: err.constraint } };
+    default:
+      return null;
+  }
+}
+
 // Global error handler middleware (must be last)
-app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  const mapped = mapError(err);
+  if (mapped) {
+    if (mapped.status >= 500 || !isProduction) {
+      // eslint-disable-next-line no-console
+      console.warn(`[Request Error] ${req.method} ${req.originalUrl} -> ${mapped.status}`, err?.message ?? err);
+    }
+    if (res.headersSent) return;
+    return res.status(mapped.status).json(mapped.body);
+  }
+
   // eslint-disable-next-line no-console
-  console.error('[Unhandled Error]', err);
-  res.status(500).json({ 
+  console.error(`[Unhandled Error] ${req.method} ${req.originalUrl}`, err);
+  if (res.headersSent) return;
+  res.status(500).json({
     error: 'internal_server_error',
-    message: err.message || 'An unexpected error occurred'
+    message: isProduction ? 'An unexpected error occurred' : (err?.message || 'An unexpected error occurred')
   });
 });
 
-// Handle unhandled promise rejections
-process.on('unhandledRejection', (reason: any, promise: Promise<any>) => {
+// Log unhandled promise rejections (async handler rejections are routed to the error middleware
+// by lib/async-errors; anything reaching here is a bug in a background task).
+process.on('unhandledRejection', (reason: unknown) => {
   // eslint-disable-next-line no-console
   console.error('[Unhandled Promise Rejection]', reason);
 });
 
-// Handle uncaught exceptions
+// An uncaught exception leaves the process in an undefined state: log it and exit so the
+// supervisor (Docker/systemd) restarts a clean instance.
 process.on('uncaughtException', (error: Error) => {
   // eslint-disable-next-line no-console
-  console.error('[Uncaught Exception]', error);
-  // Don't exit immediately - let the error handler middleware catch it
+  console.error('[Uncaught Exception] Shutting down:', error);
+  process.exit(1);
 });
-
-// TODO: add inventory/policies/deployments/audit/admin routers
 
 app.listen(env.PORT, () => {
   // eslint-disable-next-line no-console
@@ -142,129 +199,14 @@ app.listen(env.PORT, () => {
     }
   }, 5 * 60 * 1000); // Check every 5 minutes
 
-  // Start periodic deployment expiry processor (every 1 minute)
-  // Checks for deployments with expires_at in the past and handles them
+  // Start periodic deployment expiry processor (every 1 minute).
+  // Expired deployments are claimed atomically, then their expiry action runs:
+  // NOTIFY_ONLY notifies, REMOVE strips Segmentra rules from the hosts, REVERT redeploys the
+  // previous successfully deployed version. Also sends 24h "expiring soon" warnings.
   setInterval(async () => {
     try {
-      const { pool } = await import('./db/pool.js');
-      const { sendNotification } = await import('./services/notifications.js');
-
-      // Find expired deployments
-      const { rows: expired } = await pool.query(
-        `SELECT d.id, d.policy_version_id, d.expiry_action, d.expires_at,
-           pv.version_number, ps.name as policy_set_name
-         FROM deployments d
-         JOIN policy_versions pv ON pv.id = d.policy_version_id
-         JOIN policy_sets ps ON ps.id = pv.policy_set_id
-         WHERE d.expires_at IS NOT NULL AND d.expires_at <= now() AND d.expired = false
-           AND d.status IN ('SUCCEEDED', 'PARTIAL')`
-      );
-
-      for (const dep of expired) {
-        const expiryAction: string = dep.expiry_action || 'NOTIFY_ONLY';
-
-        // Mark as expired and update status to EXPIRED
-        await pool.query(
-          `UPDATE deployments SET expired = true, status = 'EXPIRED' WHERE id = $1`,
-          [dep.id]
-        );
-
-        // Build notification subject and body based on expiry action
-        let notificationSubject: string;
-        let notificationBody: Record<string, unknown>;
-
-        if (expiryAction === 'REMOVE') {
-          notificationSubject = `POLICY EXPIRED - Manual rollback required: ${dep.policy_set_name} v${dep.version_number}`;
-          notificationBody = {
-            deploymentId: dep.id,
-            policySetName: dep.policy_set_name,
-            versionNumber: dep.version_number,
-            expiryAction,
-            expiredAt: dep.expires_at,
-            actionRequired: 'The deployed firewall rules should be manually removed from all target hosts. Full automated rollback is planned for a future release.',
-          };
-          // eslint-disable-next-line no-console
-          console.log(`[Policy Expiry] Deployment ${dep.id} expired with REMOVE action — manual rollback required (${dep.policy_set_name} v${dep.version_number})`);
-        } else if (expiryAction === 'REVERT') {
-          notificationSubject = `POLICY EXPIRED - Previous version should be redeployed: ${dep.policy_set_name} v${dep.version_number}`;
-          notificationBody = {
-            deploymentId: dep.id,
-            policySetName: dep.policy_set_name,
-            versionNumber: dep.version_number,
-            expiryAction,
-            expiredAt: dep.expires_at,
-            actionRequired: 'The previous policy version should be manually redeployed to all target hosts. Full automated revert is planned for a future release.',
-          };
-          // eslint-disable-next-line no-console
-          console.log(`[Policy Expiry] Deployment ${dep.id} expired with REVERT action — previous version should be redeployed (${dep.policy_set_name} v${dep.version_number})`);
-        } else {
-          // NOTIFY_ONLY or any other value
-          notificationSubject = `Policy expired: ${dep.policy_set_name} v${dep.version_number}`;
-          notificationBody = {
-            deploymentId: dep.id,
-            policySetName: dep.policy_set_name,
-            versionNumber: dep.version_number,
-            expiryAction,
-            expiredAt: dep.expires_at,
-          };
-          // eslint-disable-next-line no-console
-          console.log(`[Policy Expiry] Deployment ${dep.id} expired (${dep.policy_set_name} v${dep.version_number}, action: ${expiryAction})`);
-        }
-
-        // Send notification
-        await sendNotification({
-          eventType: 'POLICY_EXPIRED',
-          subject: notificationSubject,
-          body: notificationBody,
-        });
-
-        // Log audit event with action-specific metadata
-        await pool.query(
-          `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
-           VALUES (NULL, 'POLICY_EXPIRED', 'deployment', $1, $2)`,
-          [dep.id, JSON.stringify({
-            policySetName: dep.policy_set_name,
-            versionNumber: dep.version_number,
-            expiryAction,
-            ...(expiryAction === 'REMOVE' ? { actionRequired: 'Manual rollback required' } : {}),
-            ...(expiryAction === 'REVERT' ? { actionRequired: 'Previous version should be redeployed' } : {}),
-          })]
-        );
-      }
-
-      // Send "expiring soon" warnings (24 hours before expiry)
-      const { rows: expiringSoon } = await pool.query(
-        `SELECT d.id, d.expires_at, pv.version_number, ps.name as policy_set_name
-         FROM deployments d
-         JOIN policy_versions pv ON pv.id = d.policy_version_id
-         JOIN policy_sets ps ON ps.id = pv.policy_set_id
-         WHERE d.expires_at IS NOT NULL
-           AND d.expires_at > now()
-           AND d.expires_at <= now() + interval '24 hours'
-           AND d.expired = false
-           AND d.status IN ('SUCCEEDED', 'PARTIAL')
-           AND NOT EXISTS (
-             SELECT 1 FROM notification_log nl
-             WHERE nl.event_type = 'POLICY_EXPIRING_SOON'
-               AND nl.payload::text LIKE '%' || d.id::text || '%'
-               AND nl.created_at > now() - interval '24 hours'
-           )`
-      );
-
-      for (const dep of expiringSoon) {
-        const hoursLeft = Math.round((new Date(dep.expires_at).getTime() - Date.now()) / 3600000);
-        await sendNotification({
-          eventType: 'POLICY_EXPIRING_SOON',
-          subject: `Policy expiring in ${hoursLeft}h: ${dep.policy_set_name} v${dep.version_number}`,
-          body: {
-            deploymentId: dep.id,
-            policySetName: dep.policy_set_name,
-            versionNumber: dep.version_number,
-            expiresAt: dep.expires_at,
-            hoursRemaining: hoursLeft,
-          },
-        });
-      }
+      const { processExpiredDeployments } = await import('./services/deployment-expiry.js');
+      await processExpiredDeployments();
     } catch (e) {
       // eslint-disable-next-line no-console
       console.error('[Policy Expiry] Error processing expired deployments:', e);
@@ -272,7 +214,8 @@ app.listen(env.PORT, () => {
   }, 60 * 1000); // Check every 1 minute
 
   // Start periodic policy test session expiry processor (every 1 minute)
-  // When a test session expires, SSH into the host to restore original rules and collect logs
+  // When a test session expires, SSH into the host to restore original rules and collect logs.
+  // Sessions whose restore failed stay RUNNING (with scheduled_end_at pulled forward) and are retried here.
   setInterval(async () => {
     try {
       const { pool } = await import('./db/pool.js');
@@ -284,77 +227,15 @@ app.listen(env.PORT, () => {
       );
       if (rows.length === 0) return;
 
-      const { restoreAuditSession, retrieveAuditLogs } = await import('@segmentra/executor');
-      const { readSecretPlaintext } = await import('./services/secrets.js');
-      const { parseFirewallLogs, groupCommunicationFlows } = await import('./services/log-parser.js');
-      const fs = await import('node:fs');
-      const path = await import('node:path');
-      const os = await import('node:os');
-
-      // Get SSH credentials once
-      const credRes = await pool.query(
-        `SELECT * FROM ssh_credentials WHERE scope_type='GLOBAL' ORDER BY created_at DESC LIMIT 1`
-      );
-      const cred = credRes.rows[0];
-      if (!cred) {
-        // eslint-disable-next-line no-console
-        console.error('[Policy Test] No SSH credentials found, cannot auto-restore expired sessions');
-        return;
-      }
-      const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
-
+      const { restoreAndCollectSession } = await import('./lib/policy-test-session.js');
       for (const session of rows) {
-        const tempKeyPath = path.join(os.tmpdir(), `policy_test_expire_${session.id}_${Date.now()}`);
-        try {
-          fs.writeFileSync(tempKeyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
-
-          const auditHost = {
-            hostname: session.hostname,
-            ip: String(session.mgmt_ip),
-            port: session.ssh_port || 22,
-            username: cred.username,
-            privateKeyPath: tempKeyPath,
-            backend: (session.firewall_backend === 'iptables' ? 'iptables' : 'nftables') as 'nftables' | 'iptables'
-          };
-
-          // Restore original firewall rules
-          if (session.backup_path) {
-            await restoreAuditSession(auditHost, session.backup_path);
-          }
-
-          // Retrieve and parse logs
-          let logContent = '';
-          if (session.log_file_path) {
-            const localLogPath = path.join(os.tmpdir(), `policy_test_log_${session.id}_${Date.now()}.log`);
-            const retrieveResult = await retrieveAuditLogs(auditHost, session.log_file_path, localLogPath);
-            if (retrieveResult.success && fs.existsSync(localLogPath)) {
-              logContent = fs.readFileSync(localLogPath, 'utf8');
-              fs.unlinkSync(localLogPath);
-            }
-          }
-
-          const parsedEntries = parseFirewallLogs(logContent);
-          const flows = groupCommunicationFlows(parsedEntries);
-
-          await pool.query(
-            `UPDATE policy_test_sessions
-             SET status = 'COLLECTING', completed_at = now(),
-                 raw_log_data = $2
-             WHERE id = $1`,
-            [session.id, JSON.stringify({ entries: parsedEntries, flows })]
-          );
-
+        const result = await restoreAndCollectSession(session);
+        if (result.ok) {
           // eslint-disable-next-line no-console
-          console.log(`[Policy Test] Auto-restored ${session.hostname}, collected ${parsedEntries.length} entries, ${flows.length} flows`);
-        } catch (e: any) {
+          console.log(`[Policy Test] Auto-restored ${session.hostname}, collected ${result.entryCount} entries, ${result.flowCount} flows`);
+        } else {
           // eslint-disable-next-line no-console
-          console.error(`[Policy Test] Failed to auto-restore session ${session.id}:`, e.message);
-          await pool.query(
-            `UPDATE policy_test_sessions SET status = 'FAILED', completed_at = now() WHERE id = $1`,
-            [session.id]
-          );
-        } finally {
-          if (fs.existsSync(tempKeyPath)) { try { fs.unlinkSync(tempKeyPath); } catch {} }
+          console.error(`[Policy Test] Restore failed for session ${session.id} (${session.hostname}); will retry: ${result.error}`);
         }
       }
     } catch (e) {

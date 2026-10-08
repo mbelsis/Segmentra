@@ -38,7 +38,7 @@ export function AppShell() {
 
         {sectionLabel('Policies')}
         <NavLink to="/policies">Policy Sets</NavLink>
-        {isOperator && <NavLink to="/policy-templates">Templates</NavLink>}
+        <NavLink to="/policy-templates">Templates</NavLink>
         {isApprover && <NavLink to="/approvals">Approvals</NavLink>}
         {isViewer && <NavLink to="/deployments">Deployments</NavLink>}
 
@@ -48,20 +48,20 @@ export function AppShell() {
 
         {sectionLabel('Analysis')}
         <NavLink to="/troubleshoot">Troubleshoot</NavLink>
-        {isOperator && <NavLink to="/policy-testing">Policy Impact Analysis</NavLink>}
+        {(isOperator || isApprover) && <NavLink to="/policy-testing">Policy Impact Analysis</NavLink>}
 
         {sectionLabel('Extended')}
         <NavLink to="/kubernetes">Kubernetes</NavLink>
         <NavLink to="/iot">OT/IoT</NavLink>
 
         <NavLink to="/security-audit">Security Audit</NavLink>
+        <NavLink to="/audit">Audit Log</NavLink>
 
         {isAdmin && (
           <>
             {sectionLabel('Settings')}
             <NavLink to="/integrations">Integrations</NavLink>
             <NavLink to="/notifications">Notifications</NavLink>
-            <NavLink to="/audit">Audit Log</NavLink>
             <NavLink to="/admin">Admin</NavLink>
           </>
         )}

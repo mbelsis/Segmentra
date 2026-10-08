@@ -1,7 +1,14 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { api } from '../lib/api';
+import { useAuth, hasRole } from '../lib/auth-context';
 
 export function KubernetesPage() {
+  const { roles } = useAuth();
+  // Cluster create/update/delete is admin-only in the API
+  const isAdmin = hasRole(roles, 'admin');
+  // Latest cluster selection; responses for any other cluster are stale and ignored
+  const selectedClusterIdRef = useRef<string | null>(null);
+  const workloadsRequestId = useRef(0);
   const [clusters, setClusters] = useState<any[]>([]);
   const [selectedCluster, setSelectedCluster] = useState<any>(null);
   const [workloads, setWorkloads] = useState<any[]>([]);
@@ -27,28 +34,34 @@ export function KubernetesPage() {
   useEffect(() => { load(); }, []);
 
   const selectCluster = async (c: any) => {
+    selectedClusterIdRef.current = c.id;
     setSelectedCluster(c);
     setTab('workloads');
     setSelectedManifest(null);
+    // Namespaces belong to a cluster: reset filter and clear old cluster data
+    setSelectedNamespace('');
+    setNamespaces([]);
+    setWorkloads([]);
+    setNetworkPolicies([]);
     try {
-      const res = await api.k8s.cluster(c.id);
+      const [res, npRes] = await Promise.all([api.k8s.cluster(c.id), api.k8s.networkPolicies(c.id)]);
+      if (selectedClusterIdRef.current !== c.id) return; // user switched clusters meanwhile
       setNamespaces(res.namespaces);
-      const wRes = await api.k8s.workloads(c.id);
-      setWorkloads(wRes.workloads);
-      const npRes = await api.k8s.networkPolicies(c.id);
       setNetworkPolicies(npRes.networkPolicies);
-    } catch (e: any) { setError(e.message); }
+    } catch (e: any) {
+      if (selectedClusterIdRef.current === c.id) setError(e.message);
+    }
   };
 
-  const filterWorkloads = async () => {
-    if (!selectedCluster) return;
-    try {
-      const res = await api.k8s.workloads(selectedCluster.id, { namespace: selectedNamespace || undefined });
-      setWorkloads(res.workloads);
-    } catch (e: any) { setError(e.message); }
-  };
-
-  useEffect(() => { if (selectedCluster) filterWorkloads(); }, [selectedNamespace]);
+  // Load workloads whenever the cluster or namespace filter changes; ignore stale responses
+  const selectedClusterId = selectedCluster?.id as string | undefined;
+  useEffect(() => {
+    if (!selectedClusterId) return;
+    const requestId = ++workloadsRequestId.current;
+    api.k8s.workloads(selectedClusterId, { namespace: selectedNamespace || undefined })
+      .then(res => { if (requestId === workloadsRequestId.current) setWorkloads(res.workloads); })
+      .catch((e: any) => { if (requestId === workloadsRequestId.current) setError(e.message); });
+  }, [selectedClusterId, selectedNamespace]);
 
   const createCluster = async () => {
     if (!form.name.trim() || !form.apiServerUrl.trim()) return;
@@ -64,7 +77,7 @@ export function KubernetesPage() {
     if (!confirm('Delete this cluster and all its workloads/policies?')) return;
     try {
       await api.k8s.deleteCluster(id);
-      if (selectedCluster?.id === id) { setSelectedCluster(null); setWorkloads([]); setNetworkPolicies([]); }
+      if (selectedCluster?.id === id) { selectedClusterIdRef.current = null; setSelectedCluster(null); setWorkloads([]); setNetworkPolicies([]); setNamespaces([]); setSelectedNamespace(''); }
       load();
     } catch (e: any) { setError(e.message); }
   };
@@ -112,11 +125,13 @@ export function KubernetesPage() {
 
       {error && <div style={{ color: '#a63d2f', marginBottom: 12, padding: 10, background: '#faf0ee', borderRadius: 8, borderLeft: '4px solid #a63d2f' }}>{error} <button onClick={() => setError('')} className="btn-small btn-secondary" style={{ marginLeft: 8 }}>dismiss</button></div>}
 
+      {isAdmin && (
       <div style={{ marginBottom: 16 }}>
         <button onClick={() => setShowCreate(true)} className="btn-primary">+ Add Cluster</button>
       </div>
+      )}
 
-      {showCreate && (
+      {isAdmin && showCreate && (
         <div className="card" style={{ border: '2px solid #8b6914' }}>
           <h3>Register Kubernetes Cluster</h3>
           <p style={{ fontSize: '12.5px', color: '#78644e', marginBottom: 12 }}>Register a cluster to track its workloads and generate NetworkPolicy manifests.</p>
@@ -157,7 +172,7 @@ export function KubernetesPage() {
               </div>
               <div style={{ fontSize: '11.5px', color: '#97846c', marginTop: 2 }}>{c.api_server_url}</div>
               <div style={{ marginTop: 6, display: 'flex', gap: 4 }}>
-                <button onClick={(e) => { e.stopPropagation(); deleteCluster(c.id); }} className="btn-small btn-danger" style={{ padding: '2px 8px', minHeight: 'auto', fontSize: '11px' }}>Delete</button>
+                {isAdmin && <button onClick={(e) => { e.stopPropagation(); deleteCluster(c.id); }} className="btn-small btn-danger" style={{ padding: '2px 8px', minHeight: 'auto', fontSize: '11px' }}>Delete</button>}
               </div>
             </div>
           ))}

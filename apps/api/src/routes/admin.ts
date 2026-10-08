@@ -100,7 +100,8 @@ const putLdapSchema = z.object({
   enabled: z.boolean(),
   url: z.string().min(1),
   bindDn: z.string().optional(),
-  bindPassword: z.string().optional(),
+  // Omitted (or empty string) = keep the existing bind password; null = clear it.
+  bindPassword: z.string().nullable().optional(),
   baseDn: z.string().min(1),
   userFilter: z.string().optional(),
   groupFilter: z.string().optional(),
@@ -113,7 +114,13 @@ adminRouter.put('/ldap-settings', requireAuth, requireRole('admin'), async (req,
 
   const s = parsed.data;
   let bindPasswordSecretId: string | null = null;
-  if (s.bindPassword) {
+  if (s.bindPassword === undefined || s.bindPassword === '') {
+    // Keep the existing bind password (settings are versioned: copy it from the latest row)
+    const latest = await pool.query(
+      `SELECT bind_password_secret_id FROM ldap_settings ORDER BY created_at DESC LIMIT 1`
+    );
+    bindPasswordSecretId = latest.rows[0]?.bind_password_secret_id ?? null;
+  } else if (s.bindPassword) {
     const secret = await createSecret({
       name: `ldap_bind_${new Date().toISOString()}`,
       type: 'LDAP_BIND',
@@ -238,6 +245,24 @@ adminRouter.put('/management-vlan-setting', requireAuth, requireRole('admin'), a
 
 // === Local User Management ===
 
+type Queryable = { query: (text: string, params?: any[]) => Promise<any> };
+
+/** Serialize changes that could affect the set of active admins (prevents two admins demoting each other concurrently). */
+async function lockAdminChanges(client: Queryable) {
+  await client.query(`SELECT pg_advisory_xact_lock(hashtext('segmentra:admin-users'))`);
+}
+
+async function countActiveAdmins(client: Queryable): Promise<number> {
+  const { rows } = await client.query(
+    `SELECT COUNT(DISTINCT u.id)::int AS c
+     FROM users u
+     JOIN user_roles ur ON ur.user_id = u.id
+     JOIN roles r ON r.id = ur.role_id
+     WHERE r.name = 'admin' AND u.is_active = true`
+  );
+  return rows[0]?.c ?? 0;
+}
+
 // List all users with their roles
 adminRouter.get('/users', requireAuth, requireRole('admin'), async (_req, res) => {
   const { rows } = await pool.query(
@@ -316,8 +341,11 @@ adminRouter.post('/users', requireAuth, requireRole('admin'), async (req, res) =
     await client.query('COMMIT');
     res.status(201).json({ user: { ...userRes.rows[0], roles: b.roles } });
   } catch (e: any) {
-    await client.query('ROLLBACK');
-    res.status(500).json({ error: 'create_failed', message: e.message });
+    await client.query('ROLLBACK').catch(() => {});
+    if (e?.code === '23505') {
+      return res.status(409).json({ error: 'username_taken', message: `Username "${b.username}" is already in use.` });
+    }
+    throw e;
   } finally {
     client.release();
   }
@@ -325,7 +353,8 @@ adminRouter.post('/users', requireAuth, requireRole('admin'), async (req, res) =
 
 const updateUserSchema = z.object({
   displayName: z.string().min(1).max(200).optional(),
-  email: z.string().email().optional().nullable(),
+  // omitted = keep; null or '' = clear
+  email: z.union([z.string().email(), z.literal('').transform(() => null), z.null()]).optional(),
   isActive: z.boolean().optional(),
   roles: z.array(z.enum(['viewer', 'operator', 'approver', 'admin'])).min(1).optional(),
 });
@@ -333,20 +362,30 @@ const updateUserSchema = z.object({
 // Update user
 adminRouter.put('/users/:id', requireAuth, requireRole('admin'), async (req, res) => {
   const parsed = updateUserSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
   const b = parsed.data;
+
+  const isSelf = req.auth!.userId === req.params.id;
+  if (isSelf && b.isActive === false) {
+    return res.status(409).json({ error: 'cannot_deactivate_self', message: 'You cannot deactivate your own account.' });
+  }
+  if (isSelf && b.roles && !b.roles.includes('admin')) {
+    return res.status(409).json({ error: 'cannot_remove_own_admin', message: 'You cannot remove the admin role from your own account.' });
+  }
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await lockAdminChanges(client);
 
+    // email: omitted = keep, null = clear
     const { rows } = await client.query(
       `UPDATE users SET
          display_name = COALESCE($2, display_name),
-         email = COALESCE($3, email),
+         email = CASE WHEN $5::boolean THEN $3 ELSE email END,
          is_active = COALESCE($4, is_active)
        WHERE id = $1 RETURNING id, username, display_name, email, is_active`,
-      [req.params.id, b.displayName ?? null, b.email !== undefined ? b.email : null, b.isActive ?? null]
+      [req.params.id, b.displayName ?? null, b.email ?? null, b.isActive ?? null, b.email !== undefined]
     );
     if (!rows[0]) {
       await client.query('ROLLBACK');
@@ -356,28 +395,30 @@ adminRouter.put('/users/:id', requireAuth, requireRole('admin'), async (req, res
     // Update roles if provided
     if (b.roles) {
       await client.query('DELETE FROM user_roles WHERE user_id = $1', [req.params.id]);
-      for (const roleName of b.roles) {
-        const roleRes = await client.query('SELECT id FROM roles WHERE name = $1', [roleName]);
-        if (roleRes.rows[0]) {
-          await client.query(
-            'INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-            [req.params.id, roleRes.rows[0].id]
-          );
-        }
-      }
+      await client.query(
+        `INSERT INTO user_roles (user_id, role_id)
+         SELECT $1, id FROM roles WHERE name = ANY($2::text[])
+         ON CONFLICT DO NOTHING`,
+        [req.params.id, b.roles]
+      );
+    }
+
+    if ((b.isActive === false || b.roles) && (await countActiveAdmins(client)) === 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'last_admin', message: 'This change would leave no active admin. Promote or activate another admin first.' });
     }
 
     await client.query(
       `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
-       VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), 'USER_UPDATE', 'user', $2, $3)`,
-      [req.auth!.username, req.params.id, JSON.stringify({ changes: b })]
+       VALUES ($1, 'USER_UPDATE', 'user', $2, $3)`,
+      [req.auth!.userId, req.params.id, JSON.stringify({ changes: b })]
     );
 
     await client.query('COMMIT');
     res.json({ user: rows[0] });
   } catch (e: any) {
-    await client.query('ROLLBACK');
-    res.status(500).json({ error: 'update_failed', message: e.message });
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
   } finally {
     client.release();
   }
@@ -408,19 +449,43 @@ adminRouter.post('/users/:id/reset-password', requireAuth, requireRole('admin'),
 // Delete user
 adminRouter.delete('/users/:id', requireAuth, requireRole('admin'), async (req, res) => {
   // Prevent self-deletion
-  const userRes = await pool.query('SELECT username FROM users WHERE id = $1', [req.params.id]);
-  if (userRes.rows[0]?.username === req.auth!.username) {
+  if (req.auth!.userId === req.params.id) {
     return res.status(400).json({ error: 'cannot_delete_self', message: 'You cannot delete your own account.' });
   }
 
-  const { rowCount } = await pool.query('DELETE FROM users WHERE id = $1', [req.params.id]);
-  if (!rowCount) return res.status(404).json({ error: 'not_found' });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await lockAdminChanges(client);
 
-  await pool.query(
-    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
-     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), 'USER_DELETE', 'user', $2, $3)`,
-    [req.auth!.username, req.params.id, JSON.stringify({ deletedBy: req.auth!.username })]
-  );
+    const { rowCount } = await client.query('DELETE FROM users WHERE id = $1', [req.params.id]);
+    if (!rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'not_found' });
+    }
 
-  res.json({ ok: true });
+    if ((await countActiveAdmins(client)) === 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'last_admin', message: 'You cannot delete the last active admin.' });
+    }
+
+    await client.query(
+      `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+       VALUES ($1, 'USER_DELETE', 'user', $2, $3)`,
+      [req.auth!.userId, req.params.id, JSON.stringify({ deletedBy: req.auth!.username })]
+    );
+    await client.query('COMMIT');
+    res.json({ ok: true });
+  } catch (e: any) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (e?.code === '23503') {
+      return res.status(409).json({
+        error: 'user_in_use',
+        message: 'This user is referenced by policies, deployments or audit records and cannot be deleted. Deactivate the user instead.'
+      });
+    }
+    throw e;
+  } finally {
+    client.release();
+  }
 });

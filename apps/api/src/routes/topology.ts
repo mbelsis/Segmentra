@@ -3,7 +3,8 @@ import { z } from 'zod';
 
 import { pool } from '../db/pool.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
-import { generatePoliciesFromTopology, autoDiscoverTopology } from '../services/topology-to-policy.js';
+import { generatePoliciesFromTopology, autoDiscoverTopology, TopologyValidationError } from '../services/topology-to-policy.js';
+import { isValidCidr, isValidPortSpec } from '../services/ip-utils.js';
 
 export const topologyRouter = Router();
 topologyRouter.use(requireAuth);
@@ -103,22 +104,52 @@ topologyRouter.delete('/views/:id', requireRole('operator', 'admin'), async (req
 });
 
 // Topology flows CRUD
-const flowSchema = z.object({
-  sourceType: z.string().min(1),
-  sourceValue: z.string().min(1),
-  targetType: z.string().min(1),
-  targetValue: z.string().min(1),
-  direction: z.enum(['IN', 'OUT', 'BOTH']).default('BOTH'),
-  action: z.enum(['ALLOW', 'DENY']).default('ALLOW'),
-  protocol: z.enum(['tcp', 'udp', 'icmp', 'any']).default('tcp'),
-  ports: z.string().optional().nullable(),
-  comment: z.string().optional(),
-});
+const endpointType = z.enum(['CIDR', 'TAG', 'VLAN', 'HOST']);
+const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const flowSchema = z
+  .object({
+    sourceType: endpointType,
+    sourceValue: z.string().trim().min(1),
+    targetType: endpointType,
+    targetValue: z.string().trim().min(1),
+    direction: z.enum(['IN', 'OUT', 'BOTH']).default('BOTH'),
+    action: z.enum(['ALLOW', 'DENY']).default('ALLOW'),
+    protocol: z.enum(['tcp', 'udp', 'icmp', 'any']).default('tcp'),
+    ports: z
+      .string()
+      .trim()
+      .optional()
+      .nullable()
+      .transform((v) => (v ? v : null)),
+    comment: z.string().max(500).optional(),
+  })
+  .superRefine((b, ctx) => {
+    const checkEndpoint = (type: string, value: string, field: 'sourceValue' | 'targetValue') => {
+      if (type === 'CIDR') {
+        if (!isValidCidr(value)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: 'invalid_cidr' });
+      } else if (!uuidRe.test(value)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: 'invalid_uuid' });
+      }
+    };
+    checkEndpoint(b.sourceType, b.sourceValue, 'sourceValue');
+    checkEndpoint(b.targetType, b.targetValue, 'targetValue');
+    if (b.ports) {
+      if (b.protocol !== 'tcp' && b.protocol !== 'udp') {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ports'], message: 'ports_require_tcp_or_udp' });
+      } else if (!isValidPortSpec(b.ports)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ports'], message: 'invalid_ports' });
+      }
+    }
+  });
 
 topologyRouter.post('/views/:id/flows', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = flowSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.flatten() });
   const b = parsed.data;
+
+  const viewRes = await pool.query(`SELECT 1 FROM topology_views WHERE id = $1`, [req.params.id]);
+  if (!viewRes.rows[0]) return res.status(404).json({ error: 'not_found' });
 
   const { rows } = await pool.query(
     `INSERT INTO topology_flows
@@ -140,13 +171,16 @@ topologyRouter.delete('/flows/:flowId', requireRole('operator', 'admin'), async 
 topologyRouter.post('/views/:id/generate-policies', requireRole('operator', 'admin'), async (req, res) => {
   const userRes = await pool.query(`SELECT id FROM users WHERE username=$1 LIMIT 1`, [req.auth!.username]);
   const userId = userRes.rows[0]?.id ?? null;
-  const policySetName = req.body?.name || undefined;
+  const policySetName = typeof req.body?.name === 'string' && req.body.name.trim() ? req.body.name.trim() : undefined;
 
   try {
     const result = await generatePoliciesFromTopology(req.params.id, userId, policySetName);
     res.status(201).json(result);
   } catch (e: any) {
-    res.status(500).json({ error: e.message });
+    if (e instanceof TopologyValidationError) {
+      return res.status(400).json({ error: e.code, message: e.message, details: e.details });
+    }
+    throw e;
   }
 });
 
@@ -156,6 +190,6 @@ topologyRouter.get('/auto-discover', requireRole('viewer', 'operator', 'approver
     const result = await autoDiscoverTopology();
     res.json(result);
   } catch (e: any) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: 'auto_discover_failed', message: e?.message });
   }
 });

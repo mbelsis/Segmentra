@@ -1,38 +1,87 @@
-import { pool } from '../db/pool.js';
+import type { PoolClient } from 'pg';
 
-// Helper: check if IP matches a CIDR range
+import { pool } from '../db/pool.js';
+import { cidrContains, isValidCidr } from './ip-utils.js';
+
+// Helper: check if IP matches a CIDR range (IPv4 and IPv6)
 function ipMatchesCidr(ip: string, cidr: string): boolean {
-  try {
-    const cleanIp = ip.split('/')[0];
-    const [cidrIp, prefix] = cidr.split('/');
-    const prefixLen = prefix ? parseInt(prefix, 10) : 32;
-    if (prefixLen < 0 || prefixLen > 32) return false;
-    const ipParts = cleanIp.split('.').map(Number);
-    const cidrParts = cidrIp.split('.').map(Number);
-    if (ipParts.length !== 4 || cidrParts.length !== 4) return false;
-    if (ipParts.some(p => isNaN(p) || p < 0 || p > 255)) return false;
-    if (cidrParts.some(p => isNaN(p) || p < 0 || p > 255)) return false;
-    const mask = prefixLen === 0 ? 0 : (0xFFFFFFFF << (32 - prefixLen)) >>> 0;
-    const ipNum = (ipParts[0] << 24) + (ipParts[1] << 16) + (ipParts[2] << 8) + ipParts[3];
-    const cidrNum = (cidrParts[0] << 24) + (cidrParts[1] << 16) + (cidrParts[2] << 8) + cidrParts[3];
-    return (ipNum & mask) === (cidrNum & mask);
-  } catch {
-    return false;
-  }
+  return cidrContains(cidr, String(ip).split('/')[0]);
 }
 
-interface TagRuleCondition {
+/** Max length of a user-supplied regex and of the string it is tested against. */
+export const MAX_REGEX_LENGTH = 200;
+export const MAX_REGEX_INPUT_LENGTH = 256;
+
+/**
+ * Heuristic ReDoS guard for user-supplied regexes. Rejects:
+ *  - backreferences (\1, \k<name>)
+ *  - nested quantifiers: a quantified group that itself contains a quantifier, e.g. (a+)+, (.*)*, (\w+\d*){2,}
+ *  - quantified groups with alternation, e.g. (a|aa)+ (overlapping alternatives backtrack exponentially)
+ * Returns a reason string when the pattern is rejected, otherwise null.
+ */
+export function regexDangerReason(pattern: string): string | null {
+  if (pattern.length > MAX_REGEX_LENGTH) return `regex longer than ${MAX_REGEX_LENGTH} characters`;
+  if (/\\[1-9]|\\k<[^>]+>/.test(pattern)) return 'backreferences are not allowed';
+
+  // Strip escaped characters and character classes so only structural tokens remain.
+  const stripped = pattern.replace(/\\./g, 'x').replace(/\[(?:\\.|[^\]])*\]/g, 'x');
+  const quantAfter = /^(?:[+*]|\{\d+(?:,\d*)?\})/;
+  const stack: Array<{ hasQuant: boolean; hasAlt: boolean }> = [];
+  for (let i = 0; i < stripped.length; i++) {
+    const c = stripped[i];
+    if (c === '(') {
+      stack.push({ hasQuant: false, hasAlt: false });
+    } else if (c === ')') {
+      const group = stack.pop();
+      if (!group) continue;
+      const rest = stripped.slice(i + 1);
+      const quantified = quantAfter.test(rest);
+      if (quantified && group.hasQuant) return 'nested quantifiers (e.g. (a+)+) are not allowed';
+      if (quantified && group.hasAlt) return 'quantified alternation (e.g. (a|aa)+) is not allowed';
+      // Propagate to the parent: a quantified group (or one containing quantifiers) counts as a quantifier.
+      if (stack.length > 0 && (group.hasQuant || quantified)) stack[stack.length - 1].hasQuant = true;
+    } else if (c === '|') {
+      if (stack.length > 0) stack[stack.length - 1].hasAlt = true;
+    } else if (c === '+' || c === '*' || c === '{') {
+      if (c === '{' && !/^\{\d+(?:,\d*)?\}/.test(stripped.slice(i))) continue;
+      if (stack.length > 0) stack[stack.length - 1].hasQuant = true;
+    }
+  }
+  try {
+    new RegExp(pattern, 'i');
+  } catch (e: any) {
+    return `invalid regex: ${e?.message ?? 'syntax error'}`;
+  }
+  return null;
+}
+
+/** Validate tag-rule criteria before storing it. Returns a list of problems (empty = valid). */
+export function validateCriteria(criteria: TagRuleCriteria): string[] {
+  const problems: string[] = [];
+  (criteria?.conditions ?? []).forEach((c, idx) => {
+    if (c.operator === 'matches') {
+      const reason = regexDangerReason(String(c.value ?? ''));
+      if (reason) problems.push(`condition ${idx + 1}: ${reason}`);
+    }
+    if (c.operator === 'in_cidr' && !isValidCidr(String(c.value ?? ''))) {
+      problems.push(`condition ${idx + 1}: "${c.value}" is not a valid CIDR`);
+    }
+  });
+  return problems;
+}
+
+export interface TagRuleCondition {
   field: string;      // hostname, mgmt_ip, vlan_id, vlan_tag, os_family, environment, firewall_backend, tag
   operator: string;   // equals, not_equals, matches, contains, in_cidr, has_tag
   value: string;
 }
 
-interface TagRuleCriteria {
+export interface TagRuleCriteria {
   conditions: TagRuleCondition[];
   logic: 'AND' | 'OR';
 }
 
-interface HostData {
+export interface HostData {
   id: string;
   hostname: string;
   mgmt_ip: string;
@@ -45,33 +94,33 @@ interface HostData {
   tag_names: string[];
 }
 
-async function getHostData(hostId?: string): Promise<HostData[]> {
-  const hostQuery = hostId
-    ? `SELECT h.*, v.vlan_tag FROM hosts h LEFT JOIN vlans v ON h.vlan_id = v.id WHERE h.id = $1`
-    : `SELECT h.*, v.vlan_tag FROM hosts h LEFT JOIN vlans v ON h.vlan_id = v.id WHERE h.enabled = true`;
-  const hostParams = hostId ? [hostId] : [];
-  const { rows: hosts } = await pool.query(hostQuery, hostParams);
-
-  const result: HostData[] = [];
-  for (const host of hosts) {
-    const { rows: tags } = await pool.query(
-      `SELECT t.id, t.name FROM tags t JOIN host_tags ht ON ht.tag_id = t.id WHERE ht.host_id = $1`,
-      [host.id]
-    );
-    result.push({
-      id: host.id,
-      hostname: host.hostname,
-      mgmt_ip: host.mgmt_ip,
-      vlan_id: host.vlan_id,
-      vlan_tag: host.vlan_tag,
-      os_family: host.os_family,
-      environment: host.environment,
-      firewall_backend: host.firewall_backend,
-      tag_ids: tags.map((t: any) => t.id),
-      tag_names: tags.map((t: any) => t.name),
-    });
-  }
-  return result;
+async function getHostData(hostId?: string, db: Pick<PoolClient, 'query'> = pool): Promise<HostData[]> {
+  const { rows } = await db.query(
+    `SELECT h.id, h.hostname, host(h.mgmt_ip) AS mgmt_ip, h.vlan_id, v.vlan_tag, h.os_family, h.environment,
+            h.firewall_backend,
+            COALESCE(array_agg(t.id) FILTER (WHERE t.id IS NOT NULL), '{}') AS tag_ids,
+            COALESCE(array_agg(t.name) FILTER (WHERE t.id IS NOT NULL), '{}') AS tag_names
+       FROM hosts h
+       LEFT JOIN vlans v ON h.vlan_id = v.id
+       LEFT JOIN host_tags ht ON ht.host_id = h.id
+       LEFT JOIN tags t ON t.id = ht.tag_id
+      WHERE ${hostId ? 'h.id = $1' : 'h.enabled = true'}
+      GROUP BY h.id, v.vlan_tag
+      ORDER BY h.hostname ASC`,
+    hostId ? [hostId] : []
+  );
+  return rows.map((host: any) => ({
+    id: host.id,
+    hostname: host.hostname,
+    mgmt_ip: host.mgmt_ip,
+    vlan_id: host.vlan_id,
+    vlan_tag: host.vlan_tag,
+    os_family: host.os_family,
+    environment: host.environment,
+    firewall_backend: host.firewall_backend,
+    tag_ids: host.tag_ids ?? [],
+    tag_names: host.tag_names ?? [],
+  }));
 }
 
 function evaluateCondition(condition: TagRuleCondition, host: HostData): boolean {
@@ -108,11 +157,10 @@ function evaluateCondition(condition: TagRuleCondition, host: HostData): boolean
       return fieldValue.toLowerCase() !== value.toLowerCase();
     case 'matches':
       try {
-        // Limit regex length to prevent ReDoS
-        if (value.length > 200) return false;
+        // Rules are validated on create/update; re-check here for rows stored before that.
+        if (regexDangerReason(value)) return false;
         const regex = new RegExp(value, 'i');
-        // Test with a timeout by limiting input length
-        const testValue = fieldValue.length > 1000 ? fieldValue.slice(0, 1000) : fieldValue;
+        const testValue = fieldValue.slice(0, MAX_REGEX_INPUT_LENGTH);
         return regex.test(testValue);
       } catch {
         return false;
@@ -128,7 +176,8 @@ function evaluateCondition(condition: TagRuleCondition, host: HostData): boolean
   }
 }
 
-function evaluateCriteria(criteria: TagRuleCriteria, host: HostData): boolean {
+/** Pure matcher: does a host satisfy the criteria? */
+export function evaluateCriteria(criteria: TagRuleCriteria, host: HostData): boolean {
   if (!criteria.conditions || criteria.conditions.length === 0) return false;
 
   if (criteria.logic === 'OR') {
@@ -138,100 +187,154 @@ function evaluateCriteria(criteria: TagRuleCriteria, host: HostData): boolean {
   return criteria.conditions.every(c => evaluateCondition(c, host));
 }
 
-export async function evaluateRule(ruleId: string): Promise<{ matched: number; total: number }> {
-  const { rows: rules } = await pool.query(`SELECT * FROM tag_rules WHERE id = $1`, [ruleId]);
-  if (!rules[0]) throw new Error('Tag rule not found');
-  const rule = rules[0];
-
+/**
+ * Hosts that would match the criteria right now. Performs no writes (used by
+ * POST /api/tag-rules/preview).
+ */
+export async function previewCriteria(criteria: TagRuleCriteria): Promise<Array<{ id: string; hostname: string }>> {
   const hosts = await getHostData();
-  const criteria = rule.criteria as TagRuleCriteria;
-  let matched = 0;
+  return hosts.filter((h) => evaluateCriteria(criteria, h)).map((h) => ({ id: h.id, hostname: h.hostname }));
+}
 
-  for (const host of hosts) {
-    const isMatch = evaluateCriteria(criteria, host);
+/** Remove every host_tags row a rule assigned (used when a rule is disabled, retargeted or deleted). */
+export async function removeRuleAssignedTags(ruleId: string, db: Pick<PoolClient, 'query'> = pool): Promise<number> {
+  const { rowCount } = await db.query(`DELETE FROM host_tags WHERE source = 'rule' AND source_rule_id = $1`, [ruleId]);
+  await db.query(`UPDATE tag_rule_results SET matched = false, evaluated_at = now() WHERE tag_rule_id = $1`, [ruleId]);
+  return rowCount ?? 0;
+}
 
-    // Upsert result
-    await pool.query(
-      `INSERT INTO tag_rule_results (tag_rule_id, host_id, matched, evaluated_at)
-       VALUES ($1, $2, $3, now())
-       ON CONFLICT (tag_rule_id, host_id) DO UPDATE SET matched = $3, evaluated_at = now()`,
-      [ruleId, host.id, isMatch]
+type ReconcileResult = {
+  perRule: Map<string, number>;
+  hostsEvaluated: number;
+  rulesEvaluated: number;
+  assigned: Array<{ hostId: string; tagId: string; ruleId: string }>;
+};
+
+/**
+ * Bring rule-assigned host tags in line with the ENABLED rules (disabled rules assign nothing).
+ * For each (host, tag) the highest-priority matching rule owns the assignment. Manual tags are
+ * never touched; a manual tag also satisfies a rule (no duplicate row is created).
+ */
+async function reconcileRuleTags(opts: { hostId?: string } = {}): Promise<ReconcileResult> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Serialize concurrent reconciliations (interval job vs. API calls).
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext('segmentra_tag_rule_reconcile'))`);
+
+    const { rows: rules } = await client.query(
+      `SELECT id, tag_id, criteria, enabled FROM tag_rules ORDER BY priority DESC, created_at ASC, id ASC`
     );
+    const enabledRules = rules.filter((r: any) => r.enabled);
+    const disabledIds = rules.filter((r: any) => !r.enabled).map((r: any) => r.id);
+    const hosts = await getHostData(opts.hostId, client);
+    const hostIds = hosts.map((h) => h.id);
 
-    if (isMatch) {
-      matched++;
-      // Auto-assign tag if not already present
-      await pool.query(
+    const perRule = new Map<string, number>();
+    const desired = new Map<string, string>(); // `${hostId}|${tagId}` -> ruleId
+
+    for (const rule of enabledRules) {
+      const criteria = (typeof rule.criteria === 'string' ? JSON.parse(rule.criteria) : rule.criteria) as TagRuleCriteria;
+      const matchedIds: string[] = [];
+      const unmatchedIds: string[] = [];
+      for (const host of hosts) {
+        if (evaluateCriteria(criteria, host)) {
+          matchedIds.push(host.id);
+          const key = `${host.id}|${rule.tag_id}`;
+          if (!desired.has(key)) desired.set(key, rule.id);
+        } else {
+          unmatchedIds.push(host.id);
+        }
+      }
+      perRule.set(rule.id, matchedIds.length);
+      if (hosts.length > 0) {
+        await client.query(
+          `INSERT INTO tag_rule_results (tag_rule_id, host_id, matched, evaluated_at)
+           SELECT $1, x.host_id, x.matched, now()
+             FROM unnest($2::uuid[], $3::boolean[]) AS x(host_id, matched)
+           ON CONFLICT (tag_rule_id, host_id) DO UPDATE SET matched = EXCLUDED.matched, evaluated_at = now()`,
+          [rule.id, [...matchedIds, ...unmatchedIds], [...matchedIds.map(() => true), ...unmatchedIds.map(() => false)]]
+        );
+      }
+    }
+
+    // Disabled rules match nothing.
+    if (disabledIds.length > 0 && hostIds.length > 0) {
+      await client.query(
+        `UPDATE tag_rule_results SET matched = false, evaluated_at = now()
+          WHERE tag_rule_id = ANY($1::uuid[]) AND host_id = ANY($2::uuid[])`,
+        [disabledIds, hostIds]
+      );
+    }
+
+    // Existing rule-assigned tags for the evaluated hosts.
+    const { rows: existing } = hostIds.length
+      ? await client.query(
+          `SELECT host_id, tag_id, source_rule_id FROM host_tags WHERE source = 'rule' AND host_id = ANY($1::uuid[])`,
+          [hostIds]
+        )
+      : { rows: [] as any[] };
+
+    const existingKeys = new Set<string>();
+    for (const row of existing) {
+      const key = `${row.host_id}|${row.tag_id}`;
+      existingKeys.add(key);
+      const owner = desired.get(key);
+      if (!owner) {
+        await client.query(
+          `DELETE FROM host_tags WHERE host_id = $1 AND tag_id = $2 AND source = 'rule'`,
+          [row.host_id, row.tag_id]
+        );
+      } else if (owner !== row.source_rule_id) {
+        await client.query(
+          `UPDATE host_tags SET source_rule_id = $3 WHERE host_id = $1 AND tag_id = $2 AND source = 'rule'`,
+          [row.host_id, row.tag_id, owner]
+        );
+      }
+    }
+
+    const assigned: ReconcileResult['assigned'] = [];
+    for (const [key, ruleId] of desired) {
+      if (existingKeys.has(key)) continue;
+      const [hostId, tagId] = key.split('|');
+      const { rowCount } = await client.query(
         `INSERT INTO host_tags (host_id, tag_id, source, source_rule_id)
          VALUES ($1, $2, 'rule', $3)
          ON CONFLICT (host_id, tag_id) DO NOTHING`,
-        [host.id, rule.tag_id, ruleId]
+        [hostId, tagId, ruleId]
       );
-    } else {
-      // Remove auto-assigned tag from this rule (but not manual ones)
-      await pool.query(
-        `DELETE FROM host_tags WHERE host_id = $1 AND tag_id = $2 AND source = 'rule' AND source_rule_id = $3`,
-        [host.id, rule.tag_id, ruleId]
-      );
+      if (rowCount) assigned.push({ hostId, tagId, ruleId });
     }
-  }
 
-  return { matched, total: hosts.length };
+    await client.query('COMMIT');
+    return { perRule, hostsEvaluated: hosts.length, rulesEvaluated: enabledRules.length, assigned };
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+export async function evaluateRule(ruleId: string): Promise<{ matched: number; total: number; enabled: boolean }> {
+  const { rows: rules } = await pool.query(`SELECT id, enabled FROM tag_rules WHERE id = $1`, [ruleId]);
+  if (!rules[0]) throw new Error('Tag rule not found');
+  const result = await reconcileRuleTags();
+  return { matched: result.perRule.get(ruleId) ?? 0, total: result.hostsEvaluated, enabled: !!rules[0].enabled };
 }
 
 export async function evaluateAllRules(): Promise<{ rulesEvaluated: number; totalMatches: number }> {
-  const { rows: rules } = await pool.query(
-    `SELECT id FROM tag_rules WHERE enabled = true ORDER BY priority DESC`
-  );
-
+  const result = await reconcileRuleTags();
   let totalMatches = 0;
-  for (const rule of rules) {
-    const result = await evaluateRule(rule.id);
-    totalMatches += result.matched;
-  }
-
-  return { rulesEvaluated: rules.length, totalMatches };
+  for (const n of result.perRule.values()) totalMatches += n;
+  return { rulesEvaluated: result.rulesEvaluated, totalMatches };
 }
 
 export async function evaluateHostAgainstRules(hostId: string): Promise<{ rulesMatched: number; tagsAssigned: string[] }> {
-  const { rows: rules } = await pool.query(
-    `SELECT * FROM tag_rules WHERE enabled = true ORDER BY priority DESC`
-  );
-
-  const hosts = await getHostData(hostId);
-  if (!hosts[0]) throw new Error('Host not found');
-  const host = hosts[0];
-
-  const tagsAssigned: string[] = [];
-
-  for (const rule of rules) {
-    const criteria = rule.criteria as TagRuleCriteria;
-    const isMatch = evaluateCriteria(criteria, host);
-
-    await pool.query(
-      `INSERT INTO tag_rule_results (tag_rule_id, host_id, matched, evaluated_at)
-       VALUES ($1, $2, $3, now())
-       ON CONFLICT (tag_rule_id, host_id) DO UPDATE SET matched = $3, evaluated_at = now()`,
-      [rule.id, hostId, isMatch]
-    );
-
-    if (isMatch) {
-      const { rowCount } = await pool.query(
-        `INSERT INTO host_tags (host_id, tag_id, source, source_rule_id)
-         VALUES ($1, $2, 'rule', $3)
-         ON CONFLICT (host_id, tag_id) DO NOTHING`,
-        [hostId, rule.tag_id, rule.id]
-      );
-      if (rowCount && rowCount > 0) {
-        tagsAssigned.push(rule.tag_id);
-      }
-    } else {
-      await pool.query(
-        `DELETE FROM host_tags WHERE host_id = $1 AND tag_id = $2 AND source = 'rule' AND source_rule_id = $3`,
-        [hostId, rule.tag_id, rule.id]
-      );
-    }
-  }
-
-  return { rulesMatched: tagsAssigned.length, tagsAssigned };
+  const { rows } = await pool.query(`SELECT id FROM hosts WHERE id = $1`, [hostId]);
+  if (!rows[0]) throw new Error('Host not found');
+  const result = await reconcileRuleTags({ hostId });
+  let rulesMatched = 0;
+  for (const n of result.perRule.values()) if (n > 0) rulesMatched++;
+  return { rulesMatched, tagsAssigned: result.assigned.map((a) => a.tagId) };
 }

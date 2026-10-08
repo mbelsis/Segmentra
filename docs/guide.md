@@ -76,7 +76,7 @@ This starts PostgreSQL (port 15432), runs migrations, seeds roles, creates the d
 
 Open `http://localhost:5173` and login with:
 - **Username:** `admin`
-- **Password:** `admin123`
+- **Password:** `admin123` (development default; if `SEGMENTRA_ADMIN_PASSWORD` was set when the database was first seeded, use that instead. Production installs use the `SEGMENTRA_ADMIN_PASSWORD` from `.env`.)
 
 Change the password immediately after first login.
 
@@ -426,7 +426,7 @@ Segmentra API Server                         Target Host
 ### Key Details
 
 - **Sequential execution**: Hosts are processed one at a time
-- **SSH options**: `StrictHostKeyChecking=no`, `UserKnownHostsFile=/dev/null` (to avoid interactive prompts)
+- **SSH host keys**: trust-on-first-use — `StrictHostKeyChecking=accept-new` with the known_hosts file from `SEGMENTRA_KNOWN_HOSTS` (default `~/.ssh/known_hosts`); a changed host key fails the connection
 - **All commands use `sudo`**: The SSH user doesn't need to be root
 - **Backend mismatch detection**: If the host has nftables but the policy was compiled for iptables (or vice versa), the deployment fails for that host before applying
 - **Automatic rollback**: If `nft -f` or `iptables-restore` fails, the latest backup is automatically restored
@@ -1072,6 +1072,8 @@ These jobs run as `setInterval` callbacks in the API process — no external sch
                ┌──────────┐
                │ DEPLOYED │
                └──────────┘
+
+APPROVED, DEPLOYED and PENDING_APPROVAL versions can be moved to ARCHIVED (read-only).
 ```
 
 ---

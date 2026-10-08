@@ -8,7 +8,10 @@
 # Environment variable overrides:
 #   SEGMENTRA_DATABASE_URL  - Custom PostgreSQL connection URL
 #   SEGMENTRA_RESET_DB=1    - Wipe docker volumes before start (DATA LOSS)
-#   JWT_SECRET              - JWT signing secret
+#   JWT_SECRET              - JWT signing secret (dev: generated once into .dev-jwt-secret;
+#                             prod: required, >= 32 chars)
+#   SEGMENTRA_KEK_B64       - Secret-encryption key (32 bytes base64; recommended, required for prod)
+#   SEGMENTRA_ADMIN_PASSWORD - Password for the initial "admin" user (prod: required to create it)
 #   PORT                    - API port (default: 8080)
 #   BUNDLES_DIR             - Deployment bundles directory
 #   ANSIBLE_RUNNER_CONTAINER - Ansible runner container name
@@ -61,11 +64,19 @@ fi
 echo "[segmentra]   npm ............ OK ($(npm -v))"
 echo ""
 
-# ── Install dependencies if needed ─────────────────────
-if [[ ! -d node_modules ]]; then
-  echo "[segmentra] Installing dependencies..."
-  npm install
+# ── Install / refresh dependencies ─────────────────────
+# Clean install when node_modules is missing; re-install when package-lock.json or any
+# workspace package.json is newer than the last install (node_modules/.package-lock.json).
+INSTALL_MARKER="node_modules/.package-lock.json"
+if [[ ! -f "$INSTALL_MARKER" ]]; then
+  echo "[segmentra] Installing dependencies (npm ci)..."
+  if [[ -f package-lock.json ]]; then npm ci; else npm install; fi
   echo "[segmentra] Dependencies installed - OK"
+  echo ""
+elif [[ -n "$(find package-lock.json package.json apps/*/package.json packages/*/package.json -newer "$INSTALL_MARKER" 2>/dev/null)" ]]; then
+  echo "[segmentra] Dependency manifests changed - running npm install..."
+  npm install
+  echo "[segmentra] Dependencies updated - OK"
   echo ""
 fi
 
@@ -85,7 +96,7 @@ echo ""
 echo -n "[segmentra] Waiting for PostgreSQL to be ready"
 TRIES=0
 MAX_TRIES=30
-while ! docker exec segmentra-segmentra-db-1 pg_isready -U segmentra >/dev/null 2>&1; do
+while ! docker compose exec -T segmentra-db pg_isready -U segmentra >/dev/null 2>&1; do
   TRIES=$((TRIES + 1))
   if [[ $TRIES -ge $MAX_TRIES ]]; then
     echo ""
@@ -100,7 +111,25 @@ echo ""
 
 # ── Environment variables ──────────────────────────────
 export DATABASE_URL="${SEGMENTRA_DATABASE_URL:-postgres://segmentra:segmentra@127.0.0.1:15432/segmentra}"
-export JWT_SECRET="${JWT_SECRET:-change-me-to-a-long-random-string}"
+if [[ "$MODE" == "prod" ]]; then
+  export NODE_ENV=production
+  if [[ -z "${JWT_SECRET:-}" ]]; then
+    echo "[segmentra] ERROR: JWT_SECRET must be set in prod mode (>= 32 chars, e.g. openssl rand -hex 32)."
+    exit 1
+  fi
+  if [[ -z "${SEGMENTRA_KEK_B64:-}" ]]; then
+    echo "[segmentra] WARNING: SEGMENTRA_KEK_B64 is not set - secrets will be encrypted with a key derived from JWT_SECRET."
+  fi
+elif [[ -z "${JWT_SECRET:-}" ]]; then
+  # Dev: generate a random secret once and keep it in an untracked file so tokens
+  # (and secrets encrypted with the JWT-derived key) survive restarts.
+  if [[ ! -s .dev-jwt-secret ]]; then
+    (umask 077 && node -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))" > .dev-jwt-secret)
+    echo "[segmentra] Generated development JWT secret in .dev-jwt-secret"
+  fi
+  JWT_SECRET="$(cat .dev-jwt-secret)"
+  export JWT_SECRET
+fi
 export PORT="${PORT:-8080}"
 export BUNDLES_DIR="${BUNDLES_DIR:-./data/bundles}"
 export ANSIBLE_RUNNER_CONTAINER="${ANSIBLE_RUNNER_CONTAINER:-segmentra-ansible-runner}"
@@ -129,7 +158,7 @@ echo ""
 
 # ── Build workspaces ───────────────────────────────────
 echo "[segmentra] Building workspaces..."
-npm run build -ws
+npm run build
 echo "[segmentra] Build complete - OK"
 echo ""
 
@@ -185,9 +214,13 @@ echo "[segmentra] ========================================"
 echo "[segmentra] Default Login Credentials"
 echo "[segmentra] ========================================"
 echo "[segmentra]   Username: admin"
-echo "[segmentra]   Password: admin123"
-echo ""
-echo "[segmentra]   IMPORTANT: Change the default password after first login!"
+if [[ -n "${SEGMENTRA_ADMIN_PASSWORD:-}" ]]; then
+  echo "[segmentra]   Password: (value of SEGMENTRA_ADMIN_PASSWORD when the admin user was first created)"
+else
+  echo "[segmentra]   Password: admin123 (dev default, unless the admin user already existed)"
+  echo ""
+  echo "[segmentra]   IMPORTANT: Change the default password after first login!"
+fi
 echo ""
 echo "[segmentra] Logs:"
 echo "[segmentra]   tail -f $API_LOG"

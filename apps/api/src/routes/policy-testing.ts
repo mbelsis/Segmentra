@@ -8,9 +8,15 @@ import { pool } from '../db/pool.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { analyzePolicyTest } from '../services/policy-test-analyzer.js';
 import { compileHostPolicy } from '@segmentra/compiler';
-import { startAuditSession, deployLogOnlyPolicy, restoreAuditSession, retrieveAuditLogs, type AuditSshHost } from '@segmentra/executor';
-import { readSecretPlaintext } from '../services/secrets.js';
+import { startAuditSession, deployLogOnlyPolicy, restoreAuditSession, retrieveAuditLogs } from '@segmentra/executor';
 import { parseFirewallLogs, groupCommunicationFlows } from '../services/log-parser.js';
+import { getSshCredentialForHost, type MaterializedSshCredential } from '../services/ssh-credentials.js';
+import {
+  ACTIVE_TEST_SESSION_STATUSES,
+  buildAuditHost,
+  markRestoreFailed,
+  restoreAndCollectSession
+} from '../lib/policy-test-session.js';
 
 export const policyTestingRouter = Router();
 policyTestingRouter.use(requireAuth);
@@ -62,7 +68,7 @@ policyTestingRouter.get('/sessions/:id', requireRole('viewer', 'operator', 'appr
 
 // Start a policy test — compiles policy in log-only mode, SSHes into the host,
 // backs up current rules, deploys the log-only policy, and waits for traffic.
-policyTestingRouter.post('/start', requireRole('operator', 'admin'), async (req, res) => {
+policyTestingRouter.post('/start', requireRole('operator', 'approver', 'admin'), async (req, res) => {
   const bodySchema = z.object({
     policyVersionId: z.string().uuid(),
     hostId: z.string().uuid(),
@@ -72,8 +78,8 @@ policyTestingRouter.post('/start', requireRole('operator', 'admin'), async (req,
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
   const b = parsed.data;
 
-  const userRes = await pool.query(`SELECT id FROM users WHERE username=$1 LIMIT 1`, [req.auth!.username]);
-  const userId = userRes.rows[0]?.id ?? null;
+  const userId = req.auth!.userId;
+  const roles = req.auth!.roles;
 
   // Check host exists
   const { rows: hosts } = await pool.query(
@@ -94,50 +100,73 @@ policyTestingRouter.post('/start', requireRole('operator', 'admin'), async (req,
   );
   if (!versions[0]) return res.status(404).json({ error: 'policy_version_not_found' });
 
-  // Get SSH credentials
-  const credRes = await pool.query(
-    `SELECT * FROM ssh_credentials WHERE scope_type='GLOBAL' ORDER BY created_at DESC LIMIT 1`
-  );
-  const cred = credRes.rows[0];
-  if (!cred) {
-    return res.status(400).json({ error: 'missing_ssh_credential', message: 'SSH credentials are required. Configure them in Admin → SSH Credentials.' });
+  // Testing pushes rules to a real host: operators may only test reviewed (APPROVED/DEPLOYED) versions;
+  // unreviewed versions (DRAFT, PENDING_APPROVAL, ...) may only be tested by approvers/admins.
+  const versionReviewed = ['APPROVED', 'DEPLOYED'].includes(versions[0].status);
+  const canTestUnreviewed = roles.includes('approver') || roles.includes('admin');
+  if (!versionReviewed && !canTestUnreviewed) {
+    return res.status(403).json({
+      error: 'version_not_approved',
+      message: `Only approvers or admins can test a ${versions[0].status} policy version. Operators can test APPROVED or DEPLOYED versions.`
+    });
   }
 
-  // Create test session record
+  // Create the test session record, refusing if another test is already active on this host.
   const scheduledEnd = new Date(Date.now() + b.durationMinutes * 60 * 1000);
-  const { rows: sessionRows } = await pool.query(
-    `INSERT INTO policy_test_sessions
-      (policy_version_id, host_id, status, duration_minutes, started_at, scheduled_end_at, created_by)
-     VALUES ($1, $2, 'DEPLOYING', $3, now(), $4, $5) RETURNING *`,
-    [b.policyVersionId, b.hostId, b.durationMinutes, scheduledEnd, userId]
-  );
-  const session = sessionRows[0];
+  let session: any;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1::text))`, [b.hostId]);
+    const active = await client.query(
+      `SELECT id, status FROM policy_test_sessions WHERE host_id = $1 AND status = ANY($2::text[]) LIMIT 1`,
+      [b.hostId, ACTIVE_TEST_SESSION_STATUSES]
+    );
+    if (active.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'test_already_running',
+        message: `Another policy test (${active.rows[0].id}, ${active.rows[0].status}) is already active on ${host.hostname}. Stop it before starting a new one.`,
+        sessionId: active.rows[0].id
+      });
+    }
+    const { rows: sessionRows } = await client.query(
+      `INSERT INTO policy_test_sessions
+        (policy_version_id, host_id, status, duration_minutes, started_at, scheduled_end_at, created_by)
+       VALUES ($1, $2, 'DEPLOYING', $3, now(), $4, $5) RETURNING *`,
+      [b.policyVersionId, b.hostId, b.durationMinutes, scheduledEnd, userId]
+    );
+    await client.query('COMMIT');
+    session = sessionRows[0];
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
 
-  const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
-  const tempKeyPath = path.join(os.tmpdir(), `policy_test_key_${session.id}_${Date.now()}`);
   const logFilePath = `/var/log/segmentra-test-${host.hostname}-${Date.now()}.log`;
+  let cred: MaterializedSshCredential | null = null;
+  let backupPath: string | null = null;
+  let policyFilePath: string | null = null;
 
   try {
-    // Write SSH key to temp file
-    fs.writeFileSync(tempKeyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
-
-    const backendRaw = String(host.firewall_backend ?? 'auto');
-    const backend = backendRaw === 'iptables' ? 'iptables' : 'nftables';
-
-    const auditHost: AuditSshHost = {
-      hostname: host.hostname,
-      ip: String(host.mgmt_ip),
-      port: host.ssh_port || 22,
-      username: cred.username,
-      privateKeyPath: tempKeyPath,
-      backend
-    };
+    cred = await getSshCredentialForHost(host.id);
+    const auditHost = buildAuditHost(host, cred);
+    const backend = auditHost.backend;
 
     // Step 1: SSH into host — backup current rules and configure logging
     const startResult = await startAuditSession(auditHost, logFilePath);
     if (!startResult.success) {
       throw new Error(`Failed to backup rules on ${host.hostname}: ${startResult.stderr}`);
     }
+    backupPath = startResult.backupPath ?? null;
+
+    // Persist the backup location immediately so a later failure (or a crash) can still restore.
+    await pool.query(
+      `UPDATE policy_test_sessions SET backup_path = $2, log_file_path = $3 WHERE id = $1`,
+      [session.id, backupPath, logFilePath]
+    );
 
     // Step 2: Compile the SPECIFIC policy version in log-only mode
     const { rows: rules } = await pool.query(
@@ -219,23 +248,30 @@ policyTestingRouter.post('/start', requireRole('operator', 'admin'), async (req,
       })
     );
 
-    const compiled = compileHostPolicy({
-      host: {
-        id: host.id,
-        hostname: host.hostname,
-        mgmtIp: host.mgmt_ip ? String(host.mgmt_ip) : null,
-        firewallBackend: backend,
-        interfaces: (host.interfaces || []).map((i: any) => ({ name: i.name, role: i.role, enabled: i.enabled })),
-      },
-      policyInterfaceScope,
-      rules: compiledRules,
-      sets,
-      baseline: { mgmtSshCidrs: mgmtCidrs },
-      logOnlyMode: true,
-    });
+    let compiled;
+    try {
+      compiled = compileHostPolicy({
+        host: {
+          id: host.id,
+          hostname: host.hostname,
+          mgmtIp: host.mgmt_ip ? String(host.mgmt_ip) : null,
+          sshPort: host.ssh_port ? Number(host.ssh_port) : undefined,
+          firewallBackend: backend,
+          interfaces: (host.interfaces || []).map((i: any) => ({ name: i.name, role: i.role, enabled: i.enabled })),
+        },
+        policyInterfaceScope,
+        rules: compiledRules,
+        sets,
+        baseline: { mgmtSshCidrs: mgmtCidrs },
+        logOnlyMode: true,
+      });
+    } catch (ce: any) {
+      if (ce?.name === 'CompileError') throw new Error(`Policy failed to compile for ${host.hostname}: ${ce.message}`);
+      throw ce;
+    }
 
     // Step 3: Deploy the log-only policy to the host via SSH
-    const policyFilePath = path.join(os.tmpdir(), `policy_test_${session.id}_${Date.now()}.${compiled.backend === 'nftables' ? 'nft' : 'iptables'}`);
+    policyFilePath = path.join(os.tmpdir(), `policy_test_${session.id}_${Date.now()}.${compiled.backend === 'nftables' ? 'nft' : 'iptables'}`);
     const deployResult = await deployLogOnlyPolicy(auditHost, compiled.text, policyFilePath);
 
     if (!deployResult.success) {
@@ -243,12 +279,7 @@ policyTestingRouter.post('/start', requireRole('operator', 'admin'), async (req,
     }
 
     // Success — update session to RUNNING
-    await pool.query(
-      `UPDATE policy_test_sessions
-       SET status = 'RUNNING', backup_path = $2, log_file_path = $3
-       WHERE id = $1`,
-      [session.id, startResult.backupPath, logFilePath]
-    );
+    await pool.query(`UPDATE policy_test_sessions SET status = 'RUNNING' WHERE id = $1`, [session.id]);
 
     await pool.query(
       `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
@@ -257,55 +288,65 @@ policyTestingRouter.post('/start', requireRole('operator', 'admin'), async (req,
         hostId: b.hostId,
         hostname: host.hostname,
         policyVersionId: b.policyVersionId,
+        policyVersionStatus: versions[0].status,
         durationMinutes: b.durationMinutes,
         backend: compiled.backend,
         rulesCount: compiledRules.length
       })]
     );
 
-    // Clean up local temp files
-    if (fs.existsSync(policyFilePath)) fs.unlinkSync(policyFilePath);
-    if (fs.existsSync(tempKeyPath)) fs.unlinkSync(tempKeyPath);
-
     res.status(201).json({
-      session: { ...session, status: 'RUNNING', backup_path: startResult.backupPath, log_file_path: logFilePath },
+      session: { ...session, status: 'RUNNING', backup_path: backupPath, log_file_path: logFilePath },
       message: `Log-only policy deployed to ${host.hostname}. Traffic is being captured for ${b.durationMinutes} minutes. Original rules will be restored automatically when the test ends.`,
       compiled: { backend: compiled.backend, sha256: compiled.sha256, rulesCount: compiledRules.length }
     });
   } catch (e: any) {
-    // On failure, try to restore original rules if we have a backup
-    try {
-      if (fs.existsSync(tempKeyPath)) {
-        const auditHost: AuditSshHost = {
-          hostname: host.hostname,
-          ip: String(host.mgmt_ip),
-          port: host.ssh_port || 22,
-          username: cred.username,
-          privateKeyPath: tempKeyPath,
-          backend: (host.firewall_backend === 'iptables' ? 'iptables' : 'nftables') as 'nftables' | 'iptables'
-        };
-        // Best-effort restore
-        const backupRes = await pool.query(`SELECT backup_path FROM policy_test_sessions WHERE id = $1`, [session.id]);
-        if (backupRes.rows[0]?.backup_path) {
-          await restoreAuditSession(auditHost, backupRes.rows[0].backup_path);
-        }
+    const message = e?.message ?? String(e);
+    let restoreError: string | null = null;
+
+    // If the backup was taken, the host's rules may have been modified: restore using the in-memory path.
+    if (backupPath && cred) {
+      try {
+        const restore = await restoreAuditSession(buildAuditHost(host, cred), backupPath);
+        if (!restore.success) restoreError = (restore.stderr || restore.stdout || `exit code ${restore.exitCode}`).trim();
+      } catch (re: any) {
+        restoreError = re?.message ?? String(re);
       }
-    } catch { /* best effort */ }
+    }
+
+    if (restoreError) {
+      // Keep the session RUNNING so the expiry job keeps retrying the restore; flag it as a failed start.
+      await markRestoreFailed(session.id, `Restore after failed start: ${restoreError}`, { start_failed: true, start_error: message });
+      return res.status(500).json({
+        error: 'test_start_failed',
+        message: `${message}. WARNING: restoring the original rules on ${host.hostname} also failed (${restoreError}); it will be retried automatically.`,
+        restoreFailed: true
+      });
+    }
 
     await pool.query(
-      `UPDATE policy_test_sessions SET status = 'FAILED' WHERE id = $1`,
-      [session.id]
+      `UPDATE policy_test_sessions
+         SET status = 'FAILED', completed_at = now(),
+             raw_log_data = COALESCE(raw_log_data, '{}'::jsonb) || jsonb_build_object('start_error', $2::text)
+       WHERE id = $1`,
+      [session.id, message.slice(0, 4000)]
     );
 
-    // Clean up temp files
-    if (fs.existsSync(tempKeyPath)) { try { fs.unlinkSync(tempKeyPath); } catch {} }
-
-    res.status(500).json({ error: 'test_start_failed', message: e.message });
+    if (message === 'missing_ssh_credential') {
+      return res.status(400).json({ error: 'missing_ssh_credential', message: 'SSH credentials are required. Configure them in Admin → SSH Credentials.' });
+    }
+    if (message.startsWith('Policy failed to compile')) {
+      return res.status(400).json({ error: 'policy_compile_failed', message });
+    }
+    res.status(500).json({ error: 'test_start_failed', message });
+  } finally {
+    if (policyFilePath && fs.existsSync(policyFilePath)) { try { fs.unlinkSync(policyFilePath); } catch { /* ignore */ } }
+    cred?.cleanup();
   }
 });
 
 // Stop a running test — SSH into host, restore original rules, retrieve logs
-policyTestingRouter.post('/sessions/:id/stop', requireRole('operator', 'admin'), async (req, res) => {
+policyTestingRouter.post('/sessions/:id/stop', requireRole('operator', 'approver', 'admin'), async (req, res) => {
   const { rows: sessions } = await pool.query(
     `SELECT pts.*, h.hostname, h.mgmt_ip, h.ssh_port, h.firewall_backend
      FROM policy_test_sessions pts
@@ -316,70 +357,33 @@ policyTestingRouter.post('/sessions/:id/stop', requireRole('operator', 'admin'),
   if (!sessions[0]) return res.status(404).json({ error: 'not_found_or_not_running' });
   const session = sessions[0];
 
-  // Get SSH credentials
-  const credRes = await pool.query(
-    `SELECT * FROM ssh_credentials WHERE scope_type='GLOBAL' ORDER BY created_at DESC LIMIT 1`
-  );
-  const cred = credRes.rows[0];
-  if (!cred) return res.status(400).json({ error: 'missing_ssh_credential' });
-
-  const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
-  const tempKeyPath = path.join(os.tmpdir(), `policy_test_stop_${session.id}_${Date.now()}`);
-
-  try {
-    fs.writeFileSync(tempKeyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
-
-    const auditHost: AuditSshHost = {
-      hostname: session.hostname,
-      ip: String(session.mgmt_ip),
-      port: session.ssh_port || 22,
-      username: cred.username,
-      privateKeyPath: tempKeyPath,
-      backend: session.firewall_backend === 'iptables' ? 'iptables' : 'nftables'
-    };
-
-    // Restore original firewall rules
-    await restoreAuditSession(auditHost, session.backup_path);
-
-    // Retrieve traffic logs from host
-    let logContent = '';
-    if (session.log_file_path) {
-      const localLogPath = path.join(os.tmpdir(), `policy_test_log_${session.id}_${Date.now()}.log`);
-      const retrieveResult = await retrieveAuditLogs(auditHost, session.log_file_path, localLogPath);
-      if (retrieveResult.success && fs.existsSync(localLogPath)) {
-        logContent = fs.readFileSync(localLogPath, 'utf8');
-        fs.unlinkSync(localLogPath);
-      }
-    }
-
-    // Parse logs into structured flows
-    const parsedEntries = parseFirewallLogs(logContent);
-    const flows = groupCommunicationFlows(parsedEntries);
-
-    // Update session with raw log data
-    await pool.query(
-      `UPDATE policy_test_sessions
-       SET status = 'COLLECTING', completed_at = now(),
-           raw_log_data = $2
-       WHERE id = $1`,
-      [session.id, JSON.stringify({ entries: parsedEntries, flows })]
-    );
-
-    res.json({
-      session: { ...session, status: 'COLLECTING' },
-      message: `Original rules restored on ${session.hostname}. ${parsedEntries.length} log entries collected, ${flows.length} unique flows identified. Click "Analyze" to compare against policy rules.`,
-      flowCount: flows.length,
-      entryCount: parsedEntries.length
+  const result = await restoreAndCollectSession(session);
+  if (!result.ok) {
+    return res.status(502).json({
+      error: 'restore_failed',
+      message: `${result.error}. The session remains RUNNING and the restore will be retried automatically.`
     });
-  } catch (e: any) {
-    res.status(500).json({ error: 'stop_failed', message: e.message });
-  } finally {
-    if (fs.existsSync(tempKeyPath)) { try { fs.unlinkSync(tempKeyPath); } catch {} }
   }
+
+  if (result.startFailed) {
+    return res.json({
+      session: { ...session, status: 'FAILED' },
+      message: `Original rules restored on ${session.hostname}. This test had failed to start, so no traffic was collected.`,
+      flowCount: 0,
+      entryCount: 0
+    });
+  }
+
+  res.json({
+    session: { ...session, status: 'COLLECTING' },
+    message: `Original rules restored on ${session.hostname}. ${result.entryCount} log entries collected, ${result.flowCount} unique flows identified. Click "Analyze" to compare against policy rules.`,
+    flowCount: result.flowCount,
+    entryCount: result.entryCount
+  });
 });
 
 // Collect logs from a running session WITHOUT stopping it
-policyTestingRouter.post('/sessions/:id/collect-logs', requireRole('operator', 'admin'), async (req, res) => {
+policyTestingRouter.post('/sessions/:id/collect-logs', requireRole('operator', 'approver', 'admin'), async (req, res) => {
   const { rows: sessions } = await pool.query(
     `SELECT pts.*, h.hostname, h.mgmt_ip, h.ssh_port, h.firewall_backend
      FROM policy_test_sessions pts
@@ -390,44 +394,38 @@ policyTestingRouter.post('/sessions/:id/collect-logs', requireRole('operator', '
   if (!sessions[0]) return res.status(404).json({ error: 'not_found_or_not_running' });
   const session = sessions[0];
 
-  const credRes = await pool.query(
-    `SELECT * FROM ssh_credentials WHERE scope_type='GLOBAL' ORDER BY created_at DESC LIMIT 1`
-  );
-  const cred = credRes.rows[0];
-  if (!cred) return res.status(400).json({ error: 'missing_ssh_credential' });
-
-  const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
-  const tempKeyPath = path.join(os.tmpdir(), `policy_test_peek_${session.id}_${Date.now()}`);
-
+  let cred: MaterializedSshCredential | null = null;
   try {
-    fs.writeFileSync(tempKeyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
-
-    const auditHost: AuditSshHost = {
-      hostname: session.hostname,
-      ip: String(session.mgmt_ip),
-      port: session.ssh_port || 22,
-      username: cred.username,
-      privateKeyPath: tempKeyPath,
-      backend: session.firewall_backend === 'iptables' ? 'iptables' : 'nftables'
-    };
+    try {
+      cred = await getSshCredentialForHost(session.host_id);
+    } catch (e: any) {
+      if (e?.message === 'missing_ssh_credential') return res.status(400).json({ error: 'missing_ssh_credential' });
+      throw e;
+    }
+    const auditHost = buildAuditHost(session, cred);
 
     // Retrieve logs without restoring rules (test keeps running)
     let logContent = '';
     if (session.log_file_path) {
       const localLogPath = path.join(os.tmpdir(), `policy_test_peek_${session.id}_${Date.now()}.log`);
-      const retrieveResult = await retrieveAuditLogs(auditHost, session.log_file_path, localLogPath);
-      if (retrieveResult.success && fs.existsSync(localLogPath)) {
-        logContent = fs.readFileSync(localLogPath, 'utf8');
-        fs.unlinkSync(localLogPath);
+      try {
+        const retrieveResult = await retrieveAuditLogs(auditHost, session.log_file_path, localLogPath);
+        if (retrieveResult.success && fs.existsSync(localLogPath)) {
+          logContent = fs.readFileSync(localLogPath, 'utf8');
+        }
+      } finally {
+        if (fs.existsSync(localLogPath)) { try { fs.unlinkSync(localLogPath); } catch { /* ignore */ } }
       }
     }
 
     const parsedEntries = parseFirewallLogs(logContent);
     const flows = groupCommunicationFlows(parsedEntries);
 
-    // Update raw_log_data with latest snapshot
+    // Update raw_log_data with latest snapshot (preserve any restore bookkeeping keys)
     await pool.query(
-      `UPDATE policy_test_sessions SET raw_log_data = $2 WHERE id = $1`,
+      `UPDATE policy_test_sessions
+         SET raw_log_data = COALESCE(raw_log_data, '{}'::jsonb) || $2::jsonb
+       WHERE id = $1`,
       [session.id, JSON.stringify({ entries: parsedEntries, flows })]
     );
 
@@ -440,12 +438,12 @@ policyTestingRouter.post('/sessions/:id/collect-logs', requireRole('operator', '
   } catch (e: any) {
     res.status(500).json({ error: 'collect_failed', message: e.message });
   } finally {
-    if (fs.existsSync(tempKeyPath)) { try { fs.unlinkSync(tempKeyPath); } catch {} }
+    cred?.cleanup();
   }
 });
 
 // Analyze: compare collected traffic flows against the policy rules
-policyTestingRouter.post('/sessions/:id/analyze', requireRole('operator', 'admin'), async (req, res) => {
+policyTestingRouter.post('/sessions/:id/analyze', requireRole('operator', 'approver', 'admin'), async (req, res) => {
   try {
     const result = await analyzePolicyTest(req.params.id);
     res.json({

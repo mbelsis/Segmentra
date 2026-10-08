@@ -2,7 +2,7 @@ import { pool } from '../db/pool.js';
 
 export async function instantiateTemplate(
   templateId: string,
-  userId: string,
+  userId: string | null,
   options?: { name?: string; scopeType?: string; scopeTagId?: string; scopeVlanId?: string; hostIds?: string[] }
 ): Promise<{ policySet: any; version: any; rulesCreated: number }> {
   const { rows: templates } = await pool.query(`SELECT * FROM policy_templates WHERE id = $1`, [templateId]);

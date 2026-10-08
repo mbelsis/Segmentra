@@ -1,53 +1,79 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 
-import { api } from '../lib/api';
+import { api, errorMessage } from '../lib/api';
+import { hasRole, useAuth } from '../lib/auth-context';
+
+// Deployment statuses that may still change and therefore warrant polling.
+const ACTIVE_STATUSES = ['RUNNING', 'QUEUED', 'PAUSED', 'SCHEDULED'];
 
 export function DeploymentDetailPage() {
   const { deploymentId } = useParams();
   const navigate = useNavigate();
   const [deployment, setDeployment] = useState<any>(null);
   const [hosts, setHosts] = useState<any[]>([]);
-  const [filteredHosts, setFilteredHosts] = useState<any[]>([]);
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>('');
+  const [actionError, setActionError] = useState<string>('');
+  const { roles } = useAuth();
+  const canOperate = hasRole(roles, 'operator', 'admin');
+  const canApprove = hasRole(roles, 'approver', 'admin');
+  const requestIdRef = useRef(0);
 
-  useEffect(() => {
+  const loadData = useCallback(async () => {
     if (!deploymentId) return;
-    loadData();
-    // Auto-refresh every 5 seconds if deployment is still running
-    const interval = setInterval(() => {
-      if (deployment?.status === 'RUNNING' || deployment?.status === 'QUEUED') {
-        loadData();
-      }
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [deploymentId]);
-
-  useEffect(() => {
-    filterHosts();
-  }, [hosts, statusFilter, searchQuery]);
-
-  async function loadData() {
-    if (!deploymentId) return;
+    const requestId = ++requestIdRef.current;
     try {
       const [depRes, hostsRes] = await Promise.all([
         api.deployment(deploymentId),
         api.deploymentHosts(deploymentId)
       ]);
+      if (requestId !== requestIdRef.current) return;
       setDeployment(depRes.deployment);
       setHosts(hostsRes.hosts);
       setError('');
     } catch (e: any) {
+      if (requestId !== requestIdRef.current) return;
       setError(String(e.message || e));
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) setLoading(false);
+    }
+  }, [deploymentId]);
+
+  // Initial load (and reload when navigating to a different deployment).
+  useEffect(() => {
+    setLoading(true);
+    setDeployment(null);
+    loadData();
+  }, [loadData]);
+
+  // Auto-refresh every 5 seconds while the deployment is in a non-terminal state.
+  // Depending on the status (not the whole object) re-creates the interval only
+  // when the status changes, and stops polling once it becomes terminal.
+  const deploymentStatus: string | undefined = deployment?.status;
+  useEffect(() => {
+    if (!deploymentStatus || !ACTIVE_STATUSES.includes(deploymentStatus)) return;
+    const interval = setInterval(() => {
+      loadData();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [deploymentStatus, loadData]);
+
+  async function runAction(fn: () => Promise<unknown>, confirmText: string) {
+    if (!confirm(confirmText)) return;
+    setActionError('');
+    try {
+      await fn();
+    } catch (e: any) {
+      setActionError(errorMessage(e));
+    } finally {
+      loadData();
     }
   }
 
-  function filterHosts() {
+  const filteredHosts = useMemo(() => {
     let filtered = [...hosts];
 
     // Filter by status
@@ -58,18 +84,24 @@ export function DeploymentDetailPage() {
     // Filter by search query (hostname or IP)
     if (searchQuery.trim()) {
       const query = searchQuery.toLowerCase();
-      filtered = filtered.filter(h => 
+      filtered = filtered.filter(h =>
         h.hostname?.toLowerCase().includes(query) ||
         h.mgmt_ip?.toLowerCase().includes(query)
       );
     }
+    return filtered;
+  }, [hosts, statusFilter, searchQuery]);
 
-    setFilteredHosts(filtered);
-  }
+  const hasExpiryResults = hosts.some((h) => h.expiry_status);
 
   function getStatusBadge(status: string) {
     const colors: Record<string, string> = {
       PENDING: '#888',
+      SCHEDULED: '#7E57C2',
+      QUEUED: '#888',
+      PAUSED: '#FF9800',
+      PARTIAL: '#FF9800',
+      CANCELLED: '#999',
       RUNNING: '#2196F3',
       SUCCEEDED: '#4CAF50',
       FAILED: '#F44336',
@@ -78,6 +110,11 @@ export function DeploymentDetailPage() {
     };
     const labels: Record<string, string> = {
       PENDING: 'Pending',
+      SCHEDULED: 'Scheduled',
+      QUEUED: 'Queued',
+      PAUSED: 'Paused',
+      PARTIAL: 'Partial',
+      CANCELLED: 'Cancelled',
       RUNNING: 'Running',
       SUCCEEDED: 'Succeeded',
       FAILED: 'Failed',
@@ -110,7 +147,9 @@ export function DeploymentDetailPage() {
     );
   }
 
-  if (error || !deployment) {
+  // Only replace the page with an error when we have nothing to show; a failed
+  // background refresh keeps the last good data and shows a banner instead.
+  if (!deployment) {
     return (
       <div className="page">
         <div className="error-banner">{error || 'Deployment not found'}</div>
@@ -128,7 +167,40 @@ export function DeploymentDetailPage() {
           </button>
           <h2>Deployment Details</h2>
         </div>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {canApprove && deployment.requires_approval && !deployment.approved_by && ['QUEUED', 'SCHEDULED'].includes(deployment.status) && (
+            <button
+              className="btn-small"
+              style={{ background: '#8b6914', color: 'white' }}
+              onClick={() => runAction(() => api.approveDeployment(deployment.id), 'Approve this deployment so it can be started?')}
+            >
+              Approve
+            </button>
+          )}
+          {canOperate && deployment.status === 'QUEUED' && (
+            <button
+              className="btn-small btn-primary"
+              disabled={deployment.requires_approval && !deployment.approved_by}
+              title={deployment.requires_approval && !deployment.approved_by ? 'Awaiting approval' : undefined}
+              onClick={() => runAction(() => api.startDeployment(deployment.id), 'Start this deployment? This will apply firewall rules to target hosts.')}
+            >
+              Start
+            </button>
+          )}
+          {canOperate && (deployment.status === 'QUEUED' || deployment.status === 'SCHEDULED') && (
+            <button
+              className="btn-small"
+              style={{ background: '#999', color: 'white' }}
+              onClick={() => runAction(() => api.cancelDeployment(deployment.id), 'Cancel this deployment? It will not be run.')}
+            >
+              Cancel
+            </button>
+          )}
+        </div>
       </div>
+
+      {error && <div className="error-banner">Refresh failed: {error}</div>}
+      {actionError && <div className="error-banner">{actionError}</div>}
 
       {/* Deployment Overview */}
       <div className="card" style={{ marginBottom: 24 }}>
@@ -142,7 +214,14 @@ export function DeploymentDetailPage() {
           </div>
           <div className="form-group">
             <label>Status</label>
-            <div>{getStatusBadge(deployment.status)}</div>
+            <div>
+              {getStatusBadge(deployment.status)}
+              {deployment.requires_approval && (
+                <span style={{ marginLeft: 8, fontSize: '12px', color: deployment.approved_by ? '#4CAF50' : '#8b6914', fontWeight: 600 }}>
+                  {deployment.approved_by ? `Approved by ${deployment.approved_by_username || deployment.approved_by}` : 'Needs approval'}
+                </span>
+              )}
+            </div>
           </div>
           <div className="form-group">
             <label>Mode</label>
@@ -191,9 +270,62 @@ export function DeploymentDetailPage() {
           {deployment.expiry_action && deployment.expires_at && (
             <div className="form-group">
               <label>Expiry Action</label>
-              <div>{deployment.expiry_action === 'NOTIFY_ONLY' ? 'Notify Only' : deployment.expiry_action === 'REMOVE' ? 'Remove (manual rollback)' : deployment.expiry_action === 'REVERT' ? 'Revert (re-deploy previous)' : deployment.expiry_action}</div>
+              <div>{deployment.expiry_action === 'NOTIFY_ONLY' ? 'Notify only (rules stay active)' : deployment.expiry_action === 'REMOVE' ? 'Remove (automatically remove Segmentra rules from hosts)' : deployment.expiry_action === 'REVERT' ? 'Revert (automatically re-deploy the previous version)' : deployment.expiry_action}</div>
             </div>
           )}
+          {deployment.revert_of_deployment_id && (
+            <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+              <label>Automatic Revert</label>
+              <div style={{ fontSize: '13px', color: '#5c4633' }}>
+                Created by the system because deployment{' '}
+                <a href={`/deployments/${deployment.revert_of_deployment_id}`} onClick={(e) => { e.preventDefault(); navigate(`/deployments/${deployment.revert_of_deployment_id}`); }}>
+                  <code>{String(deployment.revert_of_deployment_id).slice(0, 8)}</code>
+                </a>{' '}expired (pre-authorised; no separate approval).
+              </div>
+            </div>
+          )}
+          {deployment.notes && !deployment.revert_of_deployment_id && (
+            <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+              <label>Notes</label>
+              <div style={{ fontSize: '13px' }}>{deployment.notes}</div>
+            </div>
+          )}
+          {deployment.expiry_outcome && (() => {
+            const o = typeof deployment.expiry_outcome === 'string' ? JSON.parse(deployment.expiry_outcome) : deployment.expiry_outcome;
+            const good = ['REMOVED', 'REVERT_STARTED', 'NOTIFIED', 'NOTHING_TO_REMOVE', 'NO_HOSTS'].includes(o.result);
+            const resultLabels: Record<string, string> = {
+              NOTIFIED: 'Notified',
+              REMOVED: 'Rules removed',
+              REMOVE_PARTIAL: 'Removal partially failed',
+              REMOVE_FAILED: 'Removal failed',
+              NOTHING_TO_REMOVE: 'Nothing to remove',
+              REVERT_STARTED: 'Revert started',
+              NO_PREVIOUS_VERSION: 'No previous version to revert to',
+              REVERT_NOT_DEPLOYABLE: 'Previous version not deployable',
+              REVERT_NOT_STARTED: 'Revert created but not started',
+              NO_HOSTS: 'No hosts to act on',
+              ERROR: 'Automatic action failed',
+            };
+            return (
+              <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                <label>Expiry Outcome</label>
+                <div style={{ padding: '8px 10px', borderRadius: 4, fontSize: '13px', background: good ? '#f0f5eb' : '#faf0ee', border: `1px solid ${good ? '#c5d4b3' : '#e8c4bf'}`, color: good ? '#3f5a28' : '#a63d2f' }}>
+                  <strong>{resultLabels[o.result] ?? o.result}</strong>
+                  {o.processedAt && <span style={{ color: '#78644e' }}> — {new Date(o.processedAt).toLocaleString()}</span>}
+                  {o.message && <div style={{ marginTop: 4, color: '#5c4633' }}>{o.message}</div>}
+                  {o.revertDeploymentId && (
+                    <div style={{ marginTop: 4 }}>
+                      Revert deployment:{' '}
+                      <a href={`/deployments/${o.revertDeploymentId}`} onClick={(e) => { e.preventDefault(); navigate(`/deployments/${o.revertDeploymentId}`); }}>
+                        <code>{String(o.revertDeploymentId).slice(0, 8)}</code>
+                      </a>
+                      {o.revertToVersionNumber != null && <span> (v{o.revertToVersionNumber})</span>}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
           {deployment.started_at && (
             <div className="form-group">
               <label>Started</label>
@@ -287,6 +419,7 @@ export function DeploymentDetailPage() {
                 <th>Finished</th>
                 <th>Message</th>
                 <th>Rollback</th>
+                {hasExpiryResults && <th>On Expiry</th>}
               </tr>
             </thead>
             <tbody>
@@ -318,6 +451,18 @@ export function DeploymentDetailPage() {
                       <span style={{ color: '#FF9800', fontWeight: 'bold' }}>Yes</span>
                     ) : '-'}
                   </td>
+                  {hasExpiryResults && (
+                    <td>
+                      {host.expiry_status ? (
+                        <span style={{ fontSize: '0.9em' }} title={host.expiry_message || ''}>
+                          <strong style={{ color: host.expiry_status === 'FAILED' ? '#a63d2f' : host.expiry_status === 'SKIPPED' ? '#78644e' : '#5a7a3a' }}>
+                            {host.expiry_status === 'REVERT_QUEUED' ? 'Reverting' : host.expiry_status.charAt(0) + host.expiry_status.slice(1).toLowerCase()}
+                          </strong>
+                          {host.expiry_message && <div style={{ color: '#666' }}>{host.expiry_message}</div>}
+                        </span>
+                      ) : '-'}
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { api } from '../lib/api';
+import { api, errorMessage } from '../lib/api';
+import { useAuth, hasRole } from '../lib/auth-context';
 
 const STATUS_COLORS: Record<string, string> = {
   PENDING: '#999', DEPLOYING: '#2196F3', RUNNING: '#FF9800', COLLECTING: '#9C27B0',
@@ -15,38 +16,50 @@ const STATUS_DESCRIPTIONS: Record<string, string> = {
 };
 
 export function PolicyTestPage() {
+  const { roles } = useAuth();
+  const canRunTests = hasRole(roles, 'operator', 'approver', 'admin');
+  // Operators may only test reviewed (APPROVED/DEPLOYED) versions; approvers/admins can test any version.
+  const canTestUnreviewed = hasRole(roles, 'approver', 'admin');
   const [sessions, setSessions] = useState<any[]>([]);
   const [selectedSession, setSelectedSession] = useState<any>(null);
   const [hosts, setHosts] = useState<any[]>([]);
   const [policyVersions, setPolicyVersions] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  // Background refreshes must not blank the page with the full-page loading state.
+  const [refreshing, setRefreshing] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState('');
   const [statusMessage, setStatusMessage] = useState('');
   const [showStart, setShowStart] = useState(false);
   const [startForm, setStartForm] = useState({ policyVersionId: '', hostId: '', durationMinutes: 30 });
 
-  const load = async () => {
-    setLoading(true);
+  const load = async (opts: { background?: boolean } = {}) => {
+    if (opts.background) setRefreshing(true);
+    else setLoading(true);
     try {
       const [sessRes, hostRes] = await Promise.all([
         api.policyTest.listSessions(),
-        api.hosts({ limit: 500 }),
+        api.allHosts(),
       ]);
       setSessions(sessRes.sessions);
       setHosts(hostRes.hosts);
-    } catch (e: any) { setError(e.message); }
-    setLoading(false);
+    } catch (e: any) { setError(errorMessage(e)); }
+    if (opts.background) setRefreshing(false);
+    else setLoading(false);
   };
 
+  const refresh = () => load({ background: true });
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, []);
 
   // Auto-refresh running sessions every 30 seconds
   useEffect(() => {
     const hasRunning = sessions.some(s => s.status === 'RUNNING' || s.status === 'DEPLOYING');
     if (!hasRunning) return;
-    const timer = setInterval(() => { load(); }, 30000);
+    const timer = setInterval(() => { refresh(); }, 30000);
     return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions]);
 
   const loadPolicyVersions = async () => {
@@ -56,11 +69,14 @@ export function PolicyTestPage() {
       for (const ps of psRes.policySets) {
         const vRes = await api.versions(ps.id);
         for (const v of vRes.versions) {
+          if (v.status === 'ARCHIVED' || v.status === 'REJECTED') continue;
+          const reviewed = v.status === 'APPROVED' || v.status === 'DEPLOYED';
+          if (!reviewed && !canTestUnreviewed) continue;
           allVersions.push({ ...v, policySetName: ps.name });
         }
       }
       setPolicyVersions(allVersions);
-    } catch (e: any) { setError(e.message); }
+    } catch (e: any) { setError(errorMessage(e)); }
   };
 
   const startTest = async () => {
@@ -76,9 +92,9 @@ export function PolicyTestPage() {
       setShowStart(false);
       setStartForm({ policyVersionId: '', hostId: '', durationMinutes: 30 });
       setStatusMessage(result.message);
-      load();
+      refresh();
       selectSession(result.session);
-    } catch (e: any) { setError(e.message); }
+    } catch (e: any) { setError(errorMessage(e)); }
     setActionLoading(false);
   };
 
@@ -87,7 +103,7 @@ export function PolicyTestPage() {
       const res = await api.policyTest.getSession(s.id);
       setSelectedSession(res.session);
       setStatusMessage('');
-    } catch (e: any) { setError(e.message); }
+    } catch (e: any) { setError(errorMessage(e)); }
   };
 
   const stopSession = async (id: string) => {
@@ -97,10 +113,10 @@ export function PolicyTestPage() {
     try {
       const result = await api.policyTest.stop(id);
       setStatusMessage(result.message);
-      load();
+      refresh();
       const res = await api.policyTest.getSession(id);
       setSelectedSession(res.session);
-    } catch (e: any) { setError(e.message); setStatusMessage(''); }
+    } catch (e: any) { setError(errorMessage(e)); setStatusMessage(''); }
     setActionLoading(false);
   };
 
@@ -114,7 +130,7 @@ export function PolicyTestPage() {
       // Refresh session to get updated raw_log_data
       const res = await api.policyTest.getSession(id);
       setSelectedSession(res.session);
-    } catch (e: any) { setError(e.message); setStatusMessage(''); }
+    } catch (e: any) { setError(errorMessage(e)); setStatusMessage(''); }
     setActionLoading(false);
   };
 
@@ -127,8 +143,8 @@ export function PolicyTestPage() {
       setStatusMessage(result.message);
       const res = await api.policyTest.getSession(id);
       setSelectedSession(res.session);
-      load();
-    } catch (e: any) { setError(e.message); setStatusMessage(''); }
+      refresh();
+    } catch (e: any) { setError(errorMessage(e)); setStatusMessage(''); }
     setActionLoading(false);
   };
 
@@ -157,11 +173,14 @@ export function PolicyTestPage() {
       {error && <div style={{ color: 'red', marginBottom: 8, padding: 8, background: '#FFEBEE', borderRadius: 4 }}>{error} <button onClick={() => setError('')}>dismiss</button></div>}
       {statusMessage && <div style={{ color: '#1565C0', marginBottom: 8, padding: 8, background: '#E3F2FD', borderRadius: 4 }}>{statusMessage}</div>}
 
-      <div style={{ marginBottom: 16 }}>
-        <button onClick={() => { setShowStart(true); loadPolicyVersions(); }} className="btn-primary">+ Start Policy Test</button>
+      <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12 }}>
+        {canRunTests && (
+          <button onClick={() => { setShowStart(true); loadPolicyVersions(); }} className="btn-primary">+ Start Policy Test</button>
+        )}
+        {refreshing && <span style={{ fontSize: '12px', color: '#97846c' }}>Refreshing…</span>}
       </div>
 
-      {showStart && (
+      {showStart && canRunTests && (
         <div style={{ border: '1px solid #d4c9b8', padding: 20, marginBottom: 16, borderRadius: 8, background: '#fdfcf9' }}>
           <h3 style={{ marginTop: 0, marginBottom: 8, color: '#292018' }}>Start Policy Test</h3>
           <p style={{ fontSize: '0.9em', color: '#78644e', marginBottom: 16 }}>
@@ -169,9 +188,16 @@ export function PolicyTestPage() {
             deploy your policy in <strong>log-only mode</strong> (all traffic logged, nothing blocked), wait for the specified duration
             to capture real traffic, then automatically restore the original rules and let you analyze the results.
           </p>
+          <div role="note" style={{ background: '#fff8e6', border: '1px solid #f0d58c', color: '#6b5310', padding: '10px 12px', borderRadius: 6, fontSize: '0.88em', marginBottom: 16 }}>
+            <strong>Note:</strong> when the session ends, the host's <em>complete</em> firewall ruleset is restored from the backup taken at the start.
+            Rules added by Docker, Kubernetes or fail2ban during the session are lost; restart Docker / kube-proxy on the host afterwards if containers changed meanwhile.
+          </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <div>
               <label style={{ fontSize: '0.85em', fontWeight: 600, color: '#5c4633' }}>Policy Version</label>
+              {!canTestUnreviewed && (
+                <div style={{ fontSize: '0.8em', color: '#78644e', marginBottom: 4 }}>Only APPROVED or DEPLOYED versions are listed (testing other versions requires approver/admin).</div>
+              )}
               <select value={startForm.policyVersionId} onChange={e => setStartForm(f => ({ ...f, policyVersionId: e.target.value }))} style={{ width: '100%' }}>
                 <option value="">Select policy version...</option>
                 {policyVersions.map(v => <option key={v.id} value={v.id}>{v.policySetName} v{v.version_number} ({v.status})</option>)}
@@ -292,13 +318,13 @@ export function PolicyTestPage() {
                     <td>{s.duration_minutes}m</td>
                     <td style={{ fontSize: '12.5px', color: '#78644e' }}>{s.started_at ? new Date(s.started_at).toLocaleString() : '-'}</td>
                     <td onClick={e => e.stopPropagation()}>
-                      {s.status === 'RUNNING' && (
+                      {canRunTests && s.status === 'RUNNING' && (
                         <>
                           <button onClick={() => collectLogs(s.id)} disabled={actionLoading} className="btn-small btn-secondary">Peek Logs</button>
                           <button onClick={() => stopSession(s.id)} disabled={actionLoading} className="btn-small btn-secondary" style={{ marginLeft: 4 }}>Stop & Collect</button>
                         </>
                       )}
-                      {s.status === 'COLLECTING' && (
+                      {canRunTests && s.status === 'COLLECTING' && (
                         <button onClick={() => analyzeSession(s.id)} disabled={actionLoading} className="btn-small" style={{ background: '#5a7a3a', color: '#fdfcf9', border: 'none' }}>
                           Analyze
                         </button>
@@ -326,7 +352,7 @@ export function PolicyTestPage() {
 
             {/* Action buttons */}
             <div style={{ marginBottom: 12 }}>
-              {selectedSession.status === 'RUNNING' && (
+              {canRunTests && selectedSession.status === 'RUNNING' && (
                 <>
                   <button onClick={() => collectLogs(selectedSession.id)} disabled={actionLoading} style={{ marginRight: 8 }}>
                     Peek at Logs (while running)
@@ -336,7 +362,7 @@ export function PolicyTestPage() {
                   </button>
                 </>
               )}
-              {selectedSession.status === 'COLLECTING' && (
+              {canRunTests && selectedSession.status === 'COLLECTING' && (
                 <button onClick={() => analyzeSession(selectedSession.id)} disabled={actionLoading}
                   style={{ background: '#4CAF50', color: 'white', border: 'none', padding: '8px 20px', borderRadius: 4, cursor: 'pointer', fontSize: '1em' }}>
                   Analyze Traffic vs. Policy Rules

@@ -6,17 +6,13 @@
     "build": "echo \"@segmentra/db has no TS build\"",
     "lint": "echo \"@segmentra/db has no lint\"",
     "migrate": "node-pg-migrate --help",
-    "migrate:up": "node-pg-migrate up -m ./migrations",
-    "migrate:down": "node-pg-migrate down -m ./migrations",
+    "migrate:up": "node ./scripts/migrate.js up",
+    "migrate:down": "node ./scripts/migrate.js down",
     "seed": "node ./scripts/seed-roles.js"
   },
   "dependencies": {
     "pg": "^8.11.5",
-    "bcrypt": "^5.1.1"
-  },
-  "devDependencies": {
+    "bcrypt": "^6.0.0",
     "node-pg-migrate": "^7.7.0"
   }
 }
-
-

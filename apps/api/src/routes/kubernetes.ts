@@ -3,6 +3,8 @@ import { z } from 'zod';
 
 import { pool } from '../db/pool.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
+import { parseCidr, parsePortSpec } from '../services/ip-utils.js';
+import { createSourceResolver } from '../services/source-resolver.js';
 
 export const kubernetesRouter = Router();
 kubernetesRouter.use(requireAuth);
@@ -204,34 +206,81 @@ kubernetesRouter.post('/clusters/:id/deploy-policy', requireRole('operator', 'ad
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
   const b = parsed.data;
 
+  const pvRes = await pool.query(`SELECT status FROM policy_versions WHERE id = $1`, [b.policyVersionId]);
+  if (!pvRes.rows[0]) return res.status(404).json({ error: 'policy_version_not_found' });
+  if (!['APPROVED', 'DEPLOYED'].includes(pvRes.rows[0].status)) {
+    return res.status(409).json({
+      error: 'policy_version_not_approved',
+      message: `Policy version is ${pvRes.rows[0].status}; only APPROVED or DEPLOYED versions can be exported as NetworkPolicy.`
+    });
+  }
+
   // Get policy rules
   const { rows: rules } = await pool.query(
     `SELECT * FROM policy_rules WHERE policy_version_id = $1 ORDER BY order_index ASC`,
     [b.policyVersionId]
   );
 
-  // Build NetworkPolicy manifest (simplified)
+  // Build NetworkPolicy manifest. NetworkPolicy is allow-only and unordered, so DENY rules and
+  // anything that cannot be expressed exactly are skipped with a warning rather than widened.
   const ingressRules: any[] = [];
   const egressRules: any[] = [];
+  const warnings: string[] = [];
+  const resolve = createSourceResolver({ vlanMode: 'subnet' });
+
+  const toIpBlockCidr = (addr: string): string | null => {
+    const parsedAddr = parseCidr(addr);
+    if (!parsedAddr) return null;
+    return addr.includes('/') ? addr : `${addr}/${parsedAddr.family === 4 ? 32 : 128}`;
+  };
 
   for (const rule of rules) {
-    const policyRule: any = {};
-    if (rule.ports) {
-      policyRule.ports = rule.ports.split(',').map((p: string) => ({
-        port: parseInt(p.trim()),
-        protocol: rule.protocol === 'any' ? 'TCP' : rule.protocol.toUpperCase(),
-      }));
+    const label = `rule #${rule.order_index}${rule.comment ? ` (${rule.comment})` : ''}`;
+
+    if (rule.action !== 'ALLOW') {
+      warnings.push(`${label}: DENY rules cannot be expressed in a Kubernetes NetworkPolicy (allow-only); skipped`);
+      continue;
+    }
+    if (rule.protocol === 'icmp') {
+      warnings.push(`${label}: ICMP is not supported by NetworkPolicy; skipped`);
+      continue;
     }
 
-    if (rule.direction === 'IN' || rule.direction === 'BOTH') {
-      if (rule.action === 'ALLOW') {
-        ingressRules.push({ ...policyRule, from: [{ ipBlock: { cidr: rule.source_type === 'CIDR' ? rule.source_value : '0.0.0.0/0' } }] });
+    const proto = String(rule.protocol).toUpperCase();
+    let ports: Array<{ protocol: string; port?: number; endPort?: number }> | undefined;
+    if (rule.ports && String(rule.ports).trim()) {
+      if (!['TCP', 'UDP', 'SCTP'].includes(proto)) {
+        warnings.push(`${label}: ports require protocol TCP/UDP/SCTP (got ${rule.protocol}); skipped`);
+        continue;
       }
+      const ranges = parsePortSpec(rule.ports);
+      if (!ranges) {
+        warnings.push(`${label}: invalid port specification "${rule.ports}"; skipped`);
+        continue;
+      }
+      ports = ranges.map((r) => (r.from === r.to ? { protocol: proto, port: r.from } : { protocol: proto, port: r.from, endPort: r.to }));
+    } else if (['TCP', 'UDP', 'SCTP'].includes(proto)) {
+      ports = [{ protocol: proto }];
+    } else if (rule.protocol !== 'any') {
+      warnings.push(`${label}: unsupported protocol "${rule.protocol}"; skipped`);
+      continue;
+    }
+    // protocol 'any' without ports: omit `ports` (= all ports and protocols)
+
+    const addrs = await resolve(rule.source_type, rule.source_value);
+    const cidrs = Array.from(new Set(addrs.map(toIpBlockCidr).filter((c): c is string => !!c)));
+    if (cidrs.length === 0) {
+      warnings.push(`${label}: ${rule.source_type} source "${rule.source_value}" resolves to no IP addresses; skipped instead of allowing 0.0.0.0/0`);
+      continue;
+    }
+    const peers = cidrs.map((cidr) => ({ ipBlock: { cidr } }));
+    const policyRule: any = ports ? { ports } : {};
+
+    if (rule.direction === 'IN' || rule.direction === 'BOTH') {
+      ingressRules.push({ ...policyRule, from: peers });
     }
     if (rule.direction === 'OUT' || rule.direction === 'BOTH') {
-      if (rule.action === 'ALLOW') {
-        egressRules.push({ ...policyRule, to: [{ ipBlock: { cidr: rule.source_type === 'CIDR' ? rule.source_value : '0.0.0.0/0' } }] });
-      }
+      egressRules.push({ ...policyRule, to: peers });
     }
   }
 
@@ -261,8 +310,8 @@ kubernetesRouter.post('/clusters/:id/deploy-policy', requireRole('operator', 'ad
   await pool.query(
     `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
      VALUES ($1, 'K8S_POLICY_DEPLOY', 'k8s_network_policy', $2, $3)`,
-    [userId, rows[0].id, JSON.stringify({ clusterId: req.params.id, namespace: b.namespace, policyName: b.policyName })]
+    [userId, rows[0].id, JSON.stringify({ clusterId: req.params.id, namespace: b.namespace, policyName: b.policyName, warnings })]
   );
 
-  res.status(201).json({ networkPolicy: rows[0] });
+  res.status(201).json({ networkPolicy: rows[0], warnings });
 });

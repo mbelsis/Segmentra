@@ -2,6 +2,24 @@ import crypto from 'node:crypto';
 
 import { env } from '../lib/env.js';
 
+let warnedAboutDerivedKek = false;
+
+/**
+ * Emit a loud warning when secrets are protected by a key derived from JWT_SECRET.
+ * Called once at startup (and lazily on first use as a fallback).
+ */
+export function warnIfKekDerivedFromJwtSecret(): void {
+  if (env.SEGMENTRA_KEK_B64 || warnedAboutDerivedKek) return;
+  warnedAboutDerivedKek = true;
+  // eslint-disable-next-line no-console
+  console.warn(
+    '[SECURITY WARNING] SEGMENTRA_KEK_B64 is not set. Stored secrets (SSH keys/passwords, LDAP bind passwords) ' +
+      'are encrypted with a key derived from JWT_SECRET. Rotating JWT_SECRET will make them undecryptable. ' +
+      'Set SEGMENTRA_KEK_B64 (32 random bytes, base64) for production deployments; note that changing it later ' +
+      'also requires re-entering existing secrets.'
+  );
+}
+
 function getKek(): Buffer {
   if (env.SEGMENTRA_KEK_B64) {
     const buf = Buffer.from(env.SEGMENTRA_KEK_B64, 'base64');
@@ -9,7 +27,9 @@ function getKek(): Buffer {
     return buf;
   }
 
-  // Dev fallback: derive from JWT secret (still deterministic, but not a real KEK)
+  // Dev fallback: derive from JWT secret (still deterministic, but not a real KEK).
+  // Do NOT change this derivation: existing encrypted data depends on it.
+  warnIfKekDerivedFromJwtSecret();
   return crypto.createHash('sha256').update(env.JWT_SECRET, 'utf8').digest();
 }
 

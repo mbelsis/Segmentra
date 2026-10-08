@@ -1,11 +1,15 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { api } from '../lib/api';
+import { useAuth, hasRole } from '../lib/auth-context';
 import { HostPolicyVisualization } from '../components/HostPolicyVisualization';
 
 type Tab = 'hosts' | 'tags' | 'vlans' | 'tag-rules';
 
 export function InventoryPage() {
+  const { roles } = useAuth();
+  // Inventory mutations, compliance and readiness checks are operator/admin only in the API
+  const canEdit = hasRole(roles, 'operator', 'admin');
   const [activeTab, setActiveTab] = useState<Tab>('hosts');
   
   // Hosts state
@@ -17,9 +21,13 @@ export function InventoryPage() {
   const [hostTagIds, setHostTagIds] = useState<string[]>([]);
   const [hostFirewallBackend, setHostFirewallBackend] = useState<string>('auto');
   const [editingHost, setEditingHost] = useState<string | null>(null);
+  // Original values of the host being edited, so we only send changed fields (and null when cleared)
+  const [editingHostOriginal, setEditingHostOriginal] = useState<any>(null);
   
   // Host filtering and pagination
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const hostsRequestId = useRef(0);
   const [filterTag, setFilterTag] = useState<string>('');
   const [filterVlan, setFilterVlan] = useState<string>('');
   const [filterEnabled, setFilterEnabled] = useState<string>('all'); // 'all', 'true', 'false'
@@ -78,11 +86,18 @@ export function InventoryPage() {
     loadData();
   }, []);
 
+  // Debounce the free-text search so we don't fire a request per keystroke
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(searchQuery), 300);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
+
   useEffect(() => {
     if (activeTab === 'hosts') {
       loadHosts();
     }
-  }, [activeTab, currentPage, searchQuery, filterTag, filterVlan, filterEnabled]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, currentPage, debouncedSearch, filterTag, filterVlan, filterEnabled]);
 
   async function loadData() {
     try {
@@ -257,29 +272,15 @@ export function InventoryPage() {
       return;
     }
     try {
-      // Save temporarily, evaluate, then show results
-      // For preview, we create the rule, evaluate it, get matched hosts, then show
-      if (editingTagRule) {
-        // If editing, just evaluate existing rule
-        const res = await api.tagRules.get(editingTagRule.id);
-        setPreviewHosts(res.matchedHosts || []);
-      } else {
-        // For new rules, save first then evaluate and show
-        const body = {
-          name: tagRuleForm.name || 'Preview Rule',
-          tagId: tagRuleForm.tagId,
-          enabled: false, // Create disabled so it doesn't auto-assign
-          priority: tagRuleForm.priority,
-          criteria: { conditions: tagRuleForm.conditions, logic: tagRuleForm.logic },
-        };
-        const createRes = await api.tagRules.create(body);
-        const ruleId = createRes.tagRule.id;
-        await api.tagRules.evaluate(ruleId);
-        const detailRes = await api.tagRules.get(ruleId);
-        setPreviewHosts(detailRes.matchedHosts || []);
-        // Delete the temp rule
-        await api.tagRules.delete(ruleId);
-      }
+      // Dry-run on the server: evaluates the (unsaved) criteria without creating or modifying any rule
+      const res = await api.tagRules.preview({
+        name: tagRuleForm.name || 'Preview Rule',
+        tagId: tagRuleForm.tagId,
+        enabled: tagRuleForm.enabled,
+        priority: tagRuleForm.priority,
+        criteria: { conditions: tagRuleForm.conditions, logic: tagRuleForm.logic },
+      });
+      setPreviewHosts(res.hosts || []);
     } catch (e: any) { setError(String(e?.message ?? e)); }
   }
 
@@ -309,17 +310,19 @@ export function InventoryPage() {
   }
 
   async function loadHosts() {
+    const requestId = ++hostsRequestId.current;
     try {
       const params: any = {
         page: currentPage,
         limit: 50
       };
-      if (searchQuery.trim()) {
+      const q = debouncedSearch.trim();
+      if (q) {
         // Try to detect if it's an IP or hostname
-        if (/^\d+\.\d+\.\d+\.\d+/.test(searchQuery.trim())) {
-          params.ip = searchQuery.trim();
+        if (/^\d+\.\d+\.\d+\.\d+/.test(q)) {
+          params.ip = q;
         } else {
-          params.hostname = searchQuery.trim();
+          params.hostname = q;
         }
       }
       if (filterTag) params.tag = filterTag;
@@ -327,9 +330,12 @@ export function InventoryPage() {
       if (filterEnabled !== 'all') params.enabled = filterEnabled === 'true';
       
       const hostsRes = await api.hosts(params);
+      // Ignore out-of-order responses from superseded requests
+      if (requestId !== hostsRequestId.current) return;
       setHosts(hostsRes.hosts || []);
       setPagination(hostsRes.pagination || null);
     } catch (e: any) {
+      if (requestId !== hostsRequestId.current) return;
       setError(String(e?.message ?? e));
     }
   }
@@ -343,6 +349,7 @@ export function InventoryPage() {
     setHostTagIds([]);
     setHostFirewallBackend('auto');
     setEditingHost(null);
+    setEditingHostOriginal(null);
     setError(null);
   }
 
@@ -359,19 +366,28 @@ export function InventoryPage() {
         return;
       }
 
-      const payload: any = {
-        hostname: hostname.trim(),
-        mgmtIp: mgmtIp.trim() || undefined,
-        sshPort: sshPortNum,
-        vlanId: hostVlanId || undefined,
-        tagIds: hostTagIds,
-        firewallBackend: hostFirewallBackend || 'auto'
-      };
-      
       if (editingHost) {
+        // Only send changed fields. Explicit null clears a nullable field; omitted keeps it.
+        const orig = editingHostOriginal || {};
+        const payload: any = { tagIds: hostTagIds };
+        if (hostname.trim() !== (orig.hostname ?? '')) payload.hostname = hostname.trim();
+        const newIp = mgmtIp.trim();
+        if (newIp !== (orig.mgmt_ip ?? '')) payload.mgmtIp = newIp === '' ? null : newIp;
+        if (sshPortNum !== (orig.ssh_port ?? 22)) payload.sshPort = sshPortNum;
+        if ((hostVlanId || '') !== (orig.vlan_id ?? '')) payload.vlanId = hostVlanId ? hostVlanId : null;
+        const newBackend = hostFirewallBackend || 'auto';
+        if (newBackend !== (orig.firewall_backend ?? 'auto')) payload.firewallBackend = newBackend;
         const r = await api.updateHost(editingHost, payload);
         setHosts((prev) => prev.map(h => h.id === editingHost ? r.host : h));
       } else {
+        const payload: any = {
+          hostname: hostname.trim(),
+          mgmtIp: mgmtIp.trim() || undefined,
+          sshPort: sshPortNum,
+          vlanId: hostVlanId || undefined,
+          tagIds: hostTagIds,
+          firewallBackend: hostFirewallBackend || 'auto'
+        };
         const r = await api.createHost(payload);
         setHosts((prev) => [...prev, r.host]);
       }
@@ -389,6 +405,7 @@ export function InventoryPage() {
     setHostVlanId(host.vlan_id || '');
     setHostTagIds((host.tags || []).map((t: any) => t.id));
     setHostFirewallBackend(host.firewall_backend || 'auto');
+    setEditingHostOriginal(host);
     setEditingHost(host.id);
   }
 
@@ -816,8 +833,8 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <h3 style={{ margin: 0 }}>Hosts</h3>
               <div style={{ display: 'flex', gap: 8 }}>
-                <button onClick={() => { resetHostForm(); setShowAddHost(true); }} className="btn-primary">+ Add Host</button>
-                <button onClick={() => { setShowImport(true); setImportResults(null); }} className="btn-secondary">Bulk Import</button>
+                {canEdit && <button onClick={() => { resetHostForm(); setShowAddHost(true); }} className="btn-primary">+ Add Host</button>}
+                {canEdit && <button onClick={() => { setShowImport(true); setImportResults(null); }} className="btn-secondary">Bulk Import</button>}
               </div>
             </div>
           </div>
@@ -884,7 +901,7 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
             </div>
 
             {/* Bulk Actions */}
-            {selectedHostIds.size > 0 && (
+            {canEdit && selectedHostIds.size > 0 && (
               <div style={{ marginBottom: 16, padding: 12, background: '#e3f2fd', borderRadius: 8, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                 <strong>{selectedHostIds.size} host(s) selected</strong>
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -1003,7 +1020,8 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                     <td>{h.enabled ? '✓' : '✗'}</td>
                     <td>
                       <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                        <button onClick={() => editHost(h)} className="btn-small btn-secondary">Edit</button>
+                        {canEdit && <button onClick={() => editHost(h)} className="btn-small btn-secondary">Edit</button>}
+                        {canEdit && (<>
                         <div className="tooltip-wrapper">
                           <button 
                             onClick={() => checkHostCompliance(h.id)} 
@@ -1028,6 +1046,7 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                             Verify this host is ready for deployments. Checks for firewall tools (nft/iptables), passwordless sudo access, kernel support, and auto-detects firewall backend.
                           </div>
                         </div>
+                        </>)}
                         <button 
                           onClick={() => setVisualizationHost({ id: h.id, hostname: h.hostname })} 
                           className="btn-small"
@@ -1113,6 +1132,7 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
       {/* Tags Tab */}
       {activeTab === 'tags' && (
         <>
+          {canEdit && (
           <div className="card">
             <h3>{editingTag ? 'Edit Tag' : 'Create Tag'}</h3>
             <div className="form-grid">
@@ -1150,6 +1170,7 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
               )}
             </div>
           </div>
+          )}
 
           <div className="card">
             <h3>Tags</h3>
@@ -1170,8 +1191,8 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                     </td>
                     <td>{t.description || '-'}</td>
                     <td>
-                      <button onClick={() => editTag(t)} className="btn-small btn-secondary" style={{ marginRight: 8 }}>Edit</button>
-                      {!t.is_system && <button onClick={() => deleteTag(t.id)} className="btn-small btn-danger">Delete</button>}
+                      {canEdit && <button onClick={() => editTag(t)} className="btn-small btn-secondary" style={{ marginRight: 8 }}>Edit</button>}
+                      {canEdit && !t.is_system && <button onClick={() => deleteTag(t.id)} className="btn-small btn-danger">Delete</button>}
                       {t.is_system && <span style={{ fontSize: '11px', color: '#97846c' }}>Protected</span>}
                     </td>
                   </tr>
@@ -1192,6 +1213,7 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
       {/* VLANs Tab */}
       {activeTab === 'vlans' && (
         <>
+          {canEdit && (
           <div className="card">
             <h3>{editingVlan ? 'Edit VLAN' : 'Create VLAN'}</h3>
             <div className="form-grid">
@@ -1251,6 +1273,7 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
               )}
             </div>
           </div>
+          )}
 
           <div className="card">
             <h3>VLANs</h3>
@@ -1272,8 +1295,8 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                     <td>{v.subnet ? <code>{v.subnet}</code> : '-'}</td>
                     <td>{v.description || '-'}</td>
                     <td>
-                      <button onClick={() => editVlan(v)} className="btn-small btn-secondary" style={{ marginRight: 8 }}>Edit</button>
-                      <button onClick={() => deleteVlan(v.id)} className="btn-small btn-danger">Delete</button>
+                      {canEdit && <button onClick={() => editVlan(v)} className="btn-small btn-secondary" style={{ marginRight: 8 }}>Edit</button>}
+                      {canEdit && <button onClick={() => deleteVlan(v.id)} className="btn-small btn-danger">Delete</button>}
                     </td>
                   </tr>
                 ))}
@@ -1302,6 +1325,7 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                   Rules are evaluated every 5 minutes and on-demand. Manual tags are never overwritten.
                 </p>
               </div>
+              {canEdit && (
               <div style={{ display: 'flex', gap: 8 }}>
                 <button onClick={evaluateAllRules} disabled={evaluatingAll} className="btn-secondary">
                   {evaluatingAll ? 'Running...' : 'Run All Rules Now'}
@@ -1310,11 +1334,12 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                   + Create Tag Rule
                 </button>
               </div>
+              )}
             </div>
           </div>
 
           {/* Rule Form */}
-          {showTagRuleForm && (
+          {canEdit && showTagRuleForm && (
             <div className="card" style={{ border: '2px solid #646cff' }}>
               <h3>{editingTagRule ? 'Edit Tag Rule' : 'Create Tag Rule'}</h3>
 
@@ -1394,7 +1419,7 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                     <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                       {previewHosts.slice(0, 30).map((h: any) => (
                         <span key={h.id} style={{ padding: '2px 8px', background: 'white', borderRadius: 4, fontSize: '0.85em', border: '1px solid #C8E6C9' }}>
-                          {h.hostname} <code style={{ fontSize: '0.8em' }}>({h.mgmt_ip})</code>
+                          {h.hostname}{h.mgmt_ip && <> <code style={{ fontSize: '0.8em' }}>({h.mgmt_ip})</code></>}
                         </span>
                       ))}
                       {previewHosts.length > 30 && <span style={{ fontSize: '0.85em', color: '#666' }}>...and {previewHosts.length - 30} more</span>}
@@ -1456,9 +1481,9 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                           <strong>{rule.matched_count || 0}</strong> hosts
                         </td>
                         <td>
-                          <button onClick={() => evaluateSingleRule(rule.id)} className="btn-small btn-secondary" style={{ marginRight: 4 }}>Evaluate</button>
-                          <button onClick={() => startEditTagRule(rule)} className="btn-small btn-secondary" style={{ marginRight: 4 }}>Edit</button>
-                          <button onClick={() => deleteTagRule(rule.id)} className="btn-small btn-danger">Delete</button>
+                          {canEdit && <button onClick={() => evaluateSingleRule(rule.id)} className="btn-small btn-secondary" style={{ marginRight: 4 }}>Evaluate</button>}
+                          {canEdit && <button onClick={() => startEditTagRule(rule)} className="btn-small btn-secondary" style={{ marginRight: 4 }}>Edit</button>}
+                          {canEdit && <button onClick={() => deleteTagRule(rule.id)} className="btn-small btn-danger">Delete</button>}
                         </td>
                       </tr>
                     );

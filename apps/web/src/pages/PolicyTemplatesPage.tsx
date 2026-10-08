@@ -1,7 +1,10 @@
 import { useState, useEffect } from 'react';
-import { api } from '../lib/api';
+import { api, errorMessage } from '../lib/api';
+import { useAuth, hasRole } from '../lib/auth-context';
 
 export function PolicyTemplatesPage() {
+  const { roles } = useAuth();
+  const canManage = hasRole(roles, 'operator', 'admin');
   const [templates, setTemplates] = useState<any[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [selectedCategory, setSelectedCategory] = useState('');
@@ -25,10 +28,11 @@ export function PolicyTemplatesPage() {
       setTemplates(tRes.templates);
       setCategories(cRes.categories);
       setTags(tagsRes.tags);
-    } catch (e: any) { setError(e.message); }
+    } catch (e: any) { setError(errorMessage(e)); }
     setLoading(false);
   };
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [selectedCategory]);
 
   const selectTemplate = async (t: any) => {
@@ -36,7 +40,7 @@ export function PolicyTemplatesPage() {
     try {
       const res = await api.templates.get(t.id);
       setTemplateRules(res.rules);
-    } catch (e: any) { setError(e.message); }
+    } catch (e: any) { setError(errorMessage(e)); }
   };
 
   const createTemplate = async () => {
@@ -52,7 +56,7 @@ export function PolicyTemplatesPage() {
       setShowCreate(false);
       setForm({ name: '', description: '', category: '', targetTagId: '', autoApply: false, interfaceScopeType: 'INTERFACE_ROLE' });
       load();
-    } catch (e: any) { setError(e.message); }
+    } catch (e: any) { setError(errorMessage(e)); }
   };
 
   const addRule = async () => {
@@ -72,14 +76,14 @@ export function PolicyTemplatesPage() {
       const res = await api.templates.get(selectedTemplate.id);
       setTemplateRules(res.rules);
       setRuleForm({ direction: 'IN', action: 'ALLOW', protocol: 'tcp', ports: '', sourceType: 'CIDR', sourceValue: '0.0.0.0/0', logMode: 'NONE', comment: '' });
-    } catch (e: any) { setError(e.message); }
+    } catch (e: any) { setError(errorMessage(e)); }
   };
 
   const deleteRule = async (ruleId: string) => {
     try {
       await api.templates.deleteRule(ruleId);
       setTemplateRules(prev => prev.filter(r => r.id !== ruleId));
-    } catch (e: any) { setError(e.message); }
+    } catch (e: any) { setError(errorMessage(e)); }
   };
 
   const instantiate = async (templateId: string) => {
@@ -92,7 +96,7 @@ export function PolicyTemplatesPage() {
       const result = await api.templates.instantiate(templateId);
       alert(`Created policy set "${result.policySet.name}" with ${result.rulesCreated} rules (DRAFT). Go to Policy Sets to review and add more rules.`);
       load();
-    } catch (e: any) { setError(e.message); }
+    } catch (e: any) { setError(errorMessage(e)); }
   };
 
   const deleteTemplate = async (id: string) => {
@@ -101,7 +105,7 @@ export function PolicyTemplatesPage() {
       await api.templates.delete(id);
       if (selectedTemplate?.id === id) { setSelectedTemplate(null); setTemplateRules([]); }
       load();
-    } catch (e: any) { setError(e.message); }
+    } catch (e: any) { setError(errorMessage(e)); }
   };
 
   if (loading) return <div>Loading...</div>;
@@ -125,10 +129,10 @@ export function PolicyTemplatesPage() {
           <option value="">All Categories</option>
           {categories.map(c => <option key={c} value={c}>{c}</option>)}
         </select>
-        <button onClick={() => setShowCreate(true)} className="btn-primary">+ New Template</button>
+        {canManage && <button onClick={() => setShowCreate(true)} className="btn-primary">+ New Template</button>}
       </div>
 
-      {showCreate && (
+      {showCreate && canManage && (
         <div style={{ border: '1px solid #d4c9b8', padding: 20, marginBottom: 16, borderRadius: 8, background: '#fdfcf9' }}>
           <h3 style={{ marginTop: 0, marginBottom: 12, color: '#292018' }}>Create Template</h3>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
@@ -195,7 +199,7 @@ export function PolicyTemplatesPage() {
                 <th style={{ textAlign: 'center' }}>Rules</th>
                 <th style={{ textAlign: 'center' }}>Auto-Apply</th>
                 <th style={{ textAlign: 'center' }}>Used</th>
-                <th>Actions</th>
+                {canManage && <th>Actions</th>}
               </tr>
             </thead>
             <tbody>
@@ -215,18 +219,18 @@ export function PolicyTemplatesPage() {
                   <td style={{ textAlign: 'center', fontWeight: 600 }}>{t.rule_count}</td>
                   <td style={{ textAlign: 'center' }}>{t.auto_apply ? <span style={{ color: '#5a7a3a', fontWeight: 600 }}>Yes</span> : <span style={{ color: '#b8a890' }}>No</span>}</td>
                   <td style={{ textAlign: 'center' }}>{t.instantiation_count}x</td>
-                  <td>
+                  {canManage && <td>
                     <div style={{ display: 'flex', gap: 4 }}>
                       <button onClick={(e) => { e.stopPropagation(); instantiate(t.id); }} className="btn-small" style={{ background: '#8b6914', color: '#fdfcf9', border: 'none', borderRadius: 5, padding: '4px 10px', fontSize: '12px', fontWeight: 600, cursor: 'pointer' }}>Instantiate</button>
                       <button onClick={(e) => { e.stopPropagation(); deleteTemplate(t.id); }} className="btn-small btn-danger">Delete</button>
                     </div>
-                  </td>
+                  </td>}
                 </tr>
               ))}
               {templates.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="empty-state" style={{ textAlign: 'center', padding: 30 }}>
-                    No templates found. Click "+ New Template" to create one.
+                  <td colSpan={canManage ? 7 : 6} className="empty-state" style={{ textAlign: 'center', padding: 30 }}>
+                    No templates found.{canManage && ' Click "+ New Template" to create one.'}
                   </td>
                 </tr>
               )}
@@ -245,12 +249,12 @@ export function PolicyTemplatesPage() {
             </div>
             {templateRules.length === 0 && (
               <div style={{ padding: 20, textAlign: 'center', color: '#97846c', fontSize: '13px' }}>
-                No rules yet. Add rules below.
+                No rules yet.{canManage && ' Add rules below.'}
               </div>
             )}
             {templateRules.length > 0 && (
             <table className="data-table" style={{ fontSize: '0.9em' }}>
-              <thead><tr><th>#</th><th>Dir</th><th>Action</th><th>Proto</th><th>Ports</th><th>Source</th><th>Comment</th><th style={{ width: 40 }}></th></tr></thead>
+              <thead><tr><th>#</th><th>Dir</th><th>Action</th><th>Proto</th><th>Ports</th><th>Source</th><th>Comment</th>{canManage && <th style={{ width: 40 }}></th>}</tr></thead>
               <tbody>
                 {templateRules.map(r => (
                   <tr key={r.id}>
@@ -261,21 +265,23 @@ export function PolicyTemplatesPage() {
                     <td><code style={{ background: '#f0ebe2', padding: '1px 4px', borderRadius: 3, fontSize: '0.9em' }}>{r.ports || '*'}</code></td>
                     <td style={{ fontSize: '12px' }}>{r.source_type}:{r.source_value}</td>
                     <td style={{ color: '#78644e', fontSize: '12px' }}>{r.comment || ''}</td>
-                    <td>
-                      <button
-                        onClick={() => deleteRule(r.id)}
-                        className="btn-small btn-danger"
-                        style={{ padding: '2px 8px', fontSize: '11px' }}
-                      >
-                        X
-                      </button>
-                    </td>
+                    {canManage && (
+                      <td>
+                        <button
+                          onClick={() => deleteRule(r.id)}
+                          className="btn-small btn-danger"
+                          style={{ padding: '2px 8px', fontSize: '11px' }}
+                        >
+                          X
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
             </table>
             )}
-            <div style={{ marginTop: 16, padding: 12, background: '#f7f4ef', borderRadius: 8, border: '1px solid #e8e0d4' }}>
+            {canManage && <div style={{ marginTop: 16, padding: 12, background: '#f7f4ef', borderRadius: 8, border: '1px solid #e8e0d4' }}>
               <h4 style={{ margin: '0 0 10px', color: '#5c4633', fontSize: '14px' }}>Add Rule</h4>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8, fontSize: '0.9em' }}>
                 <div><label style={{ fontSize: '11px', color: '#78644e', display: 'block', marginBottom: 2 }}>Direction</label>
@@ -303,7 +309,7 @@ export function PolicyTemplatesPage() {
                 <div style={{ display: 'flex', alignItems: 'flex-end' }}>
                 <button onClick={addRule} className="btn-primary" style={{ width: '100%' }}>Add Rule</button></div>
               </div>
-            </div>
+            </div>}
             </div>
           </div>
         )}

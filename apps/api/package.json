@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch --enable-source-maps dist/index.js",
-    "build": "npm run build -w @segmentra/shared && npm run build -w @segmentra/compiler && npm run build -w @segmentra/executor && tsc -p tsconfig.json",
+    "build": "npm run build -w @segmentra/shared && npm run build:self -w @segmentra/compiler && npm run build -w @segmentra/executor && npm run build:self",
+    "build:self": "tsc -p tsconfig.json",
     "lint": "echo \"(lint todo)\""
   },
   "dependencies": {

@@ -107,7 +107,9 @@ apps/
         NotificationsPage.tsx    # Notification management
       lib/                     # API client, auth helpers
 infra/
-  app/Dockerfile               # App container (installs docker client + openssh-client)
+  app/Dockerfile               # API container: multi-stage, non-root, docker CLI + openssh-client + sshpass
+  app/docker-entrypoint.sh     # Validates secrets, runs migrations + seed, starts the API
+  web/                         # nginx image (UI + /api proxy)
   ansible-runner/              # Ansible container + playbooks (only needed for Ansible executor)
     Dockerfile
     playbooks/
@@ -464,7 +466,7 @@ Base URL: `http://localhost:8080/api`
 
 ## Database Schema
 
-Migrations live in `packages/db/migrations/`.
+Migrations live in `packages/db/migrations/` as plain `NNN_description.sql` files (001–025), applied by `npm run db:migrate` (`packages/db/scripts/migrate.js` → node-pg-migrate). There are no `.js` wrappers: node-pg-migrate loads both `.js` and `.sql` files with the same name, so older releases ran most migrations twice.
 
 ### Auth & RBAC
 
@@ -584,8 +586,9 @@ Migrations live in `packages/db/migrations/`.
 #### `policy_versions`
 - `id` (uuid, PK)
 - `policy_set_id` (uuid, FK → policy_sets.id)
-- `version_number` (int)
-- `status` (text) — `DRAFT|PENDING_APPROVAL|APPROVED|REJECTED`
+- `version_number` (int) — unique per policy set (`uq_policy_versions_set_version`, migration 025)
+- `status` (text) — `DRAFT|PENDING_APPROVAL|APPROVED|REJECTED|DEPLOYED|ARCHIVED`
+- `submitted_by` (uuid, FK users, ON DELETE SET NULL) — user who submitted the version for approval
 - `change_summary` (text, nullable)
 - `created_by` (uuid, FK → users.id)
 - `created_at` (timestamptz)
@@ -645,6 +648,7 @@ Migrations live in `packages/db/migrations/`.
 - `finished_at` (timestamptz, nullable)
 - `message` (text, nullable)
 - `applied_hash` (text, nullable) — SHA-256 hash of compiled policy text (for drift detection)
+- `applied_live_hash` (text, nullable) — hash of the ruleset read back from the host after apply (migration 025)
 - `rollback_performed` (boolean, default false)
 - Primary key: `(deployment_id, host_id)`
 
@@ -1555,10 +1559,10 @@ Optional time-limited deployments that automatically expire after a specified da
 1. When creating a deployment, optionally set **Expires At** and **On Expiry** action
 2. A background job checks every minute for expired deployments
 3. On expiry, the system:
-   - Marks the deployment as `expired = true`
-   - Sends a `POLICY_EXPIRED` notification
+   - Marks the deployment as `expired = true` and sets its status to `EXPIRED`
+   - Sends a `POLICY_EXPIRED` notification (the subject/metadata reflect the chosen action)
    - Logs an audit event
-   - Executes the chosen action (notify only, remove rules, or revert to previous)
+   - Does **not** change any firewall rules on the hosts — every action currently results in a notification only
 4. A 24-hour warning notification is sent before expiry (deduped to avoid spam)
 
 #### Expiry Actions
@@ -1566,8 +1570,8 @@ Optional time-limited deployments that automatically expire after a specified da
 | Action | Behavior |
 |--------|----------|
 | **Notify Only** | Alert is sent, but firewall rules remain active on hosts. Manual removal required. |
-| **Remove** | Firewall rules are rolled back on all deployed hosts (restore from backup). |
-| **Revert** | The previous policy version is automatically re-deployed to all affected hosts. |
+| **Remove** | Notification says "manual rollback required". Rules are **not** removed automatically — roll back manually (e.g. `scripts/restore-previous-policy.sh`). |
+| **Revert** | Notification says the previous version should be redeployed. Nothing is redeployed automatically — create a deployment of the previous version manually. |
 
 #### Use Cases
 
@@ -2187,22 +2191,28 @@ The simulation uses simplified rule matching logic designed for quick analysis. 
 
 The API reads env vars in `apps/api/src/lib/env.ts`:
 
+- `NODE_ENV` — `production` enables strict checks
 - `PORT` (default `8080`) — API server port
 - `DATABASE_URL` (**required**) — PostgreSQL connection string
-- `JWT_SECRET` (**required**, min 16 chars) — Secret for JWT token signing
-- `SEGMENTRA_KEK_B64` (optional) — Base64 of 32-byte key for AES-256-GCM secret encryption. If not provided, derives from JWT_SECRET (dev only).
+- `JWT_SECRET` (**required**; min 32 chars when `NODE_ENV=production`, 16 otherwise; known placeholder values are refused in production) — Secret for JWT token signing
+- `SEGMENTRA_KEK_B64` (required in production) — Base64 of a 32-byte key for AES-256-GCM secret encryption. If not provided, the key is derived from `JWT_SECRET`, so rotating `JWT_SECRET` breaks stored secrets. Set it before storing secrets.
 - `SEGMENTRA_BOOTSTRAP_TOKEN` (optional) — Enables `POST /api/admin/bootstrap` endpoint for one-time admin creation
 - `BUNDLES_DIR` (default `./data/bundles`) — Directory where deployment bundles/logs are written
 - `ANSIBLE_RUNNER_CONTAINER` (default `segmentra-ansible-runner`) — Name of the Ansible runner container
+- `CORS_ORIGIN` (optional) — Comma-separated allowed browser origins (empty = allow all)
+- `TRUST_PROXY` (optional) — Express `trust proxy` value when running behind a reverse proxy
+
+Read outside `env.ts`: `SEGMENTRA_KNOWN_HOSTS` (SSH known_hosts path, accept-new host key checking), `SEGMENTRA_ALLOW_PRIVATE_WEBHOOKS` (allow webhooks to loopback/link-local/metadata addresses), `SEGMENTRA_SSH_COMMAND_TIMEOUT_MS`, and — in the seed script — `SEGMENTRA_ADMIN_PASSWORD`. See [installation.md](installation.md#environment-variables) for the full table.
 
 ### Docker Compose Configuration
 
 The `docker-compose.yml` file defines:
 
-- **PostgreSQL**: Database container on port 15432
-- **App Container**: API server with Docker socket mount
-- **Ansible Runner**: Optional container for Ansible executor
-- **Volumes**: Shared bundle storage between containers
+- **PostgreSQL**: Database container on 127.0.0.1:15432 with a healthcheck
+- **App Container**: API server (non-root, `NODE_ENV=production`, runs migrations + seed on start) with Docker socket mount
+- **Ansible Runner**: `container_name: segmentra-ansible-runner`, used by the Ansible executor via `docker exec`
+- **Web**: nginx serving the UI and proxying `/api/`
+- **Volumes**: Shared bundle storage (`/bundles` in both the API and runner), PostgreSQL data, SSH known_hosts
 
 ### Security Considerations
 

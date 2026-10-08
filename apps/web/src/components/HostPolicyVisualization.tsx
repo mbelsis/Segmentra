@@ -49,7 +49,7 @@ export function HostPolicyVisualization({ hostId, hostname, onClose }: HostPolic
       const [tagsRes, vlansRes, hostsRes] = await Promise.all([
         api.tags().catch(() => ({ tags: [] })),
         api.vlans().catch(() => ({ vlans: [] })),
-        api.hosts({ limit: 1000 }).catch(() => ({ hosts: [] }))
+        api.allHosts().catch(() => ({ hosts: [] as any[] }))
       ]);
 
       // Build maps for quick lookup

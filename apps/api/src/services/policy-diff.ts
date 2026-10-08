@@ -2,8 +2,12 @@ import { compileHostPolicy } from '@segmentra/compiler';
 import { pool } from '../db/pool.js';
 
 export interface PolicyDiffRule {
-  type: 'added' | 'removed' | 'modified';
+  type: 'added' | 'removed' | 'modified' | 'reordered';
   orderIndex: number;
+  /** For 'reordered' rules: the order_index in the current version */
+  previousOrderIndex?: number;
+  /** Per-rule interface scope (only set when the rule overrides the policy scope) */
+  interfaceScope?: string;
   direction: string;
   action: string;
   protocol: string;
@@ -21,13 +25,50 @@ export interface PolicyDiffResult {
     removedAllows: PolicyDiffRule[];
     newDenies: PolicyDiffRule[];
     removedDenies: PolicyDiffRule[];
+    /** Rules present in both versions whose relative evaluation order changed (first match wins) */
+    reordered: PolicyDiffRule[];
+    /** Set when the policy-level interface scope differs between the versions */
+    interfaceScopeChange: { from: string; to: string } | null;
   };
   summary: {
     totalNewAllows: number;
     totalRemovedAllows: number;
     totalNewDenies: number;
     totalRemovedDenies: number;
+    totalReordered: number;
+    interfaceScopeChanged: boolean;
   };
+}
+
+function describeScope(type: string | null | undefined, roles: unknown, names: unknown): string {
+  const t = type || 'ALL_INTERFACES';
+  if (t === 'INTERFACE_ROLE') return `INTERFACE_ROLE:${[...((roles as string[]) ?? [])].sort().join(',')}`;
+  if (t === 'INTERFACE_NAME') return `INTERFACE_NAME:${[...((names as string[]) ?? [])].sort().join(',')}`;
+  return t;
+}
+
+/** Longest common subsequence over keys; returns the set of kept keys. */
+function lcsKeys(a: string[], b: string[]): Set<string> {
+  const n = a.length;
+  const m = b.length;
+  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const kept = new Set<string>();
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      kept.add(a[i]);
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) i++;
+    else j++;
+  }
+  return kept;
 }
 
 /**
@@ -65,14 +106,16 @@ export async function comparePolicyVersions(params: {
   // Get rules for both versions
   const [currentRulesRes, candidateRulesRes] = await Promise.all([
     pool.query(
-      `SELECT order_index, direction, action, protocol, ports, source_type, source_value, comment
+      `SELECT order_index, direction, action, protocol, ports, source_type, source_value, comment,
+              use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names
        FROM policy_rules
        WHERE policy_version_id=$1
        ORDER BY order_index ASC`,
       [params.currentVersionId]
     ),
     pool.query(
-      `SELECT order_index, direction, action, protocol, ports, source_type, source_value, comment
+      `SELECT order_index, direction, action, protocol, ports, source_type, source_value, comment,
+              use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names
        FROM policy_rules
        WHERE policy_version_id=$1
        ORDER BY order_index ASC`,
@@ -88,18 +131,51 @@ export async function comparePolicyVersions(params: {
     ports: r.ports || null,
     sourceType: r.source_type,
     sourceValue: r.source_value,
-    comment: r.comment || null
+    comment: r.comment || null,
+    orderIndex: Number(r.order_index),
+    // Per-rule interface scope only matters when the rule overrides the policy scope.
+    interfaceScope:
+      r.use_policy_interface_scope === false
+        ? describeScope(r.interface_scope_type, r.interface_scope_roles, r.interface_scope_names)
+        : null
   });
 
   const currentRules = currentRulesRes.rows.map(normalizeRule);
   const candidateRules = candidateRulesRes.rows.map(normalizeRule);
 
-  // Create rule signatures for comparison
+  // Content signature (order is compared separately so one insertion doesn't flag every rule)
   const ruleSignature = (r: ReturnType<typeof normalizeRule>) =>
-    `${r.direction}|${r.action}|${r.protocol}|${r.ports || '*'}|${r.sourceType}|${r.sourceValue}`;
+    `${r.direction}|${r.action}|${r.protocol}|${(r.ports || '*').replace(/\s+/g, '')}|${r.sourceType}|${r.sourceValue}|${r.interfaceScope ?? 'policy'}`;
 
-  const currentSignatures = new Set(currentRules.map(ruleSignature));
-  const candidateSignatures = new Set(candidateRules.map(ruleSignature));
+  // Reorder detection: give duplicate signatures an occurrence suffix, then find rules common to
+  // both versions whose relative order changed (outside the longest common subsequence).
+  const withOccurrence = (rules: ReturnType<typeof normalizeRule>[]) => {
+    const seen = new Map<string, number>();
+    return rules.map((r) => {
+      const sig = ruleSignature(r);
+      const n = (seen.get(sig) ?? 0) + 1;
+      seen.set(sig, n);
+      return `${sig}#${n}`;
+    });
+  };
+  const currentKeys = withOccurrence(currentRules);
+  const candidateKeys = withOccurrence(candidateRules);
+  const currentKeySet = new Set(currentKeys);
+  const candidateKeySet = new Set(candidateKeys);
+  const commonCurrent = currentKeys.filter((k) => candidateKeySet.has(k));
+  const commonCandidate = candidateKeys.filter((k) => currentKeySet.has(k));
+  const stable = lcsKeys(commonCurrent, commonCandidate);
+  const reorderedRules: Array<ReturnType<typeof normalizeRule> & { previousOrderIndex: number }> = [];
+  candidateKeys.forEach((k, idx) => {
+    if (!currentKeySet.has(k) || stable.has(k)) return;
+    const prev = currentRules[currentKeys.indexOf(k)];
+    reorderedRules.push({ ...candidateRules[idx], previousOrderIndex: prev.orderIndex });
+  });
+
+  const currentScope = describeScope(currentPolicy.interface_scope_type, currentPolicy.interface_scope_roles, currentPolicy.interface_scope_names);
+  const candidateScope = describeScope(candidatePolicy.interface_scope_type, candidatePolicy.interface_scope_roles, candidatePolicy.interface_scope_names);
+  const interfaceScopeChange = currentScope !== candidateScope ? { from: currentScope, to: candidateScope } : null;
+
 
   // Find added and removed rules, preserving order_index
   const addedRules: Array<typeof candidateRules[0] & { orderIndex: number }> = [];
@@ -107,14 +183,14 @@ export async function comparePolicyVersions(params: {
 
   for (let i = 0; i < candidateRulesRes.rows.length; i++) {
     const rule = candidateRules[i];
-    if (!currentSignatures.has(ruleSignature(rule))) {
+    if (!currentKeySet.has(candidateKeys[i])) {
       addedRules.push({ ...rule, orderIndex: candidateRulesRes.rows[i].order_index });
     }
   }
 
   for (let i = 0; i < currentRulesRes.rows.length; i++) {
     const rule = currentRules[i];
-    if (!candidateSignatures.has(ruleSignature(rule))) {
+    if (!candidateKeySet.has(currentKeys[i])) {
       removedRules.push({ ...rule, orderIndex: currentRulesRes.rows[i].order_index });
     }
   }
@@ -177,7 +253,8 @@ export async function comparePolicyVersions(params: {
         ports: rule.ports || undefined,
         sourceType: rule.sourceType,
         sourceValue: rule.sourceValue,
-        comment: rule.comment || undefined
+        comment: rule.comment || undefined,
+        interfaceScope: rule.interfaceScope ?? undefined
       };
 
       if (rule.action === 'ALLOW') {
@@ -197,7 +274,8 @@ export async function comparePolicyVersions(params: {
         ports: rule.ports || undefined,
         sourceType: rule.sourceType,
         sourceValue: rule.sourceValue,
-        comment: rule.comment || undefined
+        comment: rule.comment || undefined,
+        interfaceScope: rule.interfaceScope ?? undefined
       };
 
       if (rule.action === 'ALLOW') {
@@ -207,6 +285,20 @@ export async function comparePolicyVersions(params: {
       }
     }
 
+    const reordered: PolicyDiffRule[] = reorderedRules.map((rule) => ({
+      type: 'reordered',
+      orderIndex: rule.orderIndex,
+      previousOrderIndex: rule.previousOrderIndex,
+      direction: rule.direction,
+      action: rule.action,
+      protocol: rule.protocol,
+      ports: rule.ports || undefined,
+      sourceType: rule.sourceType,
+      sourceValue: rule.sourceValue,
+      comment: rule.comment || undefined,
+      interfaceScope: rule.interfaceScope ?? undefined
+    }));
+
     results.push({
       hostId: host.id,
       hostname: host.hostname,
@@ -214,13 +306,17 @@ export async function comparePolicyVersions(params: {
         newAllows,
         removedAllows,
         newDenies,
-        removedDenies
+        removedDenies,
+        reordered,
+        interfaceScopeChange
       },
       summary: {
         totalNewAllows: newAllows.length,
         totalRemovedAllows: removedAllows.length,
         totalNewDenies: newDenies.length,
-        totalRemovedDenies: removedDenies.length
+        totalRemovedDenies: removedDenies.length,
+        totalReordered: reordered.length,
+        interfaceScopeChanged: interfaceScopeChange !== null
       }
     });
   }

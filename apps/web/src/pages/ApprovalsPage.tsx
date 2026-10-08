@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-import { api } from '../lib/api';
+import { api, isApiError } from '../lib/api';
 
 export function ApprovalsPage() {
   const navigate = useNavigate();
@@ -42,7 +42,7 @@ export function ApprovalsPage() {
 
   async function loadHosts() {
     try {
-      const res = await api.hosts();
+      const res = await api.allHosts();
       setHosts(res.hosts || []);
     } catch {
       // Ignore
@@ -71,8 +71,8 @@ export function ApprovalsPage() {
       loadPending();
     } catch (e: any) {
       const msg = e.message || String(e);
-      if (msg.includes('approver_must_differ')) {
-        setError('You cannot approve a policy version that you created. A different user with approver/admin role must review it.');
+      if (isApiError(e) && (e.code === 'cannot_approve_own_changes' || e.code === 'approver_must_differ')) {
+        setError('You cannot approve a policy version that you created, edited or submitted. A different user with approver/admin role must review it.');
       } else {
         setError(msg);
       }

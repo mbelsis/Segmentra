@@ -3,6 +3,25 @@ import { z } from 'zod';
 
 import { pool } from '../db/pool.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
+import { maskConfigSecrets, mergeConfigSecrets } from '../services/secret-mask.js';
+
+function parseConfig(raw: unknown): Record<string, unknown> {
+  if (!raw) return {};
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return {};
+    }
+  }
+  return raw as Record<string, unknown>;
+}
+
+/** Never return API keys / tokens stored in integration config verbatim. */
+function redactIntegration<T extends { config?: unknown }>(row: T): T {
+  if (!row) return row;
+  return { ...row, config: maskConfigSecrets(parseConfig(row.config)) };
+}
 
 export const integrationsRouter = Router();
 integrationsRouter.use(requireAuth);
@@ -13,7 +32,7 @@ integrationsRouter.get('/', requireRole('admin'), async (_req, res) => {
     `SELECT id, type, provider, name, description, enabled, config, last_sync_at, last_sync_status, created_at
      FROM integrations ORDER BY type ASC, name ASC`
   );
-  res.json({ integrations: rows });
+  res.json({ integrations: rows.map(redactIntegration) });
 });
 
 // Host vulnerabilities
@@ -55,7 +74,7 @@ integrationsRouter.get('/:id', requireRole('admin'), async (req, res) => {
     [req.params.id]
   );
 
-  res.json({ integration: rows[0], recentEvents: events });
+  res.json({ integration: redactIntegration(rows[0]), recentEvents: events });
 });
 
 const integrationSchema = z.object({
@@ -90,14 +109,22 @@ integrationsRouter.post('/', requireRole('admin'), async (req, res) => {
     [userId, rows[0].id, JSON.stringify({ type: b.type, provider: b.provider, name: b.name })]
   );
 
-  res.status(201).json({ integration: rows[0] });
+  res.status(201).json({ integration: redactIntegration(rows[0]) });
 });
 
 // Update integration
 integrationsRouter.put('/:id', requireRole('admin'), async (req, res) => {
   const parsed = integrationSchema.partial().safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
   const b = parsed.data;
+
+  // Masked secrets ("••••1234") or omitted secret keys keep the stored value.
+  let mergedConfig: Record<string, unknown> | null = null;
+  if (b.config) {
+    const existing = await pool.query(`SELECT config FROM integrations WHERE id = $1`, [req.params.id]);
+    if (!existing.rows[0]) return res.status(404).json({ error: 'not_found' });
+    mergedConfig = mergeConfigSecrets(parseConfig(existing.rows[0].config), b.config);
+  }
 
   const { rows } = await pool.query(
     `UPDATE integrations
@@ -111,7 +138,7 @@ integrationsRouter.put('/:id', requireRole('admin'), async (req, res) => {
          updated_at = now()
      WHERE id = $1 RETURNING *`,
     [req.params.id, b.type ?? null, b.provider ?? null, b.name ?? null,
-     b.description ?? null, b.enabled ?? null, b.config ? JSON.stringify(b.config) : null,
+     b.description ?? null, b.enabled ?? null, mergedConfig ? JSON.stringify(mergedConfig) : null,
      b.credentialsSecretId ?? null]
   );
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
@@ -122,7 +149,7 @@ integrationsRouter.put('/:id', requireRole('admin'), async (req, res) => {
     [req.auth!.username, 'INTEGRATION_UPDATE', 'integration', req.params.id, JSON.stringify({ name: rows[0].name })]
   );
 
-  res.json({ integration: rows[0] });
+  res.json({ integration: redactIntegration(rows[0]) });
 });
 
 // Delete integration
@@ -146,9 +173,9 @@ integrationsRouter.post('/:id/test', requireRole('admin'), async (req, res) => {
 
   try {
     if (rows[0].type === 'siem') {
-      // Real test: send a test syslog message
-      const { forwardAuditToSiem } = await import('../services/siem-forwarder.js');
-      await forwardAuditToSiem({
+      // Real test: send a test syslog message to THIS integration only; errors propagate.
+      const { testSiemIntegration } = await import('../services/siem-forwarder.js');
+      await testSiemIntegration(req.params.id, {
         action: 'INTEGRATION_TEST',
         actorUsername: req.auth!.username,
         entityType: 'integration',
@@ -165,7 +192,14 @@ integrationsRouter.post('/:id/test', requireRole('admin'), async (req, res) => {
         `UPDATE integrations SET last_sync_at = now(), last_sync_status = 'connected' WHERE id = $1`,
         [req.params.id]
       );
-      res.json({ success: true, message: 'Test syslog message sent to configured collector. Check your SIEM for the test event.' });
+      const siemConfig = parseConfig(rows[0].config);
+      const viaUdp = (siemConfig.protocol ?? 'udp') === 'udp';
+      res.json({
+        success: true,
+        message: viaUdp
+          ? 'Test syslog message sent over UDP (delivery cannot be confirmed for UDP). Check your SIEM for the test event.'
+          : 'Test syslog message delivered over TCP. Check your SIEM for the test event.',
+      });
 
     } else if (rows[0].type === 'threat_intel') {
       // Real test: verify API key by checking a known safe IP
@@ -175,6 +209,7 @@ integrationsRouter.post('/:id/test', requireRole('admin'), async (req, res) => {
       }
       const testResp = await fetch(`https://api.abuseipdb.com/api/v2/check?ipAddress=8.8.8.8&maxAgeInDays=90`, {
         headers: { 'Key': config.apiKey, 'Accept': 'application/json' },
+        signal: AbortSignal.timeout(15000),
       });
       if (!testResp.ok) {
         const errText = await testResp.text().catch(() => '');
@@ -212,7 +247,7 @@ integrationsRouter.post('/:id/test', requireRole('admin'), async (req, res) => {
       `UPDATE integrations SET last_sync_status = 'error' WHERE id = $1`,
       [req.params.id]
     );
-    res.status(500).json({ error: 'test_failed', message: e.message });
+    res.status(502).json({ success: false, error: 'test_failed', message: e.message });
   }
 });
 
@@ -225,7 +260,8 @@ integrationsRouter.post('/:id/sync', requireRole('admin'), async (req, res) => {
     if (rows[0].type === 'threat_intel') {
       // Real sync: AbuseIPDB threat intelligence
       const { syncAbuseIPDB } = await import('../services/threat-intel-abuseipdb.js');
-      const result = await syncAbuseIPDB(req.params.id);
+      const actor = await pool.query(`SELECT id FROM users WHERE username=$1 LIMIT 1`, [req.auth!.username]);
+      const result = await syncAbuseIPDB(req.params.id, actor.rows[0]?.id ?? null);
 
       await pool.query(
         `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
@@ -261,13 +297,14 @@ integrationsRouter.post('/:id/sync', requireRole('admin'), async (req, res) => {
        VALUES ($1, 'inbound', 'sync', '{}', 'FAILED', $2)`,
       [req.params.id, e.message]
     );
-    res.status(500).json({ error: 'sync_failed', message: e.message });
+    res.status(502).json({ success: false, error: 'sync_failed', message: e.message });
   }
 });
 
 // Get integration events
 integrationsRouter.get('/:id/events', requireRole('admin'), async (req, res) => {
-  const limit = parseInt(String(req.query.limit ?? '50'), 10);
+  const parsedLimit = parseInt(String(req.query.limit ?? '50'), 10);
+  const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 500) : 50;
   const { rows } = await pool.query(
     `SELECT * FROM integration_events WHERE integration_id = $1 ORDER BY created_at DESC LIMIT $2`,
     [req.params.id, limit]

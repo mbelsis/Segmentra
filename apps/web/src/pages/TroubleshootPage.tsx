@@ -1,12 +1,18 @@
 import { useState, useEffect } from 'react';
 import { api } from '../lib/api';
+import { useAuth, hasRole } from '../lib/auth-context';
 
 export function TroubleshootPage() {
+  const { roles } = useAuth();
+  // Simulation and firewall learning (start/cancel/restore) are operator/admin only in the API
+  const canOperate = hasRole(roles, 'operator', 'admin');
   const [searchType, setSearchType] = useState<'ip' | 'host' | 'policy'>('ip');
   const [searchValue, setSearchValue] = useState('');
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
+  // Candidate hosts when a host search is ambiguous (user picks one)
+  const [hostMatches, setHostMatches] = useState<any[] | null>(null);
 
   // Simulation state
   const [simSourceIp, setSimSourceIp] = useState('');
@@ -27,26 +33,57 @@ export function TroubleshootPage() {
     setLoading(true);
     setError(null);
     setResults(null);
+    setHostMatches(null);
 
     try {
       if (searchType === 'ip') {
         const data = await api.troubleshoot.policiesByIp(searchValue.trim());
         setResults(data);
       } else if (searchType === 'host') {
-        // Find host by hostname or ID
-        const hostsRes = await api.hosts({ hostname: searchValue.trim() });
-        if (hostsRes.hosts.length === 0) {
+        // Find host by hostname or management IP (the API search is a fuzzy ILIKE match)
+        const q = searchValue.trim();
+        const looksLikeIp = /^\d+\.\d+\.\d+\.\d+/.test(q);
+        const hostsRes = await api.allHosts(looksLikeIp ? { ip: q } : { hostname: q });
+        const candidates = hostsRes.hosts;
+        if (candidates.length === 0) {
           setError('Host not found');
-          setLoading(false);
           return;
         }
-        const host = hostsRes.hosts[0];
-        const data = await api.troubleshoot.hostPolicies(host.id);
-        setResults(data);
+        const ql = q.toLowerCase();
+        const exact = candidates.filter((h: any) =>
+          String(h.hostname ?? '').toLowerCase() === ql ||
+          String(h.mgmt_ip ?? '').split('/')[0] === q ||
+          h.id === q
+        );
+        const chosen = exact.length === 1 ? exact[0] : candidates.length === 1 ? candidates[0] : null;
+        if (!chosen) {
+          // Ambiguous: let the user choose instead of silently picking the first fuzzy match
+          setHostMatches(exact.length > 1 ? exact : candidates);
+          return;
+        }
+        await loadHostPolicies(chosen.id);
       } else if (searchType === 'policy') {
         const data = await api.troubleshoot.policyVersionHosts(searchValue.trim());
         setResults(data);
       }
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadHostPolicies(hostId: string) {
+    const data = await api.troubleshoot.hostPolicies(hostId);
+    setResults(data);
+  }
+
+  async function chooseHost(hostId: string) {
+    setHostMatches(null);
+    setLoading(true);
+    setError(null);
+    try {
+      await loadHostPolicies(hostId);
     } catch (e: any) {
       setError(String(e?.message ?? e));
     } finally {
@@ -93,9 +130,9 @@ export function TroubleshootPage() {
 
   // Load all hosts for selection (only enabled hosts)
   useEffect(() => {
-    api.hosts({ enabled: true, limit: 1000 }).then((res) => {
-      setAllHosts(res.hosts);
-    });
+    api.allHosts({ enabled: true })
+      .then((res) => setAllHosts(res.hosts))
+      .catch((e: any) => setAuditError(`Failed to load hosts: ${String(e?.message ?? e)}`));
   }, []);
 
   // Load audit sessions
@@ -109,7 +146,7 @@ export function TroubleshootPage() {
     try {
       const res = await api.troubleshoot.audit.listSessions();
       setAuditSessions(res.sessions);
-    } catch (e) {
+    } catch {
       // Ignore errors
     }
   }
@@ -193,6 +230,10 @@ export function TroubleshootPage() {
         <p style={{ color: '#666', marginBottom: 16 }}>
           Deploy log-only firewall rules to capture all network traffic without blocking. After the specified duration, original rules will be restored and communication flows will be displayed.
         </p>
+        <div role="note" style={{ background: '#fff8e6', border: '1px solid #f0d58c', color: '#6b5310', padding: '10px 12px', borderRadius: 6, fontSize: '0.88em', marginBottom: 16 }}>
+          <strong>Note:</strong> when the session ends, the host's <em>complete</em> firewall ruleset is restored from the backup taken at the start.
+          Rules added by Docker, Kubernetes or fail2ban during the session are lost; restart Docker / kube-proxy on the host afterwards if containers changed meanwhile.
+        </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: 16, marginBottom: 16 }}>
           <div>
@@ -320,9 +361,13 @@ export function TroubleshootPage() {
           </div>
         )}
 
-        <button onClick={handleStartAudit} disabled={auditLoading || auditHosts.length === 0} className="btn-primary">
-          {auditLoading ? 'Starting...' : 'Start Audit'}
-        </button>
+        {canOperate ? (
+          <button onClick={handleStartAudit} disabled={auditLoading || auditHosts.length === 0} className="btn-primary">
+            {auditLoading ? 'Starting...' : 'Start Audit'}
+          </button>
+        ) : (
+          <div style={{ color: '#666', fontSize: '0.9em', fontStyle: 'italic' }}>Starting firewall learning requires the operator or admin role.</div>
+        )}
 
         {auditError && (
           <div className="error-banner" style={{ marginTop: 16 }}>
@@ -353,7 +398,7 @@ export function TroubleshootPage() {
                   <td>{formatTimeRemaining(session)}</td>
                   <td>{new Date(session.started_at).toLocaleString()}</td>
                   <td>
-                    <button
+                    {canOperate && <button
                       onClick={async () => {
                         if (confirm('Cancel this audit session and restore original firewall rules?')) {
                           try {
@@ -367,7 +412,7 @@ export function TroubleshootPage() {
                       style={{ padding: '4px 8px', fontSize: '0.9em' }}
                     >
                       Cancel
-                    </button>
+                    </button>}
                   </td>
                 </tr>
               ))}
@@ -514,9 +559,13 @@ export function TroubleshootPage() {
           </div>
         </div>
         
-        <button onClick={handleSimulate} disabled={simLoading} className="btn-primary">
-          {simLoading ? 'Simulating...' : 'Simulate'}
-        </button>
+        {canOperate ? (
+          <button onClick={handleSimulate} disabled={simLoading} className="btn-primary">
+            {simLoading ? 'Simulating...' : 'Simulate'}
+          </button>
+        ) : (
+          <div style={{ color: '#666', fontSize: '0.9em', fontStyle: 'italic' }}>Simulation requires the operator or admin role.</div>
+        )}
       </div>
 
       {simError && (
@@ -625,7 +674,7 @@ export function TroubleshootPage() {
             <label style={{ display: 'block', marginBottom: 8, fontWeight: 500 }}>Search Type</label>
             <select
               value={searchType}
-              onChange={(e) => { setSearchType(e.target.value as any); setResults(null); }}
+              onChange={(e) => { setSearchType(e.target.value as any); setResults(null); setHostMatches(null); }}
               style={{ width: '100%', padding: '8px', border: '1px solid #ddd', borderRadius: 4 }}
             >
               <option value="ip">Search Policies by IP Address</option>
@@ -655,6 +704,26 @@ export function TroubleshootPage() {
         {error && (
           <div className="error-banner" style={{ marginBottom: 24 }}>
             {error}
+          </div>
+        )}
+
+        {hostMatches && searchType === 'host' && (
+          <div className="card" style={{ marginBottom: 24 }}>
+            <h3 style={{ marginTop: 0 }}>Multiple hosts match "{searchValue.trim()}" — choose one</h3>
+            <table className="data-table">
+              <thead>
+                <tr><th>Hostname</th><th>Mgmt IP</th><th></th></tr>
+              </thead>
+              <tbody>
+                {hostMatches.map((h: any) => (
+                  <tr key={h.id}>
+                    <td><strong>{h.hostname}</strong></td>
+                    <td>{h.mgmt_ip || '-'}</td>
+                    <td><button className="btn-small btn-secondary" onClick={() => chooseHost(h.id)}>Select</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
 

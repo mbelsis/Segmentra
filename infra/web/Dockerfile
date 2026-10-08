@@ -2,15 +2,21 @@ FROM node:20-bookworm-slim AS builder
 
 WORKDIR /app
 
-COPY package.json package-lock.json /app/
-COPY apps/web /app/apps/web
-COPY packages/shared /app/packages/shared
+COPY package.json package-lock.json ./
+COPY apps/api/package.json apps/api/
+COPY apps/web/package.json apps/web/
+COPY packages/shared/package.json packages/shared/
+COPY packages/compiler/package.json packages/compiler/
+COPY packages/executor/package.json packages/executor/
+COPY packages/db/package.json packages/db/
+RUN npm ci --no-audit --no-fund --workspace web
 
-RUN npm install --workspaces --include-workspace-root
+COPY apps/web apps/web
 
-# Set API URL to empty so the browser uses relative /api/ paths (proxied by nginx)
+# The browser calls the API with the relative base path /api; nginx (nginx.conf)
+# proxies /api/ to the segmentra-app container, so no absolute API URL is baked in.
 ENV VITE_API_URL=/api
-RUN npm run build -w apps/web
+RUN npm run build -w web
 
 FROM nginx:alpine
 

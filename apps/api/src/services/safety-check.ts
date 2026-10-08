@@ -1,5 +1,16 @@
 import { compileHostPolicy } from '@segmentra/compiler';
 import { pool } from '../db/pool.js';
+import {
+  cidrContains,
+  cidrsOverlap,
+  hostIpOnly,
+  isValidCidr,
+  isValidIp,
+  portSpecCoversRange,
+  portSpecIncludes,
+  portSpecIntersectsRange,
+} from './ip-utils.js';
+import { createSourceResolver } from './source-resolver.js';
 
 export interface SafetyCheckResult {
   safe: boolean;
@@ -17,7 +28,9 @@ export interface SafetyCheckResult {
 }
 
 /**
- * Check if a deployment would preserve SSH access from management VLAN.
+ * Check whether deploying a policy version would preserve SSH access from the management
+ * network, by evaluating the ordered rules against what the compiler emits (inbound baseline
+ * before policy rules; no established exception on the output chain).
  * Returns safety check result with warnings/errors.
  */
 export async function checkDeploymentSafety(params: {
@@ -33,23 +46,25 @@ export async function checkDeploymentSafety(params: {
     blockingRules: []
   };
 
-  // Get management VLAN CIDRs
+  // Get management VLAN CIDRs (same source the deployment compiler uses for its baseline)
   const mgmtVlanRes = await pool.query(
     `SELECT value FROM system_settings WHERE key='management_vlan_id'`
   );
   const mgmtVlanId = mgmtVlanRes.rows[0]?.value || null;
-  
+
   let mgmtSshCidrs: string[] = [];
   if (mgmtVlanId) {
     const vlanRes = await pool.query(`SELECT subnet FROM vlans WHERE id=$1`, [mgmtVlanId]);
-    if (vlanRes.rows[0]?.subnet) {
-      mgmtSshCidrs = [vlanRes.rows[0].subnet];
+    if (vlanRes.rows[0]?.subnet && isValidCidr(String(vlanRes.rows[0].subnet))) {
+      mgmtSshCidrs = [String(vlanRes.rows[0].subnet)];
     }
   }
 
   if (mgmtSshCidrs.length === 0) {
-    result.warnings.push('No management VLAN configured - cannot verify SSH access preservation');
-    return result;
+    result.warnings.push(
+      'No management VLAN subnet configured: the compiler falls back to allowing the SSH port from any source. ' +
+        'Configure a management VLAN to restrict SSH and enable precise lockout analysis.'
+    );
   }
 
   // Get policy version
@@ -72,7 +87,7 @@ export async function checkDeploymentSafety(params: {
         ? { type: 'INTERFACE_NAME' as const, names: (policy.interface_scope_names ?? []) as string[] }
         : { type: 'INTERFACE_ROLE' as const, roles: (policy.interface_scope_roles ?? []) as string[] };
 
-  // Get rules
+  // Get rules, in evaluation order
   const rulesRes = await pool.query(
     `SELECT order_index, direction, action, protocol, ports, source_type, source_value, comment
      FROM policy_rules
@@ -81,10 +96,34 @@ export async function checkDeploymentSafety(params: {
     [params.policyVersionId]
   );
 
+  // Resolve every rule's remote side to concrete addresses (same semantics as deployment).
+  const resolve = createSourceResolver();
+  const evalRules: EvalRule[] = [];
+  const sets: Record<string, string[]> = {};
+  for (const r of rulesRes.rows as any[]) {
+    const addrs = await resolve(r.source_type, r.source_value);
+    const setName = setNameFor(r.source_type, r.source_value);
+    if (r.source_type !== 'CIDR') sets[setName] = addrs;
+    evalRules.push({
+      orderIndex: Number(r.order_index),
+      direction: (r.direction ?? 'IN') as 'IN' | 'OUT' | 'BOTH',
+      action: r.action,
+      protocol: r.protocol,
+      ports: r.ports,
+      sourceType: r.source_type,
+      sourceValue: r.source_value,
+      comment: r.comment,
+      addrs,
+    });
+  }
+
+  const userIp = params.userIp ? hostIpOnly(params.userIp.replace(/^::ffff:(?=\d+\.)/i, '')) : null;
+  let allHostsPreserved = params.hostIds.length > 0;
+
   // Check each host
   for (const hostId of params.hostIds) {
     const hostRes = await pool.query(
-      `SELECT h.id, h.hostname, h.mgmt_ip, h.firewall_backend,
+      `SELECT h.id, h.hostname, h.mgmt_ip, h.ssh_port, h.firewall_backend,
               COALESCE(json_agg(json_build_object('name', hi.name, 'role', hi.role, 'enabled', hi.enabled)) FILTER (WHERE hi.id IS NOT NULL), '[]') as interfaces
        FROM hosts h
        LEFT JOIN host_interfaces hi ON hi.host_id = h.id
@@ -95,78 +134,182 @@ export async function checkDeploymentSafety(params: {
 
     if (!hostRes.rows[0]) continue;
     const host = hostRes.rows[0];
+    const sshPort = Number(host.ssh_port) || 22;
 
-    // Compile policy for this host to check baseline SSH rules
-    const rules = rulesRes.rows.map((r: any) => ({
-      orderIndex: Number(r.order_index),
-      direction: (r.direction ?? 'IN') as 'IN' | 'OUT' | 'BOTH',
-      action: r.action,
-      protocol: r.protocol,
-      ports: r.ports,
-      sourceType: r.source_type,
-      sourceValue: r.source_value,
-      logMode: 'NONE' as const,
-      comment: r.comment,
-      usePolicyInterfaceScope: true,
-      remote: r.source_type === 'CIDR' ? { kind: 'CIDR' as const } : { kind: 'SET' as const, setName: `src_${r.source_type.toLowerCase()}_${String(r.source_value).replace(/-/g, '')}` }
-    }));
-
-    // Resolve sets (simplified - just check CIDR rules for now)
-    const sets: Record<string, string[]> = {};
-
-    const compiled = compileHostPolicy({
-      host: {
-        id: host.id,
-        hostname: host.hostname,
-        mgmtIp: host.mgmt_ip ? String(host.mgmt_ip) : null,
-        firewallBackend: host.firewall_backend === 'iptables' ? 'iptables' : 'nftables',
-        interfaces: typeof host.interfaces === 'string' ? JSON.parse(host.interfaces) : (host.interfaces || [])
-      },
-      policyInterfaceScope,
-      rules,
-      sets,
-      baseline: { mgmtSshCidrs }
-    });
-
-    // Check if compiled text contains SSH allow rules for management CIDRs
-    const hasSshAllow = mgmtSshCidrs.some(cidr => {
-      // Check for SSH allow rules in compiled text
-      // For nftables: look for "tcp dport 22 accept" with mgmt CIDR
-      // For iptables: look for "-A INPUT -p tcp --dport 22 -j ACCEPT" with mgmt CIDR
-      if (compiled.backend === 'nftables') {
-        return compiled.text.includes(`ip saddr ${cidr}`) && compiled.text.includes('tcp dport 22 accept');
-      } else {
-        return compiled.text.includes(cidr) && compiled.text.includes('--dport 22') && compiled.text.includes('-j ACCEPT');
-      }
-    });
-
-    if (!hasSshAllow) {
-      result.errors.push(`Host ${host.hostname}: Compiled policy does not preserve SSH access from management VLAN`);
+    // 1) The policy must compile for this host at all.
+    try {
+      compileHostPolicy({
+        host: {
+          id: host.id,
+          hostname: host.hostname,
+          mgmtIp: host.mgmt_ip ? String(host.mgmt_ip) : null,
+          firewallBackend: host.firewall_backend === 'iptables' ? 'iptables' : 'nftables',
+          interfaces: typeof host.interfaces === 'string' ? JSON.parse(host.interfaces) : (host.interfaces || []),
+          sshPort,
+        },
+        policyInterfaceScope,
+        rules: evalRules.map((r) => ({
+          orderIndex: r.orderIndex,
+          direction: r.direction,
+          action: r.action,
+          protocol: r.protocol,
+          ports: r.ports,
+          sourceType: r.sourceType,
+          sourceValue: r.sourceValue,
+          logMode: 'NONE' as const,
+          comment: r.comment,
+          usePolicyInterfaceScope: true,
+          remote: r.sourceType === 'CIDR' ? { kind: 'CIDR' as const } : { kind: 'SET' as const, setName: setNameFor(r.sourceType, r.sourceValue) },
+        })),
+        sets,
+        baseline: { mgmtSshCidrs },
+      });
+    } catch (e: any) {
+      result.errors.push(`Host ${host.hostname}: policy does not compile: ${e?.message ?? String(e)}`);
       result.safe = false;
-    } else {
-      result.sshAccessPreserved = true;
+      allHostsPreserved = false;
+      continue;
     }
 
-    // Check if user's IP would be blocked (if provided)
-    if (params.userIp) {
-      // Simple check: see if any DENY rule would block user's IP before an ALLOW rule
-      // This is a simplified check - full implementation would need proper rule evaluation
-      const userIpBlocked = rules.some((r: any) => {
-        if (r.action === 'DENY' && r.direction !== 'OUT') {
-          // Check if source matches user IP (simplified CIDR check)
-          if (r.sourceType === 'CIDR') {
-            // Basic CIDR check (simplified)
-            return r.sourceValue.includes(params.userIp!.split('.')[0]);
-          }
-        }
-        return false;
-      });
+    // 2) Inbound SSH. The compiler emits the management baseline (accept tcp/<sshPort> from the
+    //    management CIDRs, or from anywhere when none are configured) BEFORE policy rules, so
+    //    inbound DENY rules cannot cut management SSH. Report DENYs that target it anyway, since
+    //    they will block SSH from every non-management source.
+    for (const r of evalRules) {
+      if (r.action !== 'DENY' || r.direction === 'OUT') continue;
+      if (!protoCoversTcp(r.protocol) || !portSpecIncludes(r.ports, sshPort)) continue;
+      const hitsMgmt = mgmtSshCidrs.length === 0 || mgmtSshCidrs.some((m) => r.addrs.some((a) => cidrsOverlap(a, m)));
+      if (hitsMgmt) {
+        result.warnings.push(
+          `Host ${host.hostname}: rule #${r.orderIndex} denies inbound SSH (tcp/${sshPort}) from ${describe(r)}; ` +
+            'management SSH stays open via the baseline rule, other sources will be blocked'
+        );
+      }
+    }
 
-      if (userIpBlocked) {
-        result.warnings.push(`Your IP (${params.userIp}) may be blocked by DENY rules`);
+    // 3) Outbound replies. The output chain has NO established/related exception, so an OUT
+    //    (or BOTH) DENY toward the management subnet drops the SSH server's reply packets
+    //    (tcp sport <sshPort> → client ephemeral port) and locks operators out.
+    const replyTargets = mgmtSshCidrs.length > 0 ? mgmtSshCidrs : ['0.0.0.0/0', '::/0'];
+    let hostPreserved = true;
+    for (const target of replyTargets) {
+      const verdict = evaluateOutboundReplies(evalRules, target);
+      if (verdict.kind === 'blocked') {
+        hostPreserved = false;
+        result.safe = false;
+        result.errors.push(
+          `Host ${host.hostname}: rule #${verdict.rule.orderIndex} (OUT ${verdict.rule.action} ${describe(verdict.rule)}) ` +
+            `drops SSH reply traffic to the management network ${target} — deploying would lock out SSH`
+        );
+        result.blockingRules.push(toBlocking(verdict.rule));
+      } else if (verdict.partial.length > 0) {
+        for (const pr of verdict.partial) {
+          result.warnings.push(
+            `Host ${host.hostname}: rule #${pr.orderIndex} (OUT DENY ${describe(pr)}) may drop some SSH reply traffic to ${target}`
+          );
+          result.blockingRules.push(toBlocking(pr));
+        }
+      }
+    }
+    if (!hostPreserved) allHostsPreserved = false;
+
+    // 4) The caller's own IP (proper CIDR containment, first match wins).
+    if (userIp && isValidIp(userIp)) {
+      const inbound = firstMatch(evalRules, (r) => r.direction !== 'OUT' && r.addrs.some((a) => cidrContains(a, userIp)));
+      const userInMgmt = mgmtSshCidrs.some((m) => cidrContains(m, userIp)) || mgmtSshCidrs.length === 0;
+      if (inbound && inbound.action === 'DENY') {
+        result.warnings.push(
+          `Host ${host.hostname}: your IP (${userIp}) is denied inbound by rule #${inbound.orderIndex}` +
+            (userInMgmt ? ' (management SSH remains allowed by the baseline)' : '')
+        );
+      } else if (!inbound && !userInMgmt) {
+        result.warnings.push(
+          `Host ${host.hostname}: your IP (${userIp}) is not in the management network and no rule allows it; ` +
+            'inbound traffic from it (including SSH) will be dropped by the default policy'
+        );
+      }
+      const outbound = evaluateOutboundReplies(evalRules, userIp.includes(':') ? `${userIp}/128` : `${userIp}/32`);
+      if (outbound.kind === 'blocked') {
+        result.warnings.push(
+          `Host ${host.hostname}: rule #${outbound.rule.orderIndex} drops outbound traffic to your IP (${userIp}); replies to you will be lost`
+        );
       }
     }
   }
 
+  result.sshAccessPreserved = allHostsPreserved && result.errors.length === 0;
   return result;
+}
+
+type EvalRule = {
+  orderIndex: number;
+  direction: 'IN' | 'OUT' | 'BOTH';
+  action: 'ALLOW' | 'DENY';
+  protocol: 'tcp' | 'udp' | 'icmp' | 'any';
+  ports: string | null;
+  sourceType: 'CIDR' | 'TAG' | 'VLAN' | 'HOST';
+  sourceValue: string;
+  comment: string | null;
+  addrs: string[];
+};
+
+const EPHEMERAL_FROM = 1024;
+const EPHEMERAL_TO = 65535;
+
+function setNameFor(sourceType: string, sourceValue: string): string {
+  return `src_${String(sourceType).toLowerCase()}_${String(sourceValue).replace(/-/g, '')}`;
+}
+
+function protoCoversTcp(protocol: string): boolean {
+  return protocol === 'tcp' || protocol === 'any';
+}
+
+function describe(r: EvalRule): string {
+  const ports = r.ports ? `/${r.ports}` : '';
+  return `${r.sourceType}:${r.sourceValue} ${r.protocol}${ports}`;
+}
+
+function toBlocking(r: EvalRule) {
+  return {
+    ruleIndex: r.orderIndex,
+    action: r.action,
+    source: `${r.sourceType}:${r.sourceValue}`,
+    protocol: r.protocol,
+    ports: r.ports ?? undefined,
+    comment: r.comment ?? undefined,
+  };
+}
+
+function firstMatch(rules: EvalRule[], pred: (r: EvalRule) => boolean): EvalRule | undefined {
+  return rules.find(pred);
+}
+
+/**
+ * Walk OUT/BOTH rules in order for TCP packets toward `target` with an ephemeral destination
+ * port (SSH replies). Output default policy is accept.
+ *  - A DENY that fully covers the target and the ephemeral range before any covering ALLOW → blocked.
+ *  - DENYs that only partially overlap are reported as partial.
+ */
+function evaluateOutboundReplies(
+  rules: EvalRule[],
+  target: string
+): { kind: 'blocked'; rule: EvalRule } | { kind: 'ok'; partial: EvalRule[] } {
+  const partial: EvalRule[] = [];
+  for (const r of rules) {
+    if (r.direction === 'IN') continue;
+    if (!protoCoversTcp(r.protocol)) continue;
+    if (!portSpecIntersectsRange(r.ports, EPHEMERAL_FROM, EPHEMERAL_TO)) continue;
+    const overlaps = r.addrs.some((a) => cidrsOverlap(a, target));
+    if (!overlaps) continue;
+    const coversAddr = r.addrs.some((a) => cidrContains(a, target));
+    const coversPorts = portSpecCoversRange(r.ports, EPHEMERAL_FROM, EPHEMERAL_TO);
+    const full = coversAddr && coversPorts;
+    if (r.action === 'ALLOW') {
+      if (full) break; // everything after this is shadowed for the reply traffic
+      continue;
+    }
+    if (full) return { kind: 'blocked', rule: r };
+    partial.push(r);
+  }
+  return { kind: 'ok', partial };
 }

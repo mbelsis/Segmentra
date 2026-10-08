@@ -73,11 +73,21 @@ if [ ! -f "$HOSTS_FILE" ]; then
   exit 1
 fi
 
-# Build SSH options
-SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=30 -p $SSH_PORT"
+# Build SSH options (array form; host keys are verified, new hosts are accepted once)
+KNOWN_HOSTS="${SEGMENTRA_KNOWN_HOSTS:-$HOME/.ssh/known_hosts}"
+mkdir -p "$(dirname "$KNOWN_HOSTS")" && chmod 700 "$(dirname "$KNOWN_HOSTS")" 2>/dev/null || true
+SSH_OPTS=(-n -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$KNOWN_HOSTS"
+          -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4
+          -o BatchMode=yes -o LogLevel=ERROR -p "$SSH_PORT")
 if [ -n "$SSH_KEY" ]; then
-  SSH_OPTS="$SSH_OPTS -i $SSH_KEY"
+  SSH_OPTS+=(-i "$SSH_KEY")
 fi
+
+# Run a remote command; stdin is never consumed (-n) so the hosts-file loop is safe.
+remote() {
+  local host="$1"; shift
+  ssh "${SSH_OPTS[@]}" "$SSH_USER@$host" "$@"
+}
 
 # Counters
 TOTAL=0
@@ -104,54 +114,64 @@ fi
 echo "============================================"
 echo ""
 
-while IFS= read -r HOST || [ -n "$HOST" ]; do
-  # Skip empty lines and comments
+while IFS= read -r HOST <&3 || [ -n "$HOST" ]; do
+  # Trim whitespace; skip empty lines and comments
+  HOST="${HOST#"${HOST%%[![:space:]]*}"}"
+  HOST="${HOST%"${HOST##*[![:space:]]}"}"
   [[ -z "$HOST" || "$HOST" =~ ^# ]] && continue
 
   TOTAL=$((TOTAL + 1))
   echo "--- [$TOTAL] $HOST ---"
 
-  # Detect firewall backend
-  BACKEND=$(ssh $SSH_OPTS "$SSH_USER@$HOST" "command -v nft > /dev/null 2>&1 && echo nft || echo iptables" 2>/dev/null) || {
-    echo "  ✗ SSH connection failed"
+  # Detect firewall backend (failures are captured explicitly; set -e must not abort the loop)
+  RC=0
+  BACKEND=$(remote "$HOST" "command -v nft > /dev/null 2>&1 && echo nft || echo iptables" 2>/dev/null) || RC=$?
+  if [ "$RC" -ne 0 ] || [ -z "$BACKEND" ]; then
+    echo "  ✗ SSH connection failed (exit $RC)"
     FAILED=$((FAILED + 1))
     echo ""
     continue
-  }
+  fi
   echo "  Backend: $BACKEND"
 
-  # Determine backup file
+  # Determine backup file. Only deployment backups are considered:
+  #   nft.ruleset.<timestamp>  /  iptables.<timestamp>
+  # (audit backups "*.audit-backup.*" and other files are excluded)
+  if [ "$BACKEND" = "nft" ]; then
+    PREFIX="nft.ruleset."
+    PREFIX_RE='^nft\.ruleset\.'
+  else
+    PREFIX="iptables."
+    PREFIX_RE='^iptables\.'
+  fi
   if [ "$USE_LATEST" = true ]; then
-    if [ "$BACKEND" = "nft" ]; then
-      BACKUP_FILE=$(ssh $SSH_OPTS "$SSH_USER@$HOST" "ls -1t $BACKUP_DIR/nft.ruleset.* 2>/dev/null | head -n 1" 2>/dev/null)
-    else
-      BACKUP_FILE=$(ssh $SSH_OPTS "$SSH_USER@$HOST" "ls -1t $BACKUP_DIR/iptables.* 2>/dev/null | head -n 1" 2>/dev/null)
-    fi
-
-    if [ -z "$BACKUP_FILE" ]; then
+    RC=0
+    BACKUP_FILE=$(remote "$HOST" "sudo -n ls -1t '$BACKUP_DIR' 2>/dev/null | grep -E '${PREFIX_RE}[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9-]+\$' | head -n 1" 2>/dev/null) || RC=$?
+    if [ "$RC" -ne 0 ] || [ -z "$BACKUP_FILE" ]; then
       echo "  ✗ No backup files found in $BACKUP_DIR"
       FAILED=$((FAILED + 1))
       echo ""
       continue
     fi
-    echo "  Backup:  $BACKUP_FILE"
+    BACKUP_FILE="$BACKUP_DIR/$BACKUP_FILE"
   else
-    if [ "$BACKEND" = "nft" ]; then
-      BACKUP_FILE="$BACKUP_DIR/nft.ruleset.$TIMESTAMP"
-    else
-      BACKUP_FILE="$BACKUP_DIR/iptables.$TIMESTAMP"
+    if ! [[ "$TIMESTAMP" =~ ^[0-9A-Za-z-]+$ ]]; then
+      echo "  ✗ Invalid timestamp: $TIMESTAMP"
+      FAILED=$((FAILED + 1))
+      echo ""
+      continue
     fi
-
-    # Verify backup exists
-    EXISTS=$(ssh $SSH_OPTS "$SSH_USER@$HOST" "[ -f '$BACKUP_FILE' ] && echo yes || echo no" 2>/dev/null)
+    BACKUP_FILE="$BACKUP_DIR/$PREFIX$TIMESTAMP"
+    RC=0
+    EXISTS=$(remote "$HOST" "sudo -n test -f '$BACKUP_FILE' && echo yes || echo no" 2>/dev/null) || RC=$?
     if [ "$EXISTS" != "yes" ]; then
       echo "  ✗ Backup not found: $BACKUP_FILE"
       FAILED=$((FAILED + 1))
       echo ""
       continue
     fi
-    echo "  Backup:  $BACKUP_FILE"
   fi
+  echo "  Backup:  $BACKUP_FILE"
 
   # Dry run — just show what would happen
   if [ "$DRY_RUN" = true ]; then
@@ -161,23 +181,27 @@ while IFS= read -r HOST || [ -n "$HOST" ]; do
     continue
   fi
 
-  # Restore
+  # Restore. nft: "flush ruleset" + backup in ONE file -> single atomic nft -f transaction.
+  # iptables: iptables-restore replaces the table (incl. policies) atomically; the matching
+  # ip6tables backup (ip6tables.<timestamp>) is restored too when present.
+  RC=0
   if [ "$BACKEND" = "nft" ]; then
-    ssh $SSH_OPTS "$SSH_USER@$HOST" "sudo nft flush ruleset && sudo nft -f '$BACKUP_FILE'" 2>&1
+    remote "$HOST" "sudo -n sh -c 'umask 077; t=\"$BACKUP_FILE.restore\"; { echo \"flush ruleset\"; cat \"$BACKUP_FILE\"; } > \"\$t\" && nft -f \"\$t\"; rc=\$?; rm -f \"\$t\"; exit \$rc'" 2>&1 || RC=$?
   else
-    ssh $SSH_OPTS "$SSH_USER@$HOST" "sudo iptables-restore < '$BACKUP_FILE'" 2>&1
+    V6_FILE="$BACKUP_DIR/ip6tables.${BACKUP_FILE##*/iptables.}"
+    remote "$HOST" "sudo -n sh -c 'iptables-restore < \"$BACKUP_FILE\" && { [ ! -s \"$V6_FILE\" ] || ! command -v ip6tables-restore >/dev/null 2>&1 || ip6tables-restore < \"$V6_FILE\"; }'" 2>&1 || RC=$?
   fi
 
-  if [ $? -eq 0 ]; then
+  if [ "$RC" -eq 0 ]; then
     echo "  ✓ Restored successfully"
     SUCCEEDED=$((SUCCEEDED + 1))
   else
-    echo "  ✗ FAILED — check host manually"
+    echo "  ✗ FAILED (exit $RC) — check host manually"
     FAILED=$((FAILED + 1))
   fi
   echo ""
 
-done < "$HOSTS_FILE"
+done 3< "$HOSTS_FILE"
 
 echo "============================================"
 echo "  Results"

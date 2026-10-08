@@ -1,18 +1,29 @@
-import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
-import path from 'node:path';
 import { promisify } from 'node:util';
+import {
+  isSafeAbsolutePath,
+  runSshCommand,
+  scpDownload,
+  scpUpload,
+  shq,
+  sudoSh,
+  type ExecResult,
+  type SshConnectionOptions
+} from './ssh-options.js';
+import { segmentraIptablesCommand } from './iptables-scripts.js';
 
 const writeFile = promisify(fs.writeFile);
 const readFile = promisify(fs.readFile);
-const unlink = promisify(fs.unlink);
 
 export interface AuditSshHost {
   hostname: string;
   ip: string;
   port: number;
   username: string;
-  privateKeyPath: string;
+  authMethod?: 'key' | 'password';
+  privateKeyPath?: string;
+  password?: string;
   backend: 'nftables' | 'iptables';
 }
 
@@ -26,275 +37,233 @@ export interface AuditSessionResult {
   logFilePath?: string;
 }
 
-/**
- * Start an audit session: backup rules, deploy log-only policy, configure logging
- */
-export async function startAuditSession(host: AuditSshHost, logFilePath: string): Promise<AuditSessionResult> {
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-  const backupDir = '/var/backups/segmentra';
-  const remotePolicyPath = '/tmp/segmentra-audit.policy';
-  const backupPath = `${backupDir}/${host.backend === 'nftables' ? 'nft' : 'iptables'}.audit-backup.${timestamp}`;
+const BACKUP_DIR = '/var/backups/segmentra';
+const RSYSLOG_CONF = '/etc/rsyslog.d/99-segmentra-audit.conf';
+const AUDIT_POLICY_PATH = '/etc/segmentra-audit.policy';
+const RSYSLOG_RESTART =
+  'systemctl restart rsyslog 2>/dev/null || service rsyslog restart 2>/dev/null || pkill -HUP rsyslogd 2>/dev/null || echo "warning: could not restart rsyslog" >&2';
 
-  const sshOptions = [
-    '-o', 'StrictHostKeyChecking=no',
-    '-o', 'UserKnownHostsFile=/dev/null',
-    '-o', 'LogLevel=ERROR',
-    '-i', host.privateKeyPath,
-    '-p', String(host.port),
-    `${host.username}@${host.ip}`
-  ];
-
+function collector(host: AuditSshHost) {
   let stdout = '';
   let stderr = '';
-  let exitCode = 0;
+  return {
+    add(r: ExecResult) { stdout += r.stdout; stderr += r.stderr; },
+    out: (s: string) => { stdout += s; },
+    err: (s: string) => { stderr += s; },
+    result(success: boolean, exitCode: number, extra: Partial<AuditSessionResult> = {}): AuditSessionResult {
+      return { hostname: host.hostname, success, exitCode: success ? 0 : exitCode || 1, stdout, stderr, ...extra };
+    }
+  };
+}
+
+/**
+ * Start an audit session: backup rules (as root; aborts if the backup can't be
+ * written) and configure rsyslog to capture FW-AUDIT kernel log lines.
+ */
+export async function startAuditSession(
+  host: AuditSshHost,
+  logFilePath: string,
+  opts: SshConnectionOptions = {}
+): Promise<AuditSessionResult> {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+  const backupPath = `${BACKUP_DIR}/${host.backend === 'nftables' ? 'nft' : 'iptables'}.audit-backup.${timestamp}`;
+  const c = collector(host);
+  const run = (cmd: string) => runSshCommand(host, cmd, opts);
 
   try {
-    // Step 1: Ensure backup directory exists
-    const mkdirCmd = `sudo mkdir -p ${backupDir} && sudo chmod 700 ${backupDir}`;
-    const mkdirResult = await execSsh(sshOptions, mkdirCmd);
-    stdout += mkdirResult.stdout;
-    stderr += mkdirResult.stderr;
-    if (mkdirResult.exitCode !== 0) {
-      return { hostname: host.hostname, success: false, exitCode: mkdirResult.exitCode, stdout, stderr };
+    if (!isSafeAbsolutePath(logFilePath)) {
+      c.err(`Invalid log file path: ${logFilePath}\n`);
+      return c.result(false, 1);
     }
 
-    // Step 2: Backup existing rules
-    if (host.backend === 'nftables') {
-      const backupCmd = `
-        if [ -f /etc/nftables.conf ]; then
-          sudo cp /etc/nftables.conf ${backupPath}.conf 2>&1 || true
-        fi
-        sudo nft list ruleset > ${backupPath} 2>&1 || true
-      `;
-      const backupResult = await execSsh(sshOptions, backupCmd);
-      stdout += backupResult.stdout;
-      stderr += backupResult.stderr;
-    } else {
-      const backupCmd = `sudo iptables-save > ${backupPath} 2>&1 || true`;
-      const backupResult = await execSsh(sshOptions, backupCmd);
-      stdout += backupResult.stdout;
-      stderr += backupResult.stderr;
+    // Step 1+2: Ensure backup directory exists and back up existing rules as root.
+    const backupScript =
+      host.backend === 'nftables'
+        ? [
+            'set -e',
+            'umask 077',
+            `mkdir -p ${shq(BACKUP_DIR)}`,
+            `chmod 700 ${shq(BACKUP_DIR)}`,
+            `if [ -f /etc/nftables.conf ]; then cp /etc/nftables.conf ${shq(`${backupPath}.conf`)} || true; fi`,
+            `nft list ruleset > ${shq(backupPath)}`,
+            `test -f ${shq(backupPath)}`
+          ].join('\n')
+        : [
+            'set -e',
+            'umask 077',
+            `mkdir -p ${shq(BACKUP_DIR)}`,
+            `chmod 700 ${shq(BACKUP_DIR)}`,
+            `iptables-save > ${shq(backupPath)}`,
+            `if [ ! -s ${shq(backupPath)} ]; then printf ${shq('*filter\\n:INPUT ACCEPT [0:0]\\n:FORWARD ACCEPT [0:0]\\n:OUTPUT ACCEPT [0:0]\\nCOMMIT\\n')} > ${shq(backupPath)}; fi`,
+            `test -s ${shq(backupPath)}`
+          ].join('\n');
+    const backupResult = await run(sudoSh(backupScript));
+    c.add(backupResult);
+    if (backupResult.exitCode !== 0) {
+      c.err('\nError: failed to back up current firewall rules; audit not started (no changes made)\n');
+      return c.result(false, backupResult.exitCode);
     }
 
-    // Step 3: Configure logging to capture firewall logs
-    await configureLogging(host, logFilePath, sshOptions);
+    // Step 3: Configure rsyslog to capture firewall log lines
+    const logResult = await configureLogging(host, logFilePath, opts);
+    c.add(logResult);
+    if (logResult.exitCode !== 0) {
+      c.err('\nError: failed to configure audit logging\n');
+      return c.result(false, logResult.exitCode, { backupPath });
+    }
 
-    // Step 4: Create log file and set permissions
-    const logSetupCmd = `sudo touch ${logFilePath} && sudo chmod 644 ${logFilePath}`;
-    const logSetupResult = await execSsh(sshOptions, logSetupCmd);
-    stdout += logSetupResult.stdout;
-    stderr += logSetupResult.stderr;
-
-    return {
-      hostname: host.hostname,
-      success: true,
-      exitCode: 0,
-      stdout,
-      stderr,
-      backupPath,
-      logFilePath
-    };
+    return c.result(true, 0, { backupPath, logFilePath });
   } catch (error: any) {
-    return {
-      hostname: host.hostname,
-      success: false,
-      exitCode: 1,
-      stdout,
-      stderr: stderr + `\nException: ${error.message}\n`
-    };
+    c.err(`\nException: ${error.message}\n`);
+    return c.result(false, 1);
   }
 }
 
 /**
- * Configure logging for firewall rules
+ * Configure rsyslog to write kernel log lines containing FW-AUDIT (emitted by
+ * nftables `log prefix` or iptables `-j LOG`) to logFilePath.
  */
-async function configureLogging(host: AuditSshHost, logFilePath: string, sshOptions: string[]): Promise<void> {
-  if (host.backend === 'nftables') {
-    // For nftables, configure rsyslog to capture kernel messages with FW-AUDIT prefix
-    // nftables log action writes to kernel log, which rsyslog can capture
-    const rsyslogConfig = `/etc/rsyslog.d/99-segmentra-audit.conf`;
-    const rsyslogRule = `kern.* :msg, contains, "FW-AUDIT" ${logFilePath}\n& stop\n`;
-    
-    const setupCmd = `
-      echo '${rsyslogRule}' | sudo tee ${rsyslogConfig} > /dev/null
-      sudo systemctl reload rsyslog 2>&1 || sudo service rsyslog reload 2>&1 || sudo killall -HUP rsyslogd 2>&1 || true
-    `;
-    await execSsh(sshOptions, setupCmd);
-  } else {
-    // For iptables, configure rsyslog to write LOG target messages to custom file
-    const rsyslogConfig = `/etc/rsyslog.d/99-segmentra-audit.conf`;
-    const rsyslogRule = `kern.* :msg, contains, "FW-AUDIT" ${logFilePath}\n& stop\n`;
-    
-    const setupCmd = `
-      echo '${rsyslogRule}' | sudo tee ${rsyslogConfig} > /dev/null
-      sudo systemctl reload rsyslog 2>&1 || sudo service rsyslog reload 2>&1 || sudo killall -HUP rsyslogd 2>&1 || true
-    `;
-    await execSsh(sshOptions, setupCmd);
-  }
+async function configureLogging(host: AuditSshHost, logFilePath: string, opts: SshConnectionOptions): Promise<ExecResult> {
+  // Property-based filter; "& stop" keeps these lines out of later rules.
+  const line1 = `:msg, contains, "FW-AUDIT" ${logFilePath}`;
+  const line2 = '& stop';
+  const script = [
+    'set -e',
+    `mkdir -p "$(dirname ${shq(logFilePath)})"`,
+    `touch ${shq(logFilePath)}`,
+    `chmod 644 ${shq(logFilePath)}`,
+    // rsyslog drops privileges to "syslog" on Debian/Ubuntu; let it write the file
+    `if id syslog >/dev/null 2>&1; then chown syslog ${shq(logFilePath)} || true; fi`,
+    'if ! command -v rsyslogd >/dev/null 2>&1; then',
+    '  echo "warning: rsyslogd not found; FW-AUDIT log lines will not be collected into the audit log file" >&2',
+    '  exit 0',
+    'fi',
+    `mkdir -p "$(dirname ${shq(RSYSLOG_CONF)})"`,
+    `printf '%s\\n' ${shq(line1)} ${shq(line2)} > ${shq(RSYSLOG_CONF)}`,
+    `chmod 644 ${shq(RSYSLOG_CONF)}`,
+    RSYSLOG_RESTART
+  ].join('\n');
+  return runSshCommand(host, sudoSh(script), opts);
 }
 
 /**
- * Deploy log-only firewall policy
+ * Deploy log-only firewall policy. For nftables the policy only replaces
+ * table inet segmentra; for iptables only the SEGMENTRA-IN/OUT chains (+ the
+ * INPUT/OUTPUT jumps) are touched. Other tools' rules are left alone.
  */
 export async function deployLogOnlyPolicy(
   host: AuditSshHost,
   policyText: string,
-  policyFilePath: string
+  policyFilePath: string,
+  opts: SshConnectionOptions = {}
 ): Promise<AuditSessionResult> {
-  const remotePolicyPath = '/tmp/segmentra-audit.policy';
-  const sshOptions = [
-    '-o', 'StrictHostKeyChecking=no',
-    '-o', 'UserKnownHostsFile=/dev/null',
-    '-o', 'LogLevel=ERROR',
-    '-i', host.privateKeyPath,
-    '-p', String(host.port),
-    `${host.username}@${host.ip}`
-  ];
-
-  let stdout = '';
-  let stderr = '';
-  let exitCode = 0;
+  const remoteUpload = `.segmentra-audit-${crypto.randomBytes(6).toString('hex')}.policy`; // in SSH user's home
+  const c = collector(host);
+  const run = (cmd: string) => runSshCommand(host, cmd, opts);
 
   try {
     // Step 1: Write policy to local temp file
-    await writeFile(policyFilePath, policyText, 'utf8');
+    await writeFile(policyFilePath, policyText, { encoding: 'utf8', mode: 0o600 });
     await promisify(fs.chmod)(policyFilePath, 0o600);
 
     // Step 2: Copy policy file to remote host
-    const scpOptions = [
-      '-o', 'StrictHostKeyChecking=no',
-      '-o', 'UserKnownHostsFile=/dev/null',
-      '-o', 'LogLevel=ERROR',
-      '-i', host.privateKeyPath,
-      '-P', String(host.port),
-      policyFilePath,
-      `${host.username}@${host.ip}:${remotePolicyPath}`
-    ];
-    
-    const scpResult = await execScp(scpOptions);
-    stdout += scpResult.stdout;
-    stderr += scpResult.stderr;
-    if (scpResult.exitCode !== 0) {
-      return { hostname: host.hostname, success: false, exitCode: scpResult.exitCode, stdout, stderr };
-    }
+    const scpResult = await scpUpload(host, policyFilePath, remoteUpload, opts);
+    c.add(scpResult);
+    if (scpResult.exitCode !== 0) return c.result(false, scpResult.exitCode);
 
-    // Step 3: Move policy file to secure location and set permissions
-    const setupCmd = `sudo mv ${remotePolicyPath} /etc/segmentra-audit.policy && sudo chmod 600 /etc/segmentra-audit.policy`;
-    const setupResult = await execSsh(sshOptions, setupCmd);
-    stdout += setupResult.stdout;
-    stderr += setupResult.stderr;
-    if (setupResult.exitCode !== 0) {
-      return { hostname: host.hostname, success: false, exitCode: setupResult.exitCode, stdout, stderr };
-    }
-
-    // Step 4: Apply firewall rules
-    let applyCmd: string;
-    if (host.backend === 'nftables') {
-      applyCmd = 'sudo nft -f /etc/segmentra-audit.policy';
-    } else {
-      applyCmd = 'sudo iptables-restore < /etc/segmentra-audit.policy';
-    }
-
-    const applyResult = await execSsh(sshOptions, applyCmd);
-    stdout += applyResult.stdout;
-    stderr += applyResult.stderr;
-
+    // Step 3: Install to a root-owned location and apply (redirects run as root)
+    // iptables: chain-scoped --noflush fragment + jumps (other tools' rules untouched);
+    // the full iptables-save backup is restored when the audit ends.
+    const applyCmd =
+      host.backend === 'nftables'
+        ? `nft -f ${shq(AUDIT_POLICY_PATH)}`
+        : segmentraIptablesCommand(['apply-audit', 'iptables', AUDIT_POLICY_PATH]);
+    const script = [
+      'set -e',
+      `install -m 600 -o root "$1/${remoteUpload}" ${shq(AUDIT_POLICY_PATH)}`,
+      `rm -f "$1/${remoteUpload}"`,
+      applyCmd
+    ].join('\n');
+    const applyResult = await run(`sudo -n sh -c ${shq(script)} segmentra "$HOME"`);
+    c.add(applyResult);
     if (applyResult.exitCode !== 0) {
-      return {
-        hostname: host.hostname,
-        success: false,
-        exitCode: applyResult.exitCode,
-        stdout,
-        stderr: stderr + '\nFirewall apply failed\n'
-      };
+      c.err('\nFirewall apply failed\n');
+      return c.result(false, applyResult.exitCode);
     }
 
-    return { hostname: host.hostname, success: true, exitCode: 0, stdout, stderr };
+    return c.result(true, 0);
   } catch (error: any) {
-    return {
-      hostname: host.hostname,
-      success: false,
-      exitCode: 1,
-      stdout,
-      stderr: stderr + `\nException: ${error.message}\n`
-    };
+    c.err(`\nException: ${error.message}\n`);
+    return c.result(false, 1);
   }
 }
 
 /**
- * Restore original firewall rules from backup
+ * Restore original firewall rules from backup.
+ *
+ * The backup's existence is verified before anything is changed, and the
+ * restore is atomic: nftables loads "flush ruleset" + backup in a single
+ * `nft -f` transaction; iptables-restore replaces the table (incl. policies)
+ * in one commit. Returns success:false if the backup is missing or the
+ * restore fails (the host then still runs the log-only policy).
  */
 export async function restoreAuditSession(
   host: AuditSshHost,
-  backupPath: string
+  backupPath: string,
+  opts: SshConnectionOptions = {}
 ): Promise<AuditSessionResult> {
-  const sshOptions = [
-    '-o', 'StrictHostKeyChecking=no',
-    '-o', 'UserKnownHostsFile=/dev/null',
-    '-o', 'LogLevel=ERROR',
-    '-i', host.privateKeyPath,
-    '-p', String(host.port),
-    `${host.username}@${host.ip}`
-  ];
-
-  let stdout = '';
-  let stderr = '';
-  let exitCode = 0;
+  const c = collector(host);
+  const run = (cmd: string) => runSshCommand(host, cmd, opts);
 
   try {
-    // Step 1: Remove log-only policy
-    if (host.backend === 'nftables') {
-      const flushCmd = 'sudo nft flush ruleset 2>&1 || true';
-      const flushResult = await execSsh(sshOptions, flushCmd);
-      stdout += flushResult.stdout;
-      stderr += flushResult.stderr;
-    } else {
-      const flushCmd = 'sudo iptables -F INPUT && sudo iptables -F OUTPUT && sudo iptables -F FORWARD 2>&1 || true';
-      const flushResult = await execSsh(sshOptions, flushCmd);
-      stdout += flushResult.stdout;
-      stderr += flushResult.stderr;
+    if (!backupPath || !isSafeAbsolutePath(backupPath)) {
+      c.err(`Error: invalid or missing backup path "${backupPath ?? ''}"; firewall NOT restored\n`);
+      return c.result(false, 1);
     }
 
-    // Step 2: Restore from backup
-    if (host.backend === 'nftables') {
-      const restoreCmd = `sudo nft -f ${backupPath} 2>&1 || true`;
-      const restoreResult = await execSsh(sshOptions, restoreCmd);
-      stdout += restoreResult.stdout;
-      stderr += restoreResult.stderr;
-      exitCode = restoreResult.exitCode;
-    } else {
-      const restoreCmd = `sudo iptables-restore < ${backupPath} 2>&1 || true`;
-      const restoreResult = await execSsh(sshOptions, restoreCmd);
-      stdout += restoreResult.stdout;
-      stderr += restoreResult.stderr;
-      exitCode = restoreResult.exitCode;
+    const bp = shq(backupPath);
+    const restoreScript =
+      host.backend === 'nftables'
+        ? [
+            `if [ ! -f ${bp} ]; then echo "backup missing: ${backupPath.replace(/["$`\\]/g, '')}" >&2; exit 3; fi`,
+            'umask 077',
+            `tmp=${shq(`${backupPath}.restore`)}`,
+            `{ echo 'flush ruleset'; cat ${bp}; } > "$tmp" || exit 4`,
+            'nft -f "$tmp"; rc=$?',
+            'rm -f "$tmp"',
+            'exit $rc'
+          ].join('\n')
+        : [
+            `if [ ! -s ${bp} ]; then echo "backup missing or empty: ${backupPath.replace(/["$`\\]/g, '')}" >&2; exit 3; fi`,
+            `iptables-restore < ${bp}`
+          ].join('\n');
+    const restoreResult = await run(sudoSh(restoreScript));
+    c.add(restoreResult);
+    if (restoreResult.exitCode !== 0) {
+      c.err(
+        restoreResult.exitCode === 3
+          ? '\nError: audit backup not found on host; firewall NOT restored (log-only policy still active)\n'
+          : '\nError: restoring firewall rules failed; log-only policy may still be active\n'
+      );
+      return c.result(false, restoreResult.exitCode);
+    }
+    c.out(`Restored firewall rules from ${backupPath}\n`);
+
+    // Clean up audit policy file and rsyslog config
+    const cleanupScript = [
+      `rm -f ${shq(AUDIT_POLICY_PATH)} ${shq(RSYSLOG_CONF)}`,
+      RSYSLOG_RESTART
+    ].join('\n');
+    const cleanupResult = await run(sudoSh(cleanupScript));
+    c.add(cleanupResult);
+    if (cleanupResult.exitCode !== 0) {
+      c.err('\nWarning: cleanup of audit policy/rsyslog config failed\n');
     }
 
-    // Step 3: Clean up audit policy file and rsyslog config
-    const cleanupCmd = `
-      sudo rm -f /etc/segmentra-audit.policy 2>&1 || true
-      sudo rm -f /etc/rsyslog.d/99-segmentra-audit.conf 2>&1 || true
-      sudo systemctl reload rsyslog 2>&1 || sudo service rsyslog reload 2>&1 || sudo killall -HUP rsyslogd 2>&1 || true
-    `;
-    const cleanupResult = await execSsh(sshOptions, cleanupCmd);
-    stdout += cleanupResult.stdout;
-    stderr += cleanupResult.stderr;
-
-    return {
-      hostname: host.hostname,
-      success: exitCode === 0,
-      exitCode,
-      stdout,
-      stderr
-    };
+    return c.result(true, 0);
   } catch (error: any) {
-    return {
-      hostname: host.hostname,
-      success: false,
-      exitCode: 1,
-      stdout,
-      stderr: stderr + `\nException: ${error.message}\n`
-    };
+    c.err(`\nException: ${error.message}\n`);
+    return c.result(false, 1);
   }
 }
 
@@ -304,97 +273,20 @@ export async function restoreAuditSession(
 export async function retrieveAuditLogs(
   host: AuditSshHost,
   remoteLogPath: string,
-  localLogPath: string
+  localLogPath: string,
+  opts: SshConnectionOptions = {}
 ): Promise<AuditSessionResult> {
-  const scpOptions = [
-    '-o', 'StrictHostKeyChecking=no',
-    '-o', 'UserKnownHostsFile=/dev/null',
-    '-o', 'LogLevel=ERROR',
-    '-i', host.privateKeyPath,
-    '-P', String(host.port),
-    `${host.username}@${host.ip}:${remoteLogPath}`,
-    localLogPath
-  ];
-
-  let stdout = '';
-  let stderr = '';
-  let exitCode = 0;
-
+  const c = collector(host);
   try {
-    const scpResult = await execScp(scpOptions);
-    stdout += scpResult.stdout;
-    stderr += scpResult.stderr;
-    exitCode = scpResult.exitCode;
-
-    // Read the file to verify it was copied
-    if (exitCode === 0 && fs.existsSync(localLogPath)) {
+    const scpResult = await scpDownload(host, remoteLogPath, localLogPath, opts);
+    c.add(scpResult);
+    if (scpResult.exitCode === 0 && fs.existsSync(localLogPath)) {
       const content = await readFile(localLogPath, 'utf8');
-      stdout += `\nRetrieved ${content.length} bytes from ${remoteLogPath}\n`;
+      c.out(`\nRetrieved ${content.length} bytes from ${remoteLogPath}\n`);
     }
-
-    return {
-      hostname: host.hostname,
-      success: exitCode === 0,
-      exitCode,
-      stdout,
-      stderr
-    };
+    return c.result(scpResult.exitCode === 0, scpResult.exitCode);
   } catch (error: any) {
-    return {
-      hostname: host.hostname,
-      success: false,
-      exitCode: 1,
-      stdout,
-      stderr: stderr + `\nException: ${error.message}\n`
-    };
+    c.err(`\nException: ${error.message}\n`);
+    return c.result(false, 1);
   }
-}
-
-function execSsh(sshOptions: string[], command: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
-    const args = [...sshOptions, command];
-    const child = spawn('ssh', args);
-    let stdout = '';
-    let stderr = '';
-
-    child.stdout.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    child.stderr.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    child.on('close', (code) => {
-      resolve({ exitCode: code ?? 1, stdout, stderr });
-    });
-
-    child.on('error', (error) => {
-      resolve({ exitCode: 1, stdout, stderr: stderr + error.message });
-    });
-  });
-}
-
-function execScp(scpOptions: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
-    const child = spawn('scp', scpOptions);
-    let stdout = '';
-    let stderr = '';
-
-    child.stdout.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    child.stderr.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    child.on('close', (code) => {
-      resolve({ exitCode: code ?? 1, stdout, stderr });
-    });
-
-    child.on('error', (error) => {
-      resolve({ exitCode: 1, stdout, stderr: stderr + error.message });
-    });
-  });
 }

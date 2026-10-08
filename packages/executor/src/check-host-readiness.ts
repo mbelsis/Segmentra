@@ -1,5 +1,5 @@
-import { spawn } from 'node:child_process';
 import type { SshHostInfo } from './types.js';
+import { runSshCommand, type SshConnectionOptions } from './ssh-options.js';
 
 export interface HostReadinessResult {
   hostname: string;
@@ -16,23 +16,21 @@ export interface HostReadinessResult {
 /**
  * Check if a host is ready for firewall deployments.
  * Verifies:
+ * - SSH connectivity (key or password auth)
  * - Presence and versions of nft/iptables
  * - Passwordless sudo access for firewall commands
  * - Kernel/module support for nftables (if applicable)
  */
-export async function checkHostReadiness(host: SshHostInfo): Promise<HostReadinessResult> {
-  if (!host.privateKeyPath) {
+export async function checkHostReadiness(host: SshHostInfo, opts: SshConnectionOptions = {}): Promise<HostReadinessResult> {
+  const authMethod = host.authMethod ?? (host.privateKeyPath ? 'key' : host.password ? 'password' : 'key');
+  if (authMethod === 'key' && !host.privateKeyPath) {
     throw new Error('check_host_readiness_requires_private_key');
   }
+  if (authMethod === 'password' && !host.password) {
+    throw new Error('check_host_readiness_requires_password');
+  }
 
-  const sshOptions = [
-    '-o', 'StrictHostKeyChecking=no',
-    '-o', 'UserKnownHostsFile=/dev/null',
-    '-o', 'LogLevel=ERROR',
-    '-i', host.privateKeyPath,
-    '-p', String(host.port),
-    `${host.username}@${host.ip}`
-  ];
+  const run = (cmd: string) => runSshCommand(host, cmd, opts);
 
   const result: HostReadinessResult = {
     hostname: host.hostname,
@@ -44,12 +42,18 @@ export async function checkHostReadiness(host: SshHostInfo): Promise<HostReadine
     warnings: []
   };
 
-  // Check for nft
-  const nftCheck = await execSsh(sshOptions, 'command -v nft 2>/dev/null');
+  // Connectivity check first so SSH failures aren't misreported as missing tools
+  const ping = await run('echo segmentra-ok');
+  if (ping.exitCode !== 0 || !ping.stdout.includes('segmentra-ok')) {
+    result.ready = false;
+    result.errors.push(`SSH connection failed: ${(ping.stderr || ping.stdout).trim() || `exit code ${ping.exitCode}`}`);
+    return result;
+  }
+
+  const nftCheck = await run('command -v nft 2>/dev/null');
   const hasNft = nftCheck.exitCode === 0 && nftCheck.stdout.trim() !== '';
 
-  // Check for iptables
-  const iptablesCheck = await execSsh(sshOptions, 'command -v iptables 2>/dev/null');
+  const iptablesCheck = await run('command -v iptables 2>/dev/null');
   const hasIptables = iptablesCheck.exitCode === 0 && iptablesCheck.stdout.trim() !== '';
 
   if (!hasNft && !hasIptables) {
@@ -61,32 +65,25 @@ export async function checkHostReadiness(host: SshHostInfo): Promise<HostReadine
   // Determine backend preference (nftables preferred)
   if (hasNft) {
     result.backend = 'nftables';
-    const nftVersion = await execSsh(sshOptions, 'nft --version 2>&1');
-    if (nftVersion.exitCode === 0) {
-      result.nftVersion = nftVersion.stdout.trim();
-    }
+    const nftVersion = await run('nft --version 2>&1');
+    if (nftVersion.exitCode === 0) result.nftVersion = nftVersion.stdout.trim();
   } else {
     result.backend = 'iptables';
-    const iptablesVersion = await execSsh(sshOptions, 'iptables --version 2>&1');
-    if (iptablesVersion.exitCode === 0) {
-      result.iptablesVersion = iptablesVersion.stdout.trim();
-    }
+    const iptablesVersion = await run('iptables --version 2>&1');
+    if (iptablesVersion.exitCode === 0) result.iptablesVersion = iptablesVersion.stdout.trim();
   }
 
   // Check passwordless sudo for firewall commands
-  const sudoTests = [];
-  if (hasNft) {
-    sudoTests.push('sudo -n nft list ruleset 2>&1');
-  }
-  if (hasIptables) {
-    sudoTests.push('sudo -n iptables-save 2>&1');
-  }
+  const sudoTests: string[] = [];
+  if (hasNft) sudoTests.push('sudo -n nft list ruleset 2>&1');
+  if (hasIptables) sudoTests.push('sudo -n iptables-save 2>&1');
 
   let sudoPassed = false;
   for (const testCmd of sudoTests) {
-    const sudoTest = await execSsh(sshOptions, testCmd);
-    // Exit code 0 = success, 1 = auth failure, other = command error (but sudo worked)
-    if (sudoTest.exitCode === 0 || (sudoTest.exitCode !== 1 && !sudoTest.stderr.includes('password'))) {
+    const sudoTest = await run(testCmd);
+    const output = `${sudoTest.stdout}\n${sudoTest.stderr}`.toLowerCase();
+    // Exit code 0 = success; otherwise sudo worked only if it didn't ask for a password
+    if (sudoTest.exitCode === 0 || (sudoTest.exitCode !== 1 && !output.includes('password'))) {
       sudoPassed = true;
       break;
     }
@@ -99,9 +96,8 @@ export async function checkHostReadiness(host: SshHostInfo): Promise<HostReadine
     result.sudoAccess = true;
   }
 
-  // Check kernel support for nftables (if nft is available)
   if (hasNft) {
-    const kernelCheck = await execSsh(sshOptions, 'lsmod | grep -q nf_tables && echo yes || echo no');
+    const kernelCheck = await run('lsmod 2>/dev/null | grep -q nf_tables && echo yes || echo no');
     if (kernelCheck.stdout.trim() === 'yes') {
       result.kernelSupport = true;
     } else {
@@ -109,39 +105,23 @@ export async function checkHostReadiness(host: SshHostInfo): Promise<HostReadine
     }
   }
 
-  // Check iptables-restore availability (needed for iptables backend)
   if (hasIptables && !hasNft) {
-    const restoreCheck = await execSsh(sshOptions, 'command -v iptables-restore 2>/dev/null');
+    const restoreCheck = await run('command -v iptables-restore 2>/dev/null');
     if (restoreCheck.exitCode !== 0) {
       result.ready = false;
       result.errors.push('iptables-restore is not available');
     }
+    const restore6Check = await run('command -v ip6tables-restore 2>/dev/null');
+    if (restore6Check.exitCode !== 0) {
+      result.warnings.push('ip6tables-restore is not available; IPv6 rules will not be applied');
+    }
+  }
+
+  // Lockout protection uses systemd-run or nohup to schedule an automatic revert
+  const schedCheck = await run('command -v systemd-run >/dev/null 2>&1 || command -v nohup >/dev/null 2>&1');
+  if (schedCheck.exitCode !== 0) {
+    result.warnings.push('Neither systemd-run nor nohup found; automatic revert (lockout protection) may not work');
   }
 
   return result;
-}
-
-function execSsh(sshOptions: string[], command: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
-    const args = [...sshOptions, command];
-    const child = spawn('ssh', args);
-    let stdout = '';
-    let stderr = '';
-
-    child.stdout.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    child.stderr.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    child.on('close', (code) => {
-      resolve({ exitCode: code ?? 1, stdout, stderr });
-    });
-
-    child.on('error', (error) => {
-      resolve({ exitCode: 1, stdout, stderr: stderr + error.message });
-    });
-  });
 }

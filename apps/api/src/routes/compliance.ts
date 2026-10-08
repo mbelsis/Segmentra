@@ -1,15 +1,137 @@
 import { Router } from 'express';
-import { readHostFirewallRules, type SshHostInfo } from '@segmentra/executor';
+import { z } from 'zod';
+import { LIVE_HASH_VERSION_PREFIX, readHostFirewallRules, type SshHostInfo } from '@segmentra/executor';
 import { pool } from '../db/pool.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
-import { readSecretPlaintext } from '../services/secrets.js';
-import path from 'node:path';
-import fs from 'node:fs';
-import os from 'node:os';
-import { env } from '../lib/env.js';
+import { getSshCredentialForHost, type MaterializedSshCredential } from '../services/ssh-credentials.js';
 
 const complianceRouter = Router();
 complianceRouter.use(requireAuth, requireRole('operator', 'admin'));
+
+type ComplianceStatus = 'compliant' | 'drifted' | 'unknown' | 'error';
+
+const NO_LIVE_BASELINE_MESSAGE = 'no live baseline recorded; redeploy to enable drift detection';
+const OLD_BASELINE_MESSAGE = 'baseline recorded by an older version; redeploy to enable drift detection';
+
+function sshHostInfo(host: any, cred: MaterializedSshCredential): SshHostInfo {
+  return {
+    hostname: host.hostname,
+    ip: String(host.mgmt_ip).split('/')[0],
+    port: Number(host.ssh_port) || 22,
+    username: cred.username,
+    authMethod: cred.authMethod,
+    privateKeyPath: cred.privateKeyPath,
+    password: cred.password,
+    backend: host.firewall_backend || 'auto'
+  };
+}
+
+/**
+ * Drift is detected by comparing the hash of Segmentra's own LIVE state read from the host
+ * (nft: table inet segmentra; iptables: SEGMENTRA-IN/OUT chains + INPUT/OUTPUT jumps) with the
+ * live hash recorded right after the last successful deployment (deployment_hosts.applied_live_hash,
+ * same read + normalization as readHostFirewallRules().rulesHash). Rules of other tools (Docker,
+ * Kubernetes, fail2ban) are not part of the hash. applied_hash is the hash of the compiled artifact
+ * and is NOT comparable with a live read. Hashes recorded by older versions covered the whole
+ * ruleset and lack the "v2:" prefix; they cannot be compared.
+ */
+function compareHashes(
+  currentHash: string | undefined | null,
+  lastDeployment: any,
+  segmentraPresent?: boolean
+): { status: ComplianceStatus; message?: string } {
+  if (!lastDeployment) return { status: 'unknown', message: 'no successful deployment recorded for this host' };
+  // The expiry REMOVE action deliberately stripped Segmentra's rules; a missing table/chain is expected.
+  if (lastDeployment.expiry_status === 'REMOVED') {
+    return { status: 'unknown', message: 'Segmentra policy was removed by the deployment expiry REMOVE action; host is currently unmanaged' };
+  }
+  const baseline = lastDeployment.applied_live_hash ? String(lastDeployment.applied_live_hash) : null;
+  // Checked first: hosts deployed by older versions (legacy full-table iptables design) have no
+  // SEGMENTRA chains at all, which must not be reported as drift.
+  if (baseline && !baseline.startsWith(LIVE_HASH_VERSION_PREFIX)) return { status: 'unknown', message: OLD_BASELINE_MESSAGE };
+  if (segmentraPresent === false) {
+    return { status: 'drifted', message: 'Segmentra firewall table/chain or its INPUT/OUTPUT jump is missing on the host' };
+  }
+  if (!baseline) return { status: 'unknown', message: NO_LIVE_BASELINE_MESSAGE };
+  if (!currentHash) return { status: 'error', message: 'could not compute live ruleset hash' };
+  return currentHash === baseline
+    ? { status: 'compliant' }
+    : { status: 'drifted', message: 'live Segmentra rules differ from the last deployed ruleset' };
+}
+
+function lastDeploymentInfo(d: any) {
+  return d
+    ? {
+        hash: d.applied_hash,
+        liveHash: d.applied_live_hash ?? null,
+        createdAt: d.created_at,
+        policyVersion: d.version_number,
+        policySetName: d.policy_set_name
+      }
+    : null;
+}
+
+/** Latest successful deployment per host (one query for any number of hosts). */
+async function lastDeployments(hostIds: string[]): Promise<Map<string, any>> {
+  const { rows } = await pool.query(
+    `SELECT DISTINCT ON (dh.host_id)
+            dh.host_id, dh.applied_hash, dh.applied_live_hash, dh.expiry_status, d.created_at, pv.version_number,
+            ps.name AS policy_set_name
+       FROM deployment_hosts dh
+       JOIN deployments d ON d.id = dh.deployment_id
+       JOIN policy_versions pv ON pv.id = d.policy_version_id
+       JOIN policy_sets ps ON ps.id = pv.policy_set_id
+      WHERE dh.host_id = ANY($1::uuid[]) AND dh.status = 'SUCCEEDED'
+      ORDER BY dh.host_id, COALESCE(dh.finished_at, d.finished_at, d.created_at) DESC`,
+    [hostIds]
+  );
+  return new Map(rows.map((r: any) => [r.host_id, r]));
+}
+
+async function checkHost(host: any, lastDeployment: any) {
+  let cred: MaterializedSshCredential | null = null;
+  try {
+    if (!host.mgmt_ip) throw new Error('host has no management IP');
+    cred = await getSshCredentialForHost(host.id);
+    const readResult = await readHostFirewallRules(sshHostInfo(host, cred));
+    if (!readResult.success) {
+      return {
+        hostId: host.id,
+        hostname: host.hostname,
+        status: 'error' as ComplianceStatus,
+        error: readResult.error,
+        currentHash: null,
+        expectedHash: lastDeployment?.applied_live_hash ?? null,
+        lastDeployment: lastDeploymentInfo(lastDeployment)
+      };
+    }
+    const cmp = compareHashes(readResult.rulesHash, lastDeployment, readResult.segmentraPresent);
+    return {
+      hostId: host.id,
+      hostname: host.hostname,
+      status: cmp.status,
+      message: cmp.message ?? null,
+      currentHash: readResult.rulesHash,
+      expectedHash: lastDeployment?.applied_live_hash ?? null,
+      backend: readResult.backend,
+      error: null,
+      lastDeployment: lastDeploymentInfo(lastDeployment)
+    };
+  } catch (error: any) {
+    const msg = error?.message ?? String(error);
+    return {
+      hostId: host.id,
+      hostname: host.hostname,
+      status: 'error' as ComplianceStatus,
+      error: msg === 'missing_ssh_credential' ? 'No SSH credential configured for this host' : msg,
+      currentHash: null,
+      expectedHash: lastDeployment?.applied_live_hash ?? null,
+      lastDeployment: lastDeploymentInfo(lastDeployment)
+    };
+  } finally {
+    cred?.cleanup();
+  }
+}
 
 /**
  * Check compliance status for a specific host
@@ -18,108 +140,19 @@ complianceRouter.use(requireAuth, requireRole('operator', 'admin'));
 complianceRouter.get('/hosts/:hostId', async (req, res) => {
   const hostId = req.params.hostId;
 
-  // Get host info
   const hostRes = await pool.query(
     `SELECT h.id, h.hostname, h.mgmt_ip, h.ssh_port, h.firewall_backend
      FROM hosts h
      WHERE h.id=$1 AND h.enabled=true`,
     [hostId]
   );
-
   if (!hostRes.rows[0]) {
     return res.status(404).json({ error: 'host_not_found' });
   }
 
-  const host = hostRes.rows[0];
-
-  // Get last successful deployment hash
-  const lastDeploymentRes = await pool.query(
-    `SELECT dh.applied_hash, d.created_at, pv.version_number, ps.name as policy_set_name
-     FROM deployment_hosts dh
-     JOIN deployments d ON d.id = dh.deployment_id
-     JOIN policy_versions pv ON pv.id = d.policy_version_id
-     JOIN policy_sets ps ON ps.id = pv.policy_set_id
-     WHERE dh.host_id=$1 AND dh.status='SUCCEEDED' AND dh.applied_hash IS NOT NULL
-     ORDER BY d.created_at DESC
-     LIMIT 1`,
-    [hostId]
-  );
-
-  const lastDeployment = lastDeploymentRes.rows[0];
-
-  // Get SSH credential
-  const credRes = await pool.query(
-    `SELECT * FROM ssh_credentials WHERE scope_type='GLOBAL' ORDER BY created_at DESC LIMIT 1`
-  );
-  const cred = credRes.rows[0];
-
-  if (!cred) {
-    return res.status(400).json({ error: 'missing_ssh_credential' });
-  }
-
-  const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
-  // Use os.tmpdir() for temporary keys to avoid dependency on BUNDLES_DIR existing
-  const tempKeyPath = path.join(os.tmpdir(), `segmentra_compliance_key_${hostId}_${Date.now()}`);
-  fs.writeFileSync(tempKeyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
-
-  try {
-    // Read current rules from host
-    const sshHostInfo: SshHostInfo = {
-      hostname: host.hostname,
-      ip: String(host.mgmt_ip),
-      port: host.ssh_port || 22,
-      username: cred.username,
-      privateKeyPath: tempKeyPath,
-      backend: host.firewall_backend || 'auto'
-    };
-
-    const readResult = await readHostFirewallRules(sshHostInfo);
-
-    if (!readResult.success) {
-      return res.json({
-        hostId,
-        hostname: host.hostname,
-        status: 'error',
-        error: readResult.error,
-        lastDeployment: lastDeployment ? {
-          hash: lastDeployment.applied_hash,
-          createdAt: lastDeployment.created_at,
-          policyVersion: lastDeployment.version_number,
-          policySetName: lastDeployment.policy_set_name
-        } : null
-      });
-    }
-
-    // Compare hashes
-    let complianceStatus: 'compliant' | 'drifted' | 'unknown';
-    if (!lastDeployment) {
-      complianceStatus = 'unknown';
-    } else if (readResult.rulesHash === lastDeployment.applied_hash) {
-      complianceStatus = 'compliant';
-    } else {
-      complianceStatus = 'drifted';
-    }
-
-    return res.json({
-      hostId,
-      hostname: host.hostname,
-      status: complianceStatus,
-      currentHash: readResult.rulesHash,
-      expectedHash: lastDeployment?.applied_hash || null,
-      backend: readResult.backend,
-      lastDeployment: lastDeployment ? {
-        hash: lastDeployment.applied_hash,
-        createdAt: lastDeployment.created_at,
-        policyVersion: lastDeployment.version_number,
-        policySetName: lastDeployment.policy_set_name
-      } : null
-    });
-  } finally {
-    // Clean up temp key file
-    if (fs.existsSync(tempKeyPath)) {
-      fs.unlinkSync(tempKeyPath);
-    }
-  }
+  const deployments = await lastDeployments([hostId]);
+  const result = await checkHost(hostRes.rows[0], deployments.get(hostId));
+  return res.json(result);
 });
 
 /**
@@ -128,12 +161,12 @@ complianceRouter.get('/hosts/:hostId', async (req, res) => {
  * Body: { hostIds: string[] }
  */
 complianceRouter.post('/hosts/bulk', async (req, res) => {
-  const { hostIds } = req.body;
-  if (!Array.isArray(hostIds) || hostIds.length === 0) {
-    return res.status(400).json({ error: 'invalid_body' });
+  const parsed = z.object({ hostIds: z.array(z.string().uuid()).min(1).max(1000) }).safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
   }
+  const { hostIds } = parsed.data;
 
-  // Get hosts
   const hostsRes = await pool.query(
     `SELECT h.id, h.hostname, h.mgmt_ip, h.ssh_port, h.firewall_backend
      FROM hosts h
@@ -141,96 +174,13 @@ complianceRouter.post('/hosts/bulk', async (req, res) => {
     [hostIds]
   );
 
-  // Get SSH credential
-  const credRes = await pool.query(
-    `SELECT * FROM ssh_credentials WHERE scope_type='GLOBAL' ORDER BY created_at DESC LIMIT 1`
-  );
-  const cred = credRes.rows[0];
-
-  if (!cred) {
-    return res.status(400).json({ error: 'missing_ssh_credential' });
+  const deployments = await lastDeployments(hostIds);
+  const results = [];
+  for (const host of hostsRes.rows) {
+    results.push(await checkHost(host, deployments.get(host.id)));
   }
 
-  const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
-  // Use os.tmpdir() for temporary keys to avoid dependency on BUNDLES_DIR existing
-  const tempKeyPath = path.join(os.tmpdir(), `segmentra_compliance_bulk_key_${Date.now()}`);
-  fs.writeFileSync(tempKeyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
-
-  try {
-    // Get last deployment hashes for all hosts
-    const lastDeploymentsRes = await pool.query(
-      `SELECT dh.host_id, dh.applied_hash, d.created_at, pv.version_number, ps.name as policy_set_name
-       FROM deployment_hosts dh
-       JOIN deployments d ON d.id = dh.deployment_id
-       JOIN policy_versions pv ON pv.id = d.policy_version_id
-       JOIN policy_sets ps ON ps.id = pv.policy_set_id
-       WHERE dh.host_id = ANY($1::uuid[]) AND dh.status='SUCCEEDED' AND dh.applied_hash IS NOT NULL
-       AND (dh.host_id, d.created_at) IN (
-         SELECT host_id, MAX(d.created_at)
-         FROM deployment_hosts dh2
-         JOIN deployments d ON d.id = dh2.deployment_id
-         WHERE dh2.host_id = ANY($1::uuid[]) AND dh2.status='SUCCEEDED' AND dh2.applied_hash IS NOT NULL
-         GROUP BY dh2.host_id
-       )`,
-      [hostIds]
-    );
-
-    const lastDeploymentsMap = new Map();
-    for (const row of lastDeploymentsRes.rows) {
-      lastDeploymentsMap.set(row.host_id, row);
-    }
-
-    const results = [];
-    for (const host of hostsRes.rows) {
-      const sshHostInfo: SshHostInfo = {
-        hostname: host.hostname,
-        ip: String(host.mgmt_ip),
-        port: host.ssh_port || 22,
-        username: cred.username,
-        privateKeyPath: tempKeyPath,
-        backend: host.firewall_backend || 'auto'
-      };
-
-      try {
-        const readResult = await readHostFirewallRules(sshHostInfo);
-        const lastDeployment = lastDeploymentsMap.get(host.id);
-
-        let complianceStatus: 'compliant' | 'drifted' | 'unknown' | 'error';
-        if (!readResult.success) {
-          complianceStatus = 'error';
-        } else if (!lastDeployment) {
-          complianceStatus = 'unknown';
-        } else if (readResult.rulesHash === lastDeployment.applied_hash) {
-          complianceStatus = 'compliant';
-        } else {
-          complianceStatus = 'drifted';
-        }
-
-        results.push({
-          hostId: host.id,
-          hostname: host.hostname,
-          status: complianceStatus,
-          currentHash: readResult.success ? readResult.rulesHash : null,
-          expectedHash: lastDeployment?.applied_hash || null,
-          error: readResult.success ? null : readResult.error
-        });
-      } catch (error: any) {
-        results.push({
-          hostId: host.id,
-          hostname: host.hostname,
-          status: 'error' as const,
-          error: error.message
-        });
-      }
-    }
-
-    return res.json({ results });
-  } finally {
-    // Clean up temp key file
-    if (fs.existsSync(tempKeyPath)) {
-      fs.unlinkSync(tempKeyPath);
-    }
-  }
+  return res.json({ results });
 });
 
 export default complianceRouter;

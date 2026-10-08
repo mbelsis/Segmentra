@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { api } from '../lib/api';
+import { useAuth, hasRole } from '../lib/auth-context';
 
 const SEVERITY_COLORS: Record<string, string> = {
   critical: '#a63d2f',
@@ -17,6 +18,9 @@ const SEVERITY_BG: Record<string, string> = {
 };
 
 export function SecurityAuditPage() {
+  const { roles } = useAuth();
+  // Running a scan is operator/admin only in the API; everyone can view the latest results
+  const canScan = hasRole(roles, 'operator', 'admin');
   const [result, setResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
@@ -56,9 +60,11 @@ export function SecurityAuditPage() {
       {error && <div style={{ color: '#a63d2f', marginBottom: 12, padding: 10, background: '#faf0ee', borderRadius: 8, borderLeft: '4px solid #a63d2f' }}>{error}</div>}
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 20 }}>
+        {canScan && (
         <button onClick={runScan} disabled={loading} className="btn-primary" style={{ minWidth: 160 }}>
           {loading ? 'Scanning...' : result ? 'Run New Scan' : 'Run Security Scan'}
         </button>
+        )}
         {result?.scannedAt && (
           <span style={{ fontSize: '13px', color: '#78644e' }}>
             Last scan: {new Date(result.scannedAt).toLocaleString()}
@@ -155,7 +161,9 @@ export function SecurityAuditPage() {
       {!result && !loading && !initialLoading && (
         <div style={{ textAlign: 'center', padding: '48px 24px', background: '#f7f4ef', borderRadius: 10, border: '1px solid #e8e0d4' }}>
           <p style={{ color: '#5c4633', fontSize: '14px', marginBottom: 16 }}>
-            Click <strong>Run Security Scan</strong> to analyze all deployed policies for excessive permissions and compliance risks.
+            {canScan
+              ? <>Click <strong>Run Security Scan</strong> to analyze all deployed policies for excessive permissions and compliance risks.</>
+              : <>No scan results yet. An operator or admin can run a security scan.</>}
           </p>
           <div style={{ fontSize: '13px', color: '#97846c', lineHeight: 1.8 }}>
             The scan checks for:<br />

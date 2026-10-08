@@ -31,17 +31,29 @@ if errorlevel 1 (
 echo [segmentra] Docker check passed
 echo.
 
-REM Install dependencies if needed
-if not exist node_modules (
-    echo [segmentra] Installing dependencies...
-    call npm install
-    if errorlevel 1 (
-        echo [segmentra] ERROR: Failed to install dependencies
-        exit /b 1
-    )
-    echo [segmentra] Dependencies installed - OK
-    echo.
-)
+REM Install / refresh dependencies:
+REM  - clean install (npm ci) when node_modules is missing
+REM  - npm install when package-lock.json or any package.json is newer than the last install
+if not exist node_modules\.package-lock.json goto deps_clean_install
+node -e "const fs=require('fs');const t=f=>{try{return fs.statSync(f).mtimeMs}catch{return 0}};const m=t('node_modules/.package-lock.json');const ws=d=>fs.readdirSync(d).map(x=>d+'/'+x+'/package.json');const files=['package-lock.json','package.json'].concat(ws('apps'),ws('packages'));process.exit(files.some(f=>t(f)>m)?1:0)"
+if not errorlevel 1 goto deps_done
+echo [segmentra] Dependency manifests changed - running npm install...
+call npm install
+if errorlevel 1 goto deps_failed
+echo [segmentra] Dependencies updated - OK
+echo.
+goto deps_done
+:deps_clean_install
+echo [segmentra] Installing dependencies (npm ci)...
+if exist package-lock.json (call npm ci) else (call npm install)
+if errorlevel 1 goto deps_failed
+echo [segmentra] Dependencies installed - OK
+echo.
+goto deps_done
+:deps_failed
+echo [segmentra] ERROR: Failed to install dependencies
+exit /b 1
+:deps_done
 
 REM Optional: wipe local dev DB volume (DATA LOSS) if SEGMENTRA_RESET_DB=1
 if not "%SEGMENTRA_RESET_DB%"=="1" goto skip_reset_db
@@ -67,7 +79,7 @@ if %TRY% GTR 30 (
     echo [segmentra] ERROR: PostgreSQL did not become ready in time
     exit /b 1
 )
-docker exec segmentra-segmentra-db-1 pg_isready -U segmentra >nul 2>&1
+docker compose exec -T segmentra-db pg_isready -U segmentra >nul 2>&1
 if errorlevel 1 (
     timeout /t 1 /nobreak >nul
     goto :wait_db
@@ -84,7 +96,22 @@ goto db_url_set
 set "DATABASE_URL=%SEGMENTRA_DATABASE_URL%"
 :db_url_set
 
-if "%JWT_SECRET%"=="" set "JWT_SECRET=change-me-to-a-long-random-string"
+REM JWT secret: prod requires an explicit JWT_SECRET; dev generates a random one once
+REM and keeps it in the untracked file .dev-jwt-secret.
+if /I "%MODE%"=="prod" goto jwt_prod
+if not "%JWT_SECRET%"=="" goto jwt_done
+if exist .dev-jwt-secret goto jwt_load
+node -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))" > .dev-jwt-secret
+echo [segmentra] Generated development JWT secret in .dev-jwt-secret
+:jwt_load
+set /p JWT_SECRET=<.dev-jwt-secret
+goto jwt_done
+:jwt_prod
+set "NODE_ENV=production"
+if not "%JWT_SECRET%"=="" goto jwt_done
+echo [segmentra] ERROR: JWT_SECRET must be set in prod mode (at least 32 random characters).
+exit /b 1
+:jwt_done
 
 REM Set optional environment variables with defaults
 if "%PORT%"=="" set "PORT=8080"
@@ -119,7 +146,7 @@ echo.
 
 REM Build workspaces
 echo [segmentra] Building workspaces...
-call npm run build -ws
+call npm run build
 if errorlevel 1 (
     echo [segmentra] ERROR: Build failed
     exit /b 1
@@ -129,7 +156,7 @@ echo.
 
 REM Launch API in new window with all environment variables
 echo [segmentra] Launching API (new window)...
-start "Segmentra API" cmd /k "cd /d ""%~dp0"" && set ""DATABASE_URL=%DATABASE_URL%"" && set ""JWT_SECRET=%JWT_SECRET%"" && set ""PORT=%PORT%"" && set ""BUNDLES_DIR=%BUNDLES_DIR%"" && set ""ANSIBLE_RUNNER_CONTAINER=%ANSIBLE_RUNNER_CONTAINER%"" && echo [API] Starting on port %PORT%... && npm run dev -w apps/api"
+start "Segmentra API" cmd /k "cd /d ""%~dp0"" && set ""DATABASE_URL=%DATABASE_URL%"" && set ""JWT_SECRET=%JWT_SECRET%"" && set ""PORT=%PORT%"" && set ""BUNDLES_DIR=%BUNDLES_DIR%"" && set ""ANSIBLE_RUNNER_CONTAINER=%ANSIBLE_RUNNER_CONTAINER%"" && set ""NODE_ENV=%NODE_ENV%"" && set ""SEGMENTRA_KEK_B64=%SEGMENTRA_KEK_B64%"" && echo [API] Starting on port %PORT%... && npm run dev -w apps/api"
 
 REM Launch UI in new window
 echo [segmentra] Launching UI (new window)...
@@ -149,9 +176,13 @@ echo [segmentra] ========================================
 echo [segmentra] Default Login Credentials
 echo [segmentra] ========================================
 echo [segmentra] Username: admin
-echo [segmentra] Password: admin123
-echo.
-echo [segmentra] IMPORTANT: Change the default password after first login!
+if not "%SEGMENTRA_ADMIN_PASSWORD%"=="" (
+    echo [segmentra] Password: value of SEGMENTRA_ADMIN_PASSWORD when the admin user was first created
+) else (
+    echo [segmentra] Password: admin123 - dev default, unless the admin user already existed
+    echo.
+    echo [segmentra] IMPORTANT: Change the default password after first login!
+)
 echo [segmentra] You can change it in the UI or via API endpoint.
 echo.
 

@@ -59,16 +59,31 @@ export async function isPolicyVersionHighRisk(params: {
   const veryBroadCidrs = new Set([
     '0.0.0.0/0',
     '0.0.0.0/1',
-    '128.0.0.0/1'
+    '128.0.0.0/1',
+    '::/0'
   ]);
 
-  function isVeryBroadCidr(cidr: string): boolean {
-    if (!cidr) return false;
-    if (veryBroadCidrs.has(cidr)) return true;
-    const m = cidr.match(/^(\d+\.\d+\.\d+\.\d+)\/(\d{1,2})$/);
-    if (!m) return false;
-    const prefix = parseInt(m[2], 10);
-    return prefix >= 0 && prefix <= 8; // /0–/8 are extremely broad
+  function isVeryBroadCidr(value: string): boolean {
+    if (!value) return false;
+    // A CIDR source may be a comma-separated list; any very broad element makes it broad.
+    return String(value)
+      .split(',')
+      .map((c) => c.trim())
+      .some((cidr) => {
+        if (/^(any|\*)$/i.test(cidr)) return true;
+        if (veryBroadCidrs.has(cidr)) return true;
+        const m4 = cidr.match(/^(\d+\.\d+\.\d+\.\d+)\/(\d{1,2})$/);
+        if (m4) {
+          const prefix = parseInt(m4[2], 10);
+          return prefix >= 0 && prefix <= 8; // /0–/8 are extremely broad
+        }
+        const m6 = cidr.match(/^([0-9a-fA-F:]+)\/(\d{1,3})$/);
+        if (m6 && m6[1].includes(':')) {
+          const prefix = parseInt(m6[2], 10);
+          return prefix >= 0 && prefix <= 16; // ::/0 .. /16 are extremely broad
+        }
+        return false;
+      });
   }
 
   // "sensitive" ports to watch (you can expand/tune)
@@ -127,6 +142,16 @@ export async function isPolicyVersionHighRisk(params: {
       sourceType === 'CIDR' &&
       isVeryBroadCidr(sourceValue) &&
       (allowsSensitivePort(ports) || isWidePortRange(ports))
+    ) {
+      return true;
+    }
+
+    // (a2) tcp/udp with NO port restriction from anywhere = every port of that protocol
+    if (
+      (proto === 'tcp' || proto === 'udp') &&
+      (!ports || !String(ports).trim() || isWidePortRange(ports)) &&
+      sourceType === 'CIDR' &&
+      isVeryBroadCidr(sourceValue)
     ) {
       return true;
     }

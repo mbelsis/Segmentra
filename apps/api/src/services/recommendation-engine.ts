@@ -1,5 +1,7 @@
 import { pool } from '../db/pool.js';
+import { cidrContains } from './ip-utils.js';
 import type { CommunicationFlow } from './log-parser.js';
+import { createDraftVersion, insertRule, loadVersionRules, lockPolicySetAndGetBase } from './policy-version-clone.js';
 
 // Well-known service ports for confidence scoring
 const KNOWN_SERVICE_PORTS: Record<number, string> = {
@@ -22,23 +24,9 @@ interface RecommendedRule {
   flowCount: number;
 }
 
-// Helper: check if IP matches a CIDR range
+// Helper: check if IP matches a CIDR range (IPv4 and IPv6)
 function ipMatchesCidr(ip: string, cidr: string): boolean {
-  try {
-    const cleanIp = ip.split('/')[0];
-    const [cidrIp, prefix] = cidr.split('/');
-    const prefixLen = prefix ? parseInt(prefix, 10) : 32;
-    if (prefixLen < 0 || prefixLen > 32) return false;
-    const ipParts = cleanIp.split('.').map(Number);
-    const cidrParts = cidrIp.split('.').map(Number);
-    if (ipParts.length !== 4 || cidrParts.length !== 4) return false;
-    const mask = prefixLen === 0 ? 0 : (0xFFFFFFFF << (32 - prefixLen)) >>> 0;
-    const ipNum = (ipParts[0] << 24) + (ipParts[1] << 16) + (ipParts[2] << 8) + ipParts[3];
-    const cidrNum = (cidrParts[0] << 24) + (cidrParts[1] << 16) + (cidrParts[2] << 8) + cidrParts[3];
-    return (ipNum & mask) === (cidrNum & mask);
-  } catch {
-    return false;
-  }
+  return cidrContains(cidr, ip.split('/')[0]);
 }
 
 async function resolveIpToEntity(ip: string): Promise<{ type: string; value: string; label: string } | null> {
@@ -50,7 +38,7 @@ async function resolveIpToEntity(ip: string): Promise<{ type: string; value: str
   if (hosts[0]) {
     // Try to resolve to a tag
     const { rows: tags } = await pool.query(
-      `SELECT t.id, t.name FROM tags t JOIN host_tags ht ON ht.tag_id = t.id WHERE ht.host_id = $1 LIMIT 1`,
+      `SELECT t.id, t.name FROM tags t JOIN host_tags ht ON ht.tag_id = t.id WHERE ht.host_id = $1 ORDER BY t.name ASC LIMIT 1`,
       [hosts[0].id]
     );
     if (tags[0]) {
@@ -68,7 +56,7 @@ async function resolveIpToEntity(ip: string): Promise<{ type: string; value: str
   );
   if (ifaces[0]) {
     const { rows: tags } = await pool.query(
-      `SELECT t.id, t.name FROM tags t JOIN host_tags ht ON ht.tag_id = t.id WHERE ht.host_id = $1 LIMIT 1`,
+      `SELECT t.id, t.name FROM tags t JOIN host_tags ht ON ht.tag_id = t.id WHERE ht.host_id = $1 ORDER BY t.name ASC LIMIT 1`,
       [ifaces[0].host_id]
     );
     if (tags[0]) {
@@ -77,7 +65,7 @@ async function resolveIpToEntity(ip: string): Promise<{ type: string; value: str
   }
 
   // Check VLANs by subnet
-  const { rows: vlans } = await pool.query(`SELECT id, name, subnet FROM vlans WHERE subnet IS NOT NULL`);
+  const { rows: vlans } = await pool.query(`SELECT id, name, subnet FROM vlans WHERE subnet IS NOT NULL ORDER BY vlan_tag ASC, id ASC`);
   for (const vlan of vlans) {
     if (vlan.subnet && ipMatchesCidr(ip, vlan.subnet)) {
       return { type: 'VLAN', value: vlan.id, label: `VLAN:${vlan.name}` };
@@ -105,23 +93,50 @@ function calculateConfidence(flow: CommunicationFlow, isKnownPort: boolean, both
   return Math.min(confidence, 100);
 }
 
+function ruleKey(r: { direction: string; protocol: string; ports: string | null; sourceType: string; sourceValue: string }): string {
+  return [r.direction, r.protocol, (r.ports ?? '').replace(/\s+/g, ''), r.sourceType, r.sourceValue].join('|');
+}
+
+export class RecommendationError extends Error {
+  constructor(public code: string, message: string, public status = 400) {
+    super(message);
+    this.name = 'RecommendationError';
+  }
+}
+
+/**
+ * Build recommendations from an audit session and store them (with the audit event) in a
+ * single transaction. Rules already present in another PENDING recommendation for the same
+ * host are skipped; when nothing new remains no recommendation row is created.
+ */
 export async function generateRecommendations(
   auditSessionId: string,
-  hostId: string
-): Promise<{ recommendationId: string; ruleCount: number; avgConfidence: number }> {
+  hostId: string,
+  actorUserId: string | null = null
+): Promise<{ recommendationId: string | null; ruleCount: number; avgConfidence: number; skippedDuplicates: number }> {
   // Get audit session flows
   const { rows: sessions } = await pool.query(
     `SELECT * FROM firewall_audit_sessions WHERE id = $1`,
     [auditSessionId]
   );
-  if (!sessions[0]) throw new Error('Audit session not found');
+  if (!sessions[0]) throw new RecommendationError('audit_session_not_found', 'Audit session not found', 404);
   const session = sessions[0];
-
-  if (!session.log_data?.flows || session.log_data.flows.length === 0) {
-    throw new Error('No flow data available for this audit session');
+  if (session.host_id !== hostId) {
+    throw new RecommendationError('host_mismatch', 'Audit session does not belong to this host');
   }
 
-  const flows: CommunicationFlow[] = session.log_data.flows;
+  if (!session.log_data?.flows || session.log_data.flows.length === 0) {
+    throw new RecommendationError('no_flow_data', 'No flow data available for this audit session');
+  }
+
+  // Ignore reply traffic accepted by the baseline established/related rule — it is not a
+  // service the host needs a rule for — as well as loopback/forwarded packets.
+  const flows: CommunicationFlow[] = (session.log_data.flows as CommunicationFlow[]).filter(
+    (f) => !f.established && (f.direction === 'IN' || f.direction === 'OUT')
+  );
+  if (flows.length === 0) {
+    throw new RecommendationError('no_flow_data', 'Only established/related reply traffic was observed; nothing to recommend');
+  }
 
   // Get existing deployed rules for dedup
   const { rows: deployedRules } = await pool.query(
@@ -205,120 +220,202 @@ export async function generateRecommendations(
   // Sort by confidence desc
   recommendedRules.sort((a, b) => b.confidence - a.confidence);
 
-  const avgConfidence = recommendedRules.length > 0
-    ? recommendedRules.reduce((sum, r) => sum + r.confidence, 0) / recommendedRules.length
-    : 0;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Serialize generation per host so concurrent requests cannot create duplicates.
+    const hostLock = await client.query(`SELECT id FROM hosts WHERE id = $1 FOR UPDATE`, [hostId]);
+    if (!hostLock.rows[0]) throw new RecommendationError('host_not_found', 'Host not found', 404);
 
-  // Save recommendation
-  const { rows } = await pool.query(
-    `INSERT INTO policy_recommendations (audit_session_id, host_id, status, recommended_rules, confidence_score)
-     VALUES ($1, $2, 'PENDING', $3, $4) RETURNING id`,
-    [auditSessionId, hostId, JSON.stringify(recommendedRules), avgConfidence]
-  );
+    const { rows: pending } = await client.query(
+      `SELECT recommended_rules FROM policy_recommendations WHERE host_id = $1 AND status = 'PENDING'`,
+      [hostId]
+    );
+    const pendingKeys = new Set<string>();
+    for (const p of pending) {
+      const list = (typeof p.recommended_rules === 'string' ? JSON.parse(p.recommended_rules) : p.recommended_rules) ?? [];
+      for (const r of list as RecommendedRule[]) pendingKeys.add(ruleKey(r));
+    }
+    const freshRules = recommendedRules.filter((r) => !pendingKeys.has(ruleKey(r)));
+    const skippedDuplicates = recommendedRules.length - freshRules.length;
 
-  return {
-    recommendationId: rows[0].id,
-    ruleCount: recommendedRules.length,
-    avgConfidence: Math.round(avgConfidence * 100) / 100,
-  };
+    if (freshRules.length === 0) {
+      await client.query('ROLLBACK');
+      return { recommendationId: null, ruleCount: 0, avgConfidence: 0, skippedDuplicates };
+    }
+
+    const avgConfidence = freshRules.reduce((sum, r) => sum + r.confidence, 0) / freshRules.length;
+
+    const { rows } = await client.query(
+      `INSERT INTO policy_recommendations (audit_session_id, host_id, status, recommended_rules, confidence_score)
+       VALUES ($1, $2, 'PENDING', $3, $4) RETURNING id`,
+      [auditSessionId, hostId, JSON.stringify(freshRules), avgConfidence]
+    );
+    const recommendationId = rows[0].id;
+
+    await client.query(
+      `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+       VALUES ($1, 'RECOMMENDATION_GENERATE', 'policy_recommendation', $2, $3)`,
+      [actorUserId, recommendationId, JSON.stringify({ auditSessionId, hostId, ruleCount: freshRules.length, skippedDuplicates })]
+    );
+
+    await client.query('COMMIT');
+    return {
+      recommendationId,
+      ruleCount: freshRules.length,
+      avgConfidence: Math.round(avgConfidence * 100) / 100,
+      skippedDuplicates,
+    };
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
+/**
+ * Pick the policy set a recommendation should extend, deterministically:
+ *  1. HOST_LIST sets containing the host (fewest member hosts first, then oldest)
+ *  2. TAG sets scoped to one of the host's tags (ordered by tag name, then oldest)
+ *  3. otherwise null (caller creates a dedicated HOST_LIST set)
+ */
+async function findTargetPolicySet(client: import('pg').PoolClient, hostId: string): Promise<string | null> {
+  const { rows: hostList } = await client.query(
+    `SELECT ps.id
+       FROM policy_sets ps
+       JOIN policy_set_hosts psh ON psh.policy_set_id = ps.id AND psh.host_id = $1
+      WHERE ps.scope_type = 'HOST_LIST'
+      ORDER BY (SELECT COUNT(*) FROM policy_set_hosts x WHERE x.policy_set_id = ps.id) ASC, ps.created_at ASC, ps.id ASC
+      LIMIT 1`,
+    [hostId]
+  );
+  if (hostList[0]) return hostList[0].id;
+
+  const { rows: tagSets } = await client.query(
+    `SELECT ps.id
+       FROM policy_sets ps
+       JOIN host_tags ht ON ht.tag_id = ps.scope_tag_id AND ht.host_id = $1
+       JOIN tags t ON t.id = ps.scope_tag_id
+      WHERE ps.scope_type = 'TAG'
+      ORDER BY t.name ASC, ps.created_at ASC, ps.id ASC
+      LIMIT 1`,
+    [hostId]
+  );
+  return tagSets[0]?.id ?? null;
+}
+
+/**
+ * Apply an ACCEPTED recommendation: create a new DRAFT version of the target policy set that
+ * keeps all rules of the base version (latest APPROVED/DEPLOYED, else latest) and appends the
+ * recommended rules (skipping ones already present). The draft must go through review.
+ */
 export async function applyRecommendation(
   recommendationId: string,
-  userId: string,
+  userId: string | null,
   policySetId?: string
-): Promise<{ versionId: string; rulesCreated: number }> {
-  const { rows } = await pool.query(
-    `SELECT * FROM policy_recommendations WHERE id = $1`,
-    [recommendationId]
-  );
-  if (!rows[0]) throw new Error('Recommendation not found');
-  const rec = rows[0];
-
-  if (rec.status !== 'ACCEPTED') throw new Error('Recommendation must be accepted before applying');
-
-  const rules: RecommendedRule[] = rec.recommended_rules;
-
+): Promise<{ versionId: string; policySetId: string; rulesCreated: number; rulesCarriedOver: number; skippedExisting: number }> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    let targetPolicySetId = policySetId;
+    const { rows } = await client.query(
+      `SELECT * FROM policy_recommendations WHERE id = $1 FOR UPDATE`,
+      [recommendationId]
+    );
+    if (!rows[0]) throw new RecommendationError('not_found', 'Recommendation not found', 404);
+    const rec = rows[0];
+    if (rec.status !== 'ACCEPTED') {
+      throw new RecommendationError('not_accepted', 'Recommendation must be accepted before applying', 409);
+    }
 
-    // If no policy set specified, find one matching the host's tags, or create one
+    const rules: RecommendedRule[] =
+      (typeof rec.recommended_rules === 'string' ? JSON.parse(rec.recommended_rules) : rec.recommended_rules) ?? [];
+
+    let targetPolicySetId = policySetId ?? (await findTargetPolicySet(client, rec.host_id));
+
     if (!targetPolicySetId) {
-      const { rows: hostTags } = await client.query(
-        `SELECT ht.tag_id FROM host_tags ht WHERE ht.host_id = $1 LIMIT 1`,
-        [rec.host_id]
+      // Create a new HOST_LIST policy set dedicated to this host
+      const { rows: hostInfo } = await client.query(`SELECT hostname FROM hosts WHERE id = $1`, [rec.host_id]);
+      const hostname = hostInfo[0]?.hostname ?? 'Unknown';
+      const { rows: ps } = await client.query(
+        `INSERT INTO policy_sets (name, description, scope_type, created_by)
+         VALUES ($1, $2, 'HOST_LIST', $3) RETURNING id`,
+        [`Recommended: ${hostname}`, `Auto-generated from audit recommendation`, userId]
       );
-      if (hostTags[0]) {
-        const { rows: ps } = await client.query(
-          `SELECT id FROM policy_sets WHERE scope_type = 'TAG' AND scope_tag_id = $1 LIMIT 1`,
-          [hostTags[0].tag_id]
-        );
-        targetPolicySetId = ps[0]?.id;
-      }
-
-      if (!targetPolicySetId) {
-        // Create a new HOST_LIST policy set
-        const { rows: hostInfo } = await client.query(`SELECT hostname FROM hosts WHERE id = $1`, [rec.host_id]);
-        const hostname = hostInfo[0]?.hostname ?? 'Unknown';
-        const { rows: ps } = await client.query(
-          `INSERT INTO policy_sets (name, description, scope_type, created_by)
-           VALUES ($1, $2, 'HOST_LIST', $3) RETURNING *`,
-          [`Recommended: ${hostname}`, `Auto-generated from audit recommendation`, userId]
-        );
-        targetPolicySetId = ps[0].id;
-        await client.query(
-          `INSERT INTO policy_set_hosts (policy_set_id, host_id) VALUES ($1, $2)`,
-          [targetPolicySetId, rec.host_id]
-        );
-      }
-    }
-
-    // Get next version number
-    const { rows: latestV } = await client.query(
-      `SELECT COALESCE(MAX(version_number), 0)::int AS v FROM policy_versions WHERE policy_set_id = $1`,
-      [targetPolicySetId]
-    );
-    const nextVersion = (latestV[0]?.v ?? 0) + 1;
-
-    // Create version
-    const { rows: vRows } = await client.query(
-      `INSERT INTO policy_versions (policy_set_id, version_number, status, change_summary, created_by, interface_scope_type)
-       VALUES ($1, $2, 'DRAFT', $3, $4, 'ALL_INTERFACES') RETURNING *`,
-      [targetPolicySetId, nextVersion, 'Auto-generated from audit recommendation', userId]
-    );
-    const version = vRows[0];
-
-    // Create rules
-    let rulesCreated = 0;
-    for (let i = 0; i < rules.length; i++) {
-      const rule = rules[i];
+      targetPolicySetId = ps[0].id as string;
       await client.query(
-        `INSERT INTO policy_rules (policy_version_id, order_index, direction, action, protocol, ports, source_type, source_value, log_mode, comment)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'NONE', $9)`,
-        [version.id, i, rule.direction, rule.action, rule.protocol, rule.ports, rule.sourceType, rule.sourceValue, rule.comment]
+        `INSERT INTO policy_set_hosts (policy_set_id, host_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [targetPolicySetId, rec.host_id]
       );
-      rulesCreated++;
     }
 
-    // Update recommendation
+    const locked = await lockPolicySetAndGetBase(client, targetPolicySetId);
+    if (!locked) throw new RecommendationError('policy_set_not_found', 'Policy set not found', 404);
+    const { base, nextVersionNumber } = locked;
+    const existingRules = base ? await loadVersionRules(client, base.id) : [];
+
+    const existingKeys = new Set(
+      existingRules
+        .filter((r) => r.action === 'ALLOW')
+        .map((r) =>
+          ruleKey({ direction: r.direction ?? 'IN', protocol: r.protocol, ports: r.ports, sourceType: r.source_type, sourceValue: r.source_value })
+        )
+    );
+    const toAppend = rules.filter((r) => !existingKeys.has(ruleKey(r)));
+
+    const versionId = await createDraftVersion(client, {
+      policySetId: targetPolicySetId,
+      versionNumber: nextVersionNumber,
+      base,
+      changeSummary: `Audit recommendation: ${toAppend.length} rule(s) appended to v${base?.version_number ?? 0} — review rule order before submitting`,
+      createdBy: userId,
+    });
+
+    let orderIndex = 0;
+    for (const r of existingRules) {
+      await insertRule(client, versionId, orderIndex++, r);
+    }
+    for (const rule of toAppend) {
+      await insertRule(client, versionId, orderIndex++, {
+        direction: rule.direction,
+        action: rule.action,
+        protocol: rule.protocol,
+        ports: rule.ports,
+        source_type: rule.sourceType,
+        source_value: rule.sourceValue,
+        log_mode: 'NONE',
+        comment: rule.comment,
+      });
+    }
+
     await client.query(
       `UPDATE policy_recommendations SET status = 'APPLIED', applied_policy_version_id = $2 WHERE id = $1`,
-      [recommendationId, version.id]
+      [recommendationId, versionId]
     );
 
     await client.query(
       `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
        VALUES ($1, 'RECOMMENDATION_APPLY', 'policy_recommendation', $2, $3)`,
-      [userId, recommendationId, JSON.stringify({ versionId: version.id, rulesCreated })]
+      [userId, recommendationId, JSON.stringify({
+        versionId,
+        policySetId: targetPolicySetId,
+        baseVersionId: base?.id ?? null,
+        rulesCreated: toAppend.length,
+        rulesCarriedOver: existingRules.length,
+      })]
     );
 
     await client.query('COMMIT');
-    return { versionId: version.id, rulesCreated };
+    return {
+      versionId,
+      policySetId: targetPolicySetId,
+      rulesCreated: toAppend.length,
+      rulesCarriedOver: existingRules.length,
+      skippedExisting: rules.length - toAppend.length,
+    };
   } catch (e) {
-    await client.query('ROLLBACK');
+    await client.query('ROLLBACK').catch(() => {});
     throw e;
   } finally {
     client.release();

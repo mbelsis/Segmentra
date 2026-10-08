@@ -126,8 +126,8 @@ iotAssetsRouter.post('/', requireRole('operator', 'admin'), async (req, res) => 
     await client.query('COMMIT');
     res.status(201).json({ asset: rows[0] });
   } catch (e: any) {
-    await client.query('ROLLBACK');
-    res.status(500).json({ error: 'create_failed', message: e.message });
+    await client.query('ROLLBACK').catch(() => {});
+    throw e; // global handler maps FK/validation errors (e.g. unknown gateway host -> 409)
   } finally {
     client.release();
   }
@@ -187,7 +187,8 @@ iotAssetsRouter.post('/bulk-import', requireRole('operator', 'admin'), async (re
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
 
   let imported = 0;
-  for (const asset of parsed.data.assets) {
+  const failures: Array<{ index: number; name: string; error: string }> = [];
+  for (const [index, asset] of parsed.data.assets.entries()) {
     try {
       await pool.query(
         `INSERT INTO iot_assets (name, asset_type, vendor, model, mac_address, ip_address, vlan_id, zone, criticality, fingerprint, enabled)
@@ -197,16 +198,18 @@ iotAssetsRouter.post('/bulk-import', requireRole('operator', 'admin'), async (re
          asset.zone ?? null, asset.criticality, JSON.stringify(asset.fingerprint ?? {}), asset.enabled]
       );
       imported++;
-    } catch { /* skip duplicates */ }
+    } catch (e: any) {
+      failures.push({ index, name: asset.name, error: e?.detail || e?.message || String(e) });
+    }
   }
 
   await pool.query(
     `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
      VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), 'IOT_ASSET_BULK_IMPORT', 'iot_asset', uuid_generate_v4(), $2)`,
-    [req.auth!.username, JSON.stringify({ imported, total: parsed.data.assets.length })]
+    [req.auth!.username, JSON.stringify({ imported, failed: failures.length, total: parsed.data.assets.length })]
   );
 
-  res.json({ imported, total: parsed.data.assets.length });
+  res.json({ imported, failed: failures.length, total: parsed.data.assets.length, failures });
 });
 
 // === Gateway Assignment ===

@@ -3,7 +3,7 @@ import { z } from 'zod';
 
 import { pool } from '../db/pool.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
-import { generateRecommendations, applyRecommendation } from '../services/recommendation-engine.js';
+import { generateRecommendations, applyRecommendation, RecommendationError } from '../services/recommendation-engine.js';
 
 export const recommendationsRouter = Router();
 recommendationsRouter.use(requireAuth);
@@ -54,20 +54,25 @@ recommendationsRouter.post('/generate', requireRole('operator', 'admin'), async 
     hostId: z.string().uuid(),
   });
   const parsed = bodySchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
 
   try {
-    const result = await generateRecommendations(parsed.data.auditSessionId, parsed.data.hostId);
-
-    await pool.query(
-      `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
-       VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
-      [req.auth!.username, 'RECOMMENDATION_GENERATE', 'policy_recommendation', null, JSON.stringify({ auditSessionId: parsed.data.auditSessionId, hostId: parsed.data.hostId })]
+    // Recommendation row + audit event are written in one transaction inside the service.
+    const result = await generateRecommendations(
+      parsed.data.auditSessionId,
+      parsed.data.hostId,
+      req.auth!.userId ?? null
     );
-
+    if (!result.recommendationId) {
+      return res.status(200).json({
+        ...result,
+        message: 'No new rules to recommend: all observed flows are already covered by pending recommendations or deployed rules',
+      });
+    }
     res.status(201).json(result);
   } catch (e: any) {
-    res.status(400).json({ error: e.message });
+    if (e instanceof RecommendationError) return res.status(e.status).json({ error: e.code, message: e.message });
+    throw e;
   }
 });
 
@@ -122,11 +127,13 @@ recommendationsRouter.post('/:id/apply', requireRole('operator', 'admin'), async
     policySetId: z.string().uuid().optional(),
   });
   const parsed = bodySchema.safeParse(req.body ?? {});
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
 
   try {
-    const result = await applyRecommendation(req.params.id, userId, parsed.data?.policySetId);
+    const result = await applyRecommendation(req.params.id, userId, parsed.data.policySetId);
     res.status(201).json(result);
   } catch (e: any) {
-    res.status(400).json({ error: e.message });
+    if (e instanceof RecommendationError) return res.status(e.status).json({ error: e.code, message: e.message });
+    throw e;
   }
 });

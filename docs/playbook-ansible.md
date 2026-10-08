@@ -153,11 +153,13 @@ The playbook includes comprehensive error handling:
 
 The playbook runs inside the `segmentra-ansible-runner` Docker container:
 
-- **Base Image**: `python:3.12-slim`
+- **Base Image**: `python:3.12-slim` (+ `openssh-client` and `sshpass`)
 - **Ansible Version**: `ansible-core==2.16.4`
+- **Host key checking**: enabled with trust-on-first-use — `ANSIBLE_SSH_ARGS` adds `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/runner/ssh/known_hosts`; `/runner/ssh` is the `segmentra_ansible_ssh` volume, so learned keys survive rebuilds and a changed host key fails the run
 - **Working Directory**: `/runner`
 - **Volume Mounts**: 
-  - Deployment bundles are mounted at `/bundles`
+  - Deployment bundles are mounted at `/bundles` (the same `segmentra_bundles` volume the API writes to with `BUNDLES_DIR=/bundles`)
+  - Container name is fixed to `segmentra-ansible-runner` (`container_name` in docker-compose.yml) to match `ANSIBLE_RUNNER_CONTAINER`
   - Playbooks are copied to `/runner/playbooks`
 
 ## Integration with Segmentra

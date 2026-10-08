@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-import { api } from '../lib/api';
+import { api, errorMessage, isApiError } from '../lib/api';
+import { useAuth, hasRole } from '../lib/auth-context';
 
 export function PolicySetsPage() {
   const navigate = useNavigate();
+  const { roles } = useAuth();
+  const canManage = hasRole(roles, 'operator', 'admin');
   const [policySets, setPolicySets] = useState<any[]>([]);
   const [tags, setTags] = useState<any[]>([]);
   const [vlans, setVlans] = useState<any[]>([]);
@@ -42,9 +45,8 @@ export function PolicySetsPage() {
         api.policySets(),
         api.tags(),
         api.vlans(),
-        api.hosts()
+        api.allHosts()
       ]);
-      console.log('Policy sets loaded:', psRes.policySets);
       setPolicySets(psRes.policySets || []);
       setTags(tagsRes.tags || []);
       setVlans(vlansRes.vlans || []);
@@ -111,7 +113,7 @@ export function PolicySetsPage() {
       resetForm();
       loadData();
     } catch (e: any) {
-      setError(String(e.message || e));
+      setError(errorMessage(e));
     }
   }
 
@@ -123,28 +125,22 @@ export function PolicySetsPage() {
       });
       navigate(`/policy-version/${v.version.id}`);
     } catch (e: any) {
-      setError(String(e.message || e));
+      setError(errorMessage(e));
     }
   }
 
   async function deletePolicySet(id: string, name: string) {
     if (!confirm(`Delete policy set "${name}"? This can only be done if the policy set has no versions.`)) return;
     try {
-      await api.policySet(id); // verify it exists
-      // Use fetch directly since api.ts may not have a deletePolicySet method
-      const token = localStorage.getItem('segmentra_token');
-      const resp = await fetch(`http://localhost:8080/api/policy-sets/${id}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` },
-      });
-      if (!resp.ok) {
-        const err = await resp.json();
-        throw new Error(err.message || err.error);
-      }
+      await api.deletePolicySet(id);
       setError('');
       loadData();
     } catch (e: any) {
-      setError(String(e.message || e));
+      if (isApiError(e) && e.status === 409) {
+        setError(`Cannot delete "${name}": ${e.message}`);
+      } else {
+        setError(errorMessage(e));
+      }
     }
   }
 
@@ -164,7 +160,9 @@ export function PolicySetsPage() {
     <div className="page">
       <div className="page-header">
         <h2>Policy Sets</h2>
-        <button onClick={() => setShowCreate(true)} className="btn-primary">+ Create Policy Set</button>
+        {canManage && (
+          <button onClick={() => setShowCreate(true)} className="btn-primary">+ Create Policy Set</button>
+        )}
       </div>
 
       {error && <div className="error-banner">{error}</div>}
@@ -173,7 +171,7 @@ export function PolicySetsPage() {
         <div style={{ padding: 20, textAlign: 'center', color: '#666' }}>Loading policy sets...</div>
       )}
 
-      {!loading && showCreate && (
+      {!loading && showCreate && canManage && (
         <div className="card">
           <h3>Create Policy Set</h3>
           <div className="form-grid">
@@ -565,15 +563,17 @@ export function PolicySetsPage() {
                   </td>
                   <td>
                     <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                      <button
-                        onClick={() => createVersion(ps.id)}
-                        className="btn-small btn-primary"
-                        title="Click to create a new policy version where you can add firewall rules"
-                      >
-                        New Version
-                      </button>
+                      {canManage && (
+                        <button
+                          onClick={() => createVersion(ps.id)}
+                          className="btn-small btn-primary"
+                          title="Click to create a new policy version where you can add firewall rules"
+                        >
+                          New Version
+                        </button>
+                      )}
                       <button onClick={() => navigate(`/policy-set/${ps.id}`)} className="btn-small">View</button>
-                      {(ps.version_count === 0 || ps.version_count === '0') && (
+                      {canManage && (ps.version_count === 0 || ps.version_count === '0') && (
                         <button onClick={() => deletePolicySet(ps.id, ps.name)} className="btn-small btn-danger">Delete</button>
                       )}
                     </div>

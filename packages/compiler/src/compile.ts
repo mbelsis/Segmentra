@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { isIP } from 'node:net';
 
 export type FirewallBackend = 'nftables' | 'iptables';
 
@@ -28,235 +29,620 @@ export type Host = {
   mgmtIp: string | null;
   firewallBackend: FirewallBackend;
   interfaces: Array<{ name: string; role: string; enabled: boolean }>;
+  /** SSH port used for the management baseline rule. Defaults to 22. */
+  sshPort?: number | null;
 };
 
 export type CompileInput = {
   host: Host;
   policyInterfaceScope: InterfaceScope;
   rules: PolicyRule[];
-  sets: Record<string, string[]>; // setName -> IP/CIDR elements
+  sets: Record<string, string[]>; // setName -> IP/CIDR elements (IPv4 and/or IPv6)
   baseline: {
     mgmtSshCidrs: string[];
   };
   logOnlyMode?: boolean; // When true, log all traffic but don't block
+  /**
+   * Verdict for inbound traffic no rule matched (default 'DROP'). With 'ACCEPT'
+   * the nft input chain policy is accept and the iptables SEGMENTRA-IN chain
+   * ends with RETURN (the rest of INPUT and its policy decide).
+   */
+  defaultInputAction?: 'DROP' | 'ACCEPT';
 };
 
 export type CompileOutput = {
   backend: FirewallBackend;
+  /**
+   * nft -f script (nftables, replaces only table inet segmentra) or an
+   * `iptables-restore --noflush` fragment declaring only the SEGMENTRA-IN /
+   * SEGMENTRA-OUT chains (iptables, IPv4 only). The executor adds the
+   * INPUT/OUTPUT jumps.
+   */
   text: string;
+  /** sha256 of `text`. */
   sha256: string;
+  /**
+   * iptables backend only: `ip6tables-restore --noflush` fragment for IPv6 traffic.
+   * Undefined for the nftables backend (the inet table covers both families).
+   */
+  ip6tablesRules?: string;
 };
+
+/** Thrown when policy input is invalid or cannot be compiled safely. */
+export class CompileError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CompileError';
+  }
+}
+
+/** Name of the nftables table Segmentra owns. Nothing outside this table is touched. */
+export const NFT_TABLE_NAME = 'segmentra';
 
 function sha256(text: string): string {
   return crypto.createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
-/** Sanitize a CIDR/IP value to prevent injection into nftables/iptables rules */
+// ---------------------------------------------------------------------------
+// Validation / sanitization helpers
+// ---------------------------------------------------------------------------
+
+type Family = 4 | 6;
+type Addr = { text: string; family: Family };
+
+function ipv4ToInt(a: string): number {
+  return a.split('.').reduce((acc, o) => ((acc << 8) | Number(o)) >>> 0, 0) >>> 0;
+}
+function intToIpv4(n: number): string {
+  return [24, 16, 8, 0].map((s) => (n >>> s) & 255).join('.');
+}
+
+function ipv6ToBigInt(addr: string): bigint {
+  let s = addr;
+  if (s.includes('.')) {
+    const i = s.lastIndexOf(':');
+    const n = ipv4ToInt(s.slice(i + 1));
+    s = s.slice(0, i + 1) + (n >>> 16).toString(16) + ':' + (n & 0xffff).toString(16);
+  }
+  let groups: string[];
+  if (s.includes('::')) {
+    const [head, tail] = s.split('::');
+    const h = head ? head.split(':') : [];
+    const t = tail ? tail.split(':') : [];
+    groups = [...h, ...Array(8 - h.length - t.length).fill('0'), ...t];
+  } else {
+    groups = s.split(':');
+  }
+  return groups.reduce((acc, g) => (acc << 16n) | BigInt(parseInt(g, 16)), 0n);
+}
+
+function bigIntToIpv6(n: bigint): string {
+  const groups: number[] = [];
+  for (let i = 7; i >= 0; i--) groups.push(Number((n >> BigInt(i * 16)) & 0xffffn));
+  // Find the longest run of zero groups (length >= 2) to compress
+  let bestStart = -1;
+  let bestLen = 0;
+  for (let i = 0; i < 8; ) {
+    if (groups[i] !== 0) { i++; continue; }
+    let j = i;
+    while (j < 8 && groups[j] === 0) j++;
+    if (j - i > bestLen && j - i >= 2) { bestStart = i; bestLen = j - i; }
+    i = j;
+  }
+  const hex = groups.map((g) => g.toString(16));
+  if (bestStart === -1) return hex.join(':');
+  const left = hex.slice(0, bestStart).join(':');
+  const right = hex.slice(bestStart + bestLen).join(':');
+  return `${left}::${right}`;
+}
+
+/**
+ * Strictly parse an IPv4/IPv6 address with optional prefix length.
+ * Host bits are masked off so nft interval sets accept the element.
+ */
+function parseAddr(raw: string, what: string): Addr {
+  const value = String(raw ?? '').trim();
+  const m = /^([0-9A-Fa-f.:]+)(?:\/(\d{1,3}))?$/.exec(value);
+  if (!m) throw new CompileError(`Invalid ${what}: "${value}"`);
+  const ip = m[1];
+  const family = isIP(ip);
+  if (family !== 4 && family !== 6) throw new CompileError(`Invalid ${what}: "${value}"`);
+  const max = family === 4 ? 32 : 128;
+  if (m[2] === undefined) {
+    return { family, text: family === 4 ? ip : bigIntToIpv6(ipv6ToBigInt(ip)) };
+  }
+  const prefix = Number(m[2]);
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix > max) {
+    throw new CompileError(`Invalid prefix length in ${what}: "${value}"`);
+  }
+  if (family === 4) {
+    const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+    return { family, text: `${intToIpv4((ipv4ToInt(ip) & mask) >>> 0)}/${prefix}` };
+  }
+  const mask = prefix === 0 ? 0n : ((1n << 128n) - 1n) ^ ((1n << BigInt(128 - prefix)) - 1n);
+  return { family, text: `${bigIntToIpv6(ipv6ToBigInt(ip) & mask)}/${prefix}` };
+}
+
+/**
+ * Sanitize/validate a single CIDR/IP value. Never returns an empty string and
+ * never allows separators; throws CompileError on anything that is not a
+ * strict IPv4/IPv6 address with optional prefix.
+ */
 function sanitizeCidr(value: string): string {
-  // Only allow: digits, dots, colons (IPv6), slashes (CIDR), and commas
-  return value.replace(/[^0-9a-fA-F.:\/,]/g, '');
+  return parseAddr(value, 'address').text;
+}
+
+/**
+ * Parse a CIDR-type rule source. Accepts a single address, a comma-separated
+ * list of addresses, or the keyword "any" (returns null = no address match).
+ */
+function parseSourceList(value: string): Addr[] | null {
+  const v = String(value ?? '').trim();
+  if (/^(any|\*)$/i.test(v)) return null;
+  const parts = v.split(',').map((p) => p.trim()).filter((p) => p.length > 0);
+  if (parts.length === 0) throw new CompileError(`Invalid source address: "${v}"`);
+  return dedupeAddrs(parts.map((p) => parseAddr(p, 'source address')));
+}
+
+function dedupeAddrs(addrs: Addr[]): Addr[] {
+  const seen = new Set<string>();
+  return addrs.filter((a) => (seen.has(a.text) ? false : (seen.add(a.text), true)));
+}
+
+const PORTS_RE = /^\d{1,5}(-\d{1,5})?(\s*,\s*\d{1,5}(-\d{1,5})?)*$/;
+
+/** Validate a port spec and return merged, sorted [low, high] ranges. */
+function parsePorts(spec: string): Array<[number, number]> {
+  const s = String(spec).trim();
+  if (!PORTS_RE.test(s)) throw new CompileError(`Invalid port specification: "${s}"`);
+  const ranges: Array<[number, number]> = s.split(',').map((p) => {
+    const [a, b] = p.trim().split('-');
+    const lo = Number(a);
+    const hi = b === undefined ? lo : Number(b);
+    if (lo < 1 || lo > 65535 || hi < 1 || hi > 65535) {
+      throw new CompileError(`Port out of range (1-65535): "${p.trim()}"`);
+    }
+    if (lo > hi) throw new CompileError(`Invalid port range (low > high): "${p.trim()}"`);
+    return [lo, hi];
+  });
+  ranges.sort((x, y) => x[0] - y[0]);
+  const merged: Array<[number, number]> = [];
+  for (const r of ranges) {
+    const last = merged[merged.length - 1];
+    if (last && r[0] <= last[1] + 1) last[1] = Math.max(last[1], r[1]);
+    else merged.push([r[0], r[1]]);
+  }
+  return merged;
+}
+
+const IFACE_RE = /^[A-Za-z0-9_.:@-]{1,15}$/;
+function validateInterfaceName(name: string): string {
+  if (!IFACE_RE.test(String(name))) throw new CompileError(`Invalid interface name: "${name}"`);
+  return name;
+}
+
+const SET_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+function validateSetName(name: string): string {
+  if (!SET_NAME_RE.test(String(name))) throw new CompileError(`Invalid set name: "${name}"`);
+  return name;
+}
+
+/** Strip quotes, backslashes, newlines and control chars; limit length. */
+function sanitizeText(value: string | null | undefined, maxLen: number): string {
+  return String(value ?? '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f"'`\\]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLen)
+    .trim();
+}
+
+function validateSshPort(port: number | null | undefined): number {
+  if (port === undefined || port === null) return 22;
+  const p = Number(port);
+  if (!Number.isInteger(p) || p < 1 || p > 65535) throw new CompileError(`Invalid SSH port: "${port}"`);
+  return p;
 }
 
 function resolveInterfaceNames(host: Host, scope: InterfaceScope): string[] {
+  let names: string[];
   if (scope.type === 'ALL_INTERFACES') return [];
-  if (scope.type === 'INTERFACE_NAME') return scope.names;
-  const names = host.interfaces
-    .filter((i) => i.enabled && scope.roles.includes(i.role))
-    .map((i) => i.name);
-  return names;
+  if (scope.type === 'INTERFACE_NAME') names = scope.names;
+  else {
+    names = host.interfaces
+      .filter((i) => i.enabled && scope.roles.includes(i.role))
+      .map((i) => i.name);
+  }
+  return Array.from(new Set(names.map(validateInterfaceName)));
 }
 
-export function compileHostPolicy(input: CompileInput): CompileOutput {
-  const backend = input.host.firewallBackend;
-  const lines: string[] = [];
-  const logOnly = input.logOnlyMode ?? false;
+// ---------------------------------------------------------------------------
+// Shared pre-processing
+// ---------------------------------------------------------------------------
 
-  if (backend === 'nftables') {
-    lines.push('flush ruleset');
-    lines.push('table inet segmentra {');
-    // In log-only mode, change default policy to accept so nothing is blocked
-    const inputPolicy = logOnly ? 'accept' : 'drop';
-    lines.push(`  chain input { type filter hook input priority 0; policy ${inputPolicy}; }`);
-    lines.push('  chain output { type filter hook output priority 0; policy accept; }');
+type PreparedSets = Record<string, { v4: string[]; v6: string[] }>;
 
-    // address sets (resolved by API) — skip empty sets
-    for (const [name, elements] of Object.entries(input.sets)) {
-      if (elements.length === 0) continue; // Skip empty sets to avoid invalid nftables syntax
-      const elems = elements.map(e => sanitizeCidr(e)).join(', ');
-      lines.push(`  set ${name} { type ipv4_addr; elements = { ${elems} } }`);
+function prepareSets(sets: Record<string, string[]>): PreparedSets {
+  const out: PreparedSets = {};
+  for (const [name, elements] of Object.entries(sets ?? {})) {
+    validateSetName(name);
+    const addrs = dedupeAddrs((elements ?? []).map((e) => parseAddr(e, `element of set ${name}`)));
+    out[name] = {
+      v4: addrs.filter((a) => a.family === 4).map((a) => a.text),
+      v6: addrs.filter((a) => a.family === 6).map((a) => a.text)
+    };
+  }
+  return out;
+}
+
+type MgmtBaseline = { port: number; v4: string[]; v6: string[]; fallbackV4: boolean; fallbackV6: boolean };
+
+function prepareMgmt(input: CompileInput): MgmtBaseline {
+  const port = validateSshPort(input.host.sshPort);
+  const addrs = dedupeAddrs((input.baseline?.mgmtSshCidrs ?? []).map((c) => parseAddr(c, 'management SSH CIDR')));
+  const v4 = addrs.filter((a) => a.family === 4).map((a) => a.text);
+  const v6 = addrs.filter((a) => a.family === 6).map((a) => a.text);
+  let mgmtFamily: number = 0;
+  if (input.host.mgmtIp) {
+    const ip = String(input.host.mgmtIp).replace(/\/\d+$/, '').trim();
+    mgmtFamily = isIP(ip);
+  }
+  // Never lock the host out: if no management CIDRs are configured, allow the
+  // SSH port from anywhere. Also do so for the management IP's address family
+  // if no management CIDR of that family exists.
+  const none = addrs.length === 0;
+  return {
+    port,
+    v4,
+    v6,
+    fallbackV4: none || (mgmtFamily === 4 && v4.length === 0),
+    fallbackV6: none || (mgmtFamily === 6 && v6.length === 0)
+  };
+}
+
+type RuleTarget = {
+  family: Family | null; // null = family-agnostic (source "any")
+  /** nft address match without direction keyword, e.g. "@set" or "10.0.0.0/8" or "{ a, b }" */
+  nftAddr: string | null;
+  /** iptables address list for this target (empty array = no address match) */
+  iptAddrs: string[];
+};
+
+/**
+ * Resolve a rule's remote side into per-family targets. Empty sets produce no
+ * target (a rule matching an empty set matches nothing, so it is skipped).
+ */
+function resolveTargets(r: PolicyRule, sets: PreparedSets): RuleTarget[] {
+  if (r.remote.kind === 'SET') {
+    const name = validateSetName(r.remote.setName);
+    const s = sets[name] ?? { v4: [], v6: [] };
+    const targets: RuleTarget[] = [];
+    if (s.v4.length > 0) targets.push({ family: 4, nftAddr: `@${name}`, iptAddrs: s.v4 });
+    if (s.v6.length > 0) targets.push({ family: 6, nftAddr: `@${name}_v6`, iptAddrs: s.v6 });
+    return targets;
+  }
+  const list = parseSourceList(r.sourceValue);
+  if (list === null) return [{ family: null, nftAddr: null, iptAddrs: [] }];
+  const targets: RuleTarget[] = [];
+  for (const fam of [4, 6] as Family[]) {
+    const items = list.filter((a) => a.family === fam).map((a) => a.text);
+    if (items.length === 0) continue;
+    targets.push({
+      family: fam,
+      nftAddr: items.length === 1 ? items[0] : `{ ${items.join(', ')} }`,
+      iptAddrs: items
+    });
+  }
+  return targets;
+}
+
+function ruleScope(r: PolicyRule, input: CompileInput): InterfaceScope {
+  return r.usePolicyInterfaceScope ? input.policyInterfaceScope : r.interfaceScope ?? input.policyInterfaceScope;
+}
+
+function rulePorts(r: PolicyRule): Array<[number, number]> | null {
+  const raw = r.ports == null ? '' : String(r.ports).trim();
+  if (raw === '') return null;
+  if (r.protocol !== 'tcp' && r.protocol !== 'udp') {
+    throw new CompileError(
+      `Rule #${r.orderIndex}: ports "${raw}" require protocol tcp or udp (got "${r.protocol}"); ` +
+        'refusing to silently widen the rule to all ports'
+    );
+  }
+  return parsePorts(raw);
+}
+
+function validateRuleEnums(r: PolicyRule): void {
+  if (!['IN', 'OUT', 'BOTH'].includes(r.direction)) throw new CompileError(`Rule #${r.orderIndex}: invalid direction "${r.direction}"`);
+  if (!['ALLOW', 'DENY'].includes(r.action)) throw new CompileError(`Rule #${r.orderIndex}: invalid action "${r.action}"`);
+  if (!['tcp', 'udp', 'icmp', 'any'].includes(r.protocol)) throw new CompileError(`Rule #${r.orderIndex}: invalid protocol "${r.protocol}"`);
+}
+
+// ---------------------------------------------------------------------------
+// nftables
+// ---------------------------------------------------------------------------
+
+function compileNft(input: CompileInput, logOnly: boolean): string {
+  const sets = prepareSets(input.sets);
+  const mgmt = prepareMgmt(input);
+  const T = NFT_TABLE_NAME;
+  const inputRules: string[] = [];
+  const outputRules: string[] = [];
+  const logStmt = (label: string) => (logOnly ? `log prefix "${sanitizeText(`FW-AUDIT: ${label}`, 120)}: " ` : '');
+
+  // --- Baseline ---
+  inputRules.push(`iif "lo" ${logStmt('ALLOW: loopback')}accept`);
+  inputRules.push(`ct state established,related ${logStmt('ALLOW: established')}accept`);
+  // IPv6 neighbor discovery must never be dropped or IPv6 connectivity breaks.
+  inputRules.push(
+    `icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert } accept comment "ipv6_nd"`
+  );
+  for (const cidr of mgmt.v4) {
+    inputRules.push(`ip saddr ${cidr} tcp dport ${mgmt.port} ${logStmt('ALLOW: mgmt_ssh')}accept comment "mgmt_ssh"`);
+  }
+  for (const cidr of mgmt.v6) {
+    inputRules.push(`ip6 saddr ${cidr} tcp dport ${mgmt.port} ${logStmt('ALLOW: mgmt_ssh')}accept comment "mgmt_ssh"`);
+  }
+  if (mgmt.fallbackV4 && mgmt.fallbackV6) {
+    inputRules.push(`tcp dport ${mgmt.port} ${logStmt('ALLOW: mgmt_ssh_fallback')}accept comment "mgmt_ssh_fallback"`);
+  } else if (mgmt.fallbackV4) {
+    inputRules.push(`meta nfproto ipv4 tcp dport ${mgmt.port} ${logStmt('ALLOW: mgmt_ssh_fallback')}accept comment "mgmt_ssh_fallback"`);
+  } else if (mgmt.fallbackV6) {
+    inputRules.push(`meta nfproto ipv6 tcp dport ${mgmt.port} ${logStmt('ALLOW: mgmt_ssh_fallback')}accept comment "mgmt_ssh_fallback"`);
+  }
+
+  // --- Policy rules, in user-defined order_index order (no reordering) ---
+  const rulesSorted = [...input.rules].sort((a, b) => a.orderIndex - b.orderIndex);
+  for (const r of rulesSorted) {
+    validateRuleEnums(r);
+    const scope = ruleScope(r, input);
+    const ifs = resolveInterfaceNames(input.host, scope);
+    const ports = rulePorts(r);
+    const action = r.action === 'ALLOW' ? 'accept' : 'drop';
+    const commentText = sanitizeText(r.comment, 120);
+    const comment = commentText ? `comment "${commentText}"` : '';
+    const targets = resolveTargets(r, sets);
+    if (targets.length === 0) {
+      // Rule references an empty (or unknown) address set: it can never match,
+      // so it is omitted rather than referencing an undeclared set.
+      continue;
     }
-    lines.push('}');
-    // Baseline
-    if (logOnly) {
-      // In log-only mode, log baseline traffic too
-      lines.push('add rule inet segmentra input iif lo log prefix "FW-AUDIT: ALLOW: loopback: " accept');
-      lines.push('add rule inet segmentra input ct state established,related log prefix "FW-AUDIT: ALLOW: established: " accept');
-      for (const cidr of input.baseline.mgmtSshCidrs) {
-        lines.push(`add rule inet segmentra input ip saddr ${cidr} tcp dport 22 log prefix "FW-AUDIT: ALLOW: mgmt_ssh: " accept comment \"mgmt_ssh\"`);
+
+    for (const t of targets) {
+      let protoExpr = '';
+      if (ports) {
+        const elems = ports.map(([lo, hi]) => (lo === hi ? String(lo) : `${lo}-${hi}`)).join(', ');
+        protoExpr = `${r.protocol} dport { ${elems} }`;
+      } else if (r.protocol === 'tcp' || r.protocol === 'udp') {
+        protoExpr = `meta l4proto ${r.protocol}`;
+      } else if (r.protocol === 'icmp') {
+        if (t.family === 6) protoExpr = 'meta l4proto ipv6-icmp';
+        else if (t.family === 4) protoExpr = 'meta l4proto icmp';
+        else protoExpr = 'meta l4proto { icmp, ipv6-icmp }';
       }
-    } else {
-      lines.push('add rule inet segmentra input iif lo accept');
-      lines.push('add rule inet segmentra input ct state established,related accept');
-      for (const cidr of input.baseline.mgmtSshCidrs) {
-        lines.push(`add rule inet segmentra input ip saddr ${cidr} tcp dport 22 accept comment \"mgmt_ssh\"`);
-      }
-    }
-
-    // Policy rules — emitted in user-defined order_index order (no reordering)
-    const policyScopeNames = resolveInterfaceNames(input.host, input.policyInterfaceScope);
-    const rulesSorted = [...input.rules].sort((a, b) => a.orderIndex - b.orderIndex);
-    for (const r of rulesSorted) {
-      const scope = r.usePolicyInterfaceScope ? input.policyInterfaceScope : r.interfaceScope ?? input.policyInterfaceScope;
-      const iifs = resolveInterfaceNames(input.host, scope);
-      const action = r.action === 'ALLOW' ? 'accept' : 'drop';
-
-      const proto = r.protocol === 'any' ? '' : r.protocol;
-      const portExpr =
-        r.protocol === 'tcp' || r.protocol === 'udp'
-          ? r.ports
-            ? `${r.protocol} dport { ${r.ports} }`
-            : ''
-          : '';
-
-      const iifExpr =
-        scope.type === 'ALL_INTERFACES' || iifs.length === 0
-          ? ''
-          : `iifname { ${iifs.map((n) => `"${n}"`).join(', ')} }`;
-      const oifExpr =
-        scope.type === 'ALL_INTERFACES' || iifs.length === 0
-          ? ''
-          : `oifname { ${iifs.map((n) => `"${n}"`).join(', ')} }`;
-
-      const remoteIn =
-        r.remote.kind === 'SET' ? `ip saddr @${r.remote.setName}` : `ip saddr ${sanitizeCidr(r.sourceValue)}`;
-      const remoteOut =
-        r.remote.kind === 'SET' ? `ip daddr @${r.remote.setName}` : `ip daddr ${sanitizeCidr(r.sourceValue)}`;
-      const comment = r.comment ? ` comment \"${r.comment.replace(/\"/g, '')}\"` : '';
 
       const emit = (chain: 'input' | 'output') => {
-        const ifExpr = chain === 'input' ? iifExpr : oifExpr;
-        const remoteExpr = chain === 'input' ? remoteIn : remoteOut;
-        
-        if (logOnly) {
-          // In log-only mode, log the traffic then accept it
-          const logPrefix = `log prefix "FW-AUDIT: ${r.action} ${r.comment ? r.comment.replace(/\"/g, '') : 'rule'}: "`;
-          const logParts = ['add rule inet segmentra', chain, ifExpr, remoteExpr, proto, portExpr, logPrefix, 'accept', comment].filter(Boolean);
-          lines.push(logParts.join(' '));
-        } else {
-          // Normal mode - apply the action
-          const parts = ['add rule inet segmentra', chain, ifExpr, remoteExpr, proto, portExpr, action, comment].filter(Boolean);
-          lines.push(parts.join(' '));
-        }
+        const ifExpr = ifs.length === 0 ? '' : `${chain === 'input' ? 'iifname' : 'oifname'} { ${ifs.map((n) => `"${n}"`).join(', ')} }`;
+        const dir = chain === 'input' ? 'saddr' : 'daddr';
+        const addrExpr = t.nftAddr === null ? '' : `${t.family === 6 ? 'ip6' : 'ip'} ${dir} ${t.nftAddr}`;
+        const tail = logOnly
+          ? [`log prefix "${sanitizeText(`FW-AUDIT: ${r.action} ${commentText || 'rule'}`, 120)}: "`, 'accept']
+          : [action];
+        const line = [ifExpr, addrExpr, protoExpr, ...tail, comment].filter(Boolean).join(' ');
+        (chain === 'input' ? inputRules : outputRules).push(line);
       };
-
-      if (r.direction === 'IN') emit('input');
-      else if (r.direction === 'OUT') emit('output');
-      else {
-        emit('input');
-        emit('output');
-      }
+      if (r.direction === 'IN' || r.direction === 'BOTH') emit('input');
+      if (r.direction === 'OUT' || r.direction === 'BOTH') emit('output');
     }
-    
-    // In log-only mode, add catch-all rules to log all remaining traffic
-    if (logOnly) {
-      lines.push('add rule inet segmentra input log prefix "FW-AUDIT: ALLOW: catch-all: " accept');
-      lines.push('add rule inet segmentra output log prefix "FW-AUDIT: ALLOW: catch-all: " accept');
-    }
-  } else {
-    // iptables-restore format
-    lines.push('*filter');
-    // In log-only mode, change default policy to ACCEPT
-    const inputPolicy = logOnly ? 'ACCEPT' : 'DROP';
-    lines.push(`:INPUT ${inputPolicy} [0:0]`);
-    lines.push(`:FORWARD ${inputPolicy} [0:0]`);
-    lines.push(':OUTPUT ACCEPT [0:0]');
-    if (logOnly) {
-      // In log-only mode, log baseline traffic too
-      lines.push('-A INPUT -i lo -j LOG --log-prefix "FW-AUDIT: ALLOW: loopback: "');
-      lines.push('-A INPUT -i lo -j ACCEPT');
-      lines.push('-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j LOG --log-prefix "FW-AUDIT: ALLOW: established: "');
-      lines.push('-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT');
-      for (const cidr of input.baseline.mgmtSshCidrs) {
-        lines.push(`-A INPUT -p tcp -s ${cidr} --dport 22 -j LOG --log-prefix "FW-AUDIT: ALLOW: mgmt_ssh: "`);
-        lines.push(`-A INPUT -p tcp -s ${cidr} --dport 22 -j ACCEPT`);
-      }
-    } else {
-      lines.push('-A INPUT -i lo -j ACCEPT');
-      lines.push('-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT');
-      for (const cidr of input.baseline.mgmtSshCidrs) {
-        lines.push(`-A INPUT -p tcp -s ${cidr} --dport 22 -j ACCEPT`);
-      }
-    }
+  }
 
-    // iptables rules — emitted in user-defined order_index order (no reordering)
-    const rulesSorted = [...input.rules].sort((a, b) => a.orderIndex - b.orderIndex);
-    for (const r of rulesSorted) {
-      const scope = r.usePolicyInterfaceScope ? input.policyInterfaceScope : r.interfaceScope ?? input.policyInterfaceScope;
-      const ifNames = resolveInterfaceNames(input.host, scope);
-      const action = r.action === 'ALLOW' ? 'ACCEPT' : 'DROP';
-      const proto = r.protocol === 'any' ? '' : `-p ${r.protocol}`;
-      // Handle ports for iptables:
-      // - Comma-separated (80,443): -m multiport --dports 80,443
-      // - Ranges (8000-9000): --dport 8000:9000 (iptables uses colon for ranges)
-      // - Single port (22): --dport 22
-      // - Comma + range mix (80,443,8000-9000): -m multiport --dports 80,443,8000:9000
-      let ports = '';
-      if ((r.protocol === 'tcp' || r.protocol === 'udp') && r.ports) {
-        // Normalize dash ranges to colon ranges for iptables
-        const normalizedPorts = r.ports.replace(/(\d+)-(\d+)/g, '$1:$2');
-        if (normalizedPorts.includes(',')) {
-          ports = `-m multiport --dports ${normalizedPorts}`;
-        } else {
-          ports = `--dport ${normalizedPorts}`;
-        }
-      }
-      // Emit rules for ALL matching interfaces (not just the first)
-      const ifaceList = scope.type === 'ALL_INTERFACES' || ifNames.length === 0 ? [''] : ifNames;
+  // In log-only mode, add catch-all rules to log all remaining traffic
+  if (logOnly) {
+    inputRules.push('log prefix "FW-AUDIT: ALLOW: catch-all: " accept');
+    outputRules.push('log prefix "FW-AUDIT: ALLOW: catch-all: " accept');
+  }
 
-      const elements =
-        r.remote.kind === 'SET' ? input.sets[r.remote.setName] ?? [] : [r.sourceValue];
-      const emit = (chain: 'INPUT' | 'OUTPUT') => {
+  const lines: string[] = [];
+  lines.push('#!/usr/sbin/nft -f');
+  lines.push(`# Managed by Segmentra. Only table inet ${T} is replaced; other tables`);
+  lines.push('# (Docker, Kubernetes, fail2ban, ...) are left untouched.');
+  lines.push('# The add+delete+define sequence is applied atomically by nft -f.');
+  lines.push(`add table inet ${T}`);
+  lines.push(`delete table inet ${T}`);
+  lines.push(`table inet ${T} {`);
+  // Address sets. Empty sets are not declared; rules referencing them are skipped.
+  for (const [name, s] of Object.entries(sets)) {
+    if (s.v4.length > 0) {
+      lines.push(`  set ${name} {`, '    type ipv4_addr', '    flags interval', '    auto-merge', `    elements = { ${s.v4.join(', ')} }`, '  }');
+    }
+    if (s.v6.length > 0) {
+      lines.push(`  set ${name}_v6 {`, '    type ipv6_addr', '    flags interval', '    auto-merge', `    elements = { ${s.v6.join(', ')} }`, '  }');
+    }
+  }
+  const inputPolicy = logOnly || (input.defaultInputAction ?? 'DROP') === 'ACCEPT' ? 'accept' : 'drop';
+  lines.push('  chain input {', `    type filter hook input priority 0; policy ${inputPolicy};`);
+  for (const r of inputRules) lines.push(`    ${r}`);
+  lines.push('  }');
+  lines.push('  chain output {', '    type filter hook output priority 0; policy accept;');
+  for (const r of outputRules) lines.push(`    ${r}`);
+  lines.push('  }');
+  lines.push('}');
+  return lines.join('\n') + '\n';
+}
+
+// ---------------------------------------------------------------------------
+// iptables / ip6tables
+// ---------------------------------------------------------------------------
+
+/** iptables --log-prefix is limited to 29 characters. */
+function iptLogPrefix(label: string): string {
+  const body = sanitizeText(`FW-AUDIT: ${label}`, 27);
+  return `"${body}: "`;
+}
+
+/** Split port ranges into multiport-compatible chunks (max 15 slots, a range uses 2). */
+function iptPortArgs(ports: Array<[number, number]> | null): string[] {
+  if (!ports) return [''];
+  if (ports.length === 1) {
+    const [lo, hi] = ports[0];
+    return [`--dport ${lo === hi ? lo : `${lo}:${hi}`}`];
+  }
+  const chunks: string[] = [];
+  let cur: string[] = [];
+  let slots = 0;
+  for (const [lo, hi] of ports) {
+    const cost = lo === hi ? 1 : 2;
+    if (slots + cost > 15) {
+      chunks.push(cur.join(','));
+      cur = [];
+      slots = 0;
+    }
+    cur.push(lo === hi ? String(lo) : `${lo}:${hi}`);
+    slots += cost;
+  }
+  if (cur.length) chunks.push(cur.join(','));
+  return chunks.map((c) => `-m multiport --dports ${c}`);
+}
+
+/** User chains Segmentra owns in the iptables/ip6tables filter table. */
+export const IPT_INPUT_CHAIN = 'SEGMENTRA-IN';
+export const IPT_OUTPUT_CHAIN = 'SEGMENTRA-OUT';
+/** Prefix of the `-m comment` marker carried by every rule Segmentra emits. */
+export const IPT_COMMENT_PREFIX = 'segmentra';
+/** Header line identifying the chain-scoped iptables fragment format. */
+export const IPT_FORMAT_MARKER = '# segmentra-format: iptables-chains-v2';
+
+/** `-m comment --comment "segmentra:<label>"` (label sanitized, comment max 256 chars). */
+function iptComment(label: string): string {
+  const body = sanitizeText(`${IPT_COMMENT_PREFIX}:${label}`, 200);
+  return `-m comment --comment "${body}"`;
+}
+
+/**
+ * iptables/ip6tables output is an `iptables-restore --noflush` fragment that
+ * declares ONLY Segmentra's own chains (SEGMENTRA-IN / SEGMENTRA-OUT). With
+ * --noflush, declaring a user chain creates it or flushes just that chain;
+ * every other chain (DOCKER*, KUBE-*, f2b-*, ...) and the built-in chain
+ * policies are left untouched. The executor inserts the INPUT/OUTPUT jumps
+ * (idempotently) in the same restore transaction.
+ */
+function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Family): string {
+  const sets = prepareSets(input.sets);
+  const mgmt = prepareMgmt(input);
+  const IN = IPT_INPUT_CHAIN;
+  const OUT = IPT_OUTPUT_CHAIN;
+  const lines: string[] = [];
+  const push = (s: string) => lines.push(s.replace(/\s+/g, ' ').trim());
+  const icmpProto = fam === 6 ? 'ipv6-icmp' : 'icmp';
+  const defaultAccept = (input.defaultInputAction ?? 'DROP') === 'ACCEPT';
+
+  lines.push(IPT_FORMAT_MARKER);
+  lines.push(`# Managed by Segmentra (${fam === 6 ? 'ip6tables' : 'iptables'}). Apply with ${fam === 6 ? 'ip6tables' : 'iptables'}-restore --noflush.`);
+  lines.push(`# Only chains ${IN} and ${OUT} are replaced; other chains and built-in policies are untouched.`);
+  lines.push('*filter');
+  lines.push(`:${IN} - [0:0]`);
+  lines.push(`:${OUT} - [0:0]`);
+
+  // Baseline traffic is always accepted (also in log-only mode, where it is logged first).
+  const baselineAccept = (match: string, label: string) => {
+    if (logOnly) push(`-A ${IN} ${match} ${iptComment(label)} -j LOG --log-prefix ${iptLogPrefix(`ALLOW: ${label}`)}`);
+    push(`-A ${IN} ${match} ${iptComment(label)} -j ACCEPT`);
+  };
+
+  baselineAccept('-i lo', 'loopback');
+  baselineAccept('-m conntrack --ctstate ESTABLISHED,RELATED', 'established');
+  if (fam === 6) {
+    // IPv6 neighbor discovery must never be dropped or IPv6 connectivity breaks.
+    for (const t of ['neighbour-solicitation', 'neighbour-advertisement', 'router-solicitation', 'router-advertisement']) {
+      push(`-A ${IN} -p ipv6-icmp -m icmp6 --icmpv6-type ${t} ${iptComment('ipv6_nd')} -j ACCEPT`);
+    }
+  }
+  for (const cidr of fam === 4 ? mgmt.v4 : mgmt.v6) {
+    baselineAccept(`-p tcp -s ${cidr} --dport ${mgmt.port}`, 'mgmt_ssh');
+  }
+  if (fam === 4 ? mgmt.fallbackV4 : mgmt.fallbackV6) {
+    baselineAccept(`-p tcp --dport ${mgmt.port}`, 'mgmt_ssh_fallback');
+  }
+
+  const rulesSorted = [...input.rules].sort((a, b) => a.orderIndex - b.orderIndex);
+  for (const r of rulesSorted) {
+    validateRuleEnums(r);
+    const scope = ruleScope(r, input);
+    const ifNames = resolveInterfaceNames(input.host, scope);
+    const ports = rulePorts(r);
+    const action = r.action === 'ALLOW' ? 'ACCEPT' : 'DROP';
+    const proto = r.protocol === 'any' ? '' : `-p ${r.protocol === 'icmp' ? icmpProto : r.protocol}`;
+    const portArgs = iptPortArgs(ports);
+    const commentText = sanitizeText(r.comment, 120);
+    const comment = iptComment(`rule${r.orderIndex}${commentText ? ` ${commentText}` : ''}`);
+    const targets = resolveTargets(r, sets).filter((t) => t.family === null || t.family === fam);
+    // Empty sets / sources of the other family produce no rules here.
+    const ifaceList = ifNames.length === 0 ? [''] : ifNames;
+
+    const emit = (chain: 'IN' | 'OUT') => {
+      const chainName = chain === 'IN' ? IN : OUT;
+      for (const t of targets) {
+        const addrs = t.iptAddrs.length === 0 ? [''] : t.iptAddrs;
         for (const iface of ifaceList) {
-          const ifaceFlag = iface ? (chain === 'INPUT' ? `-i ${iface}` : `-o ${iface}`) : '';
-          for (const elem of elements) {
-            const remote = chain === 'INPUT' ? `-s ${sanitizeCidr(elem)}` : `-d ${sanitizeCidr(elem)}`;
-
-            if (logOnly) {
-              const logPrefix = `-j LOG --log-prefix "FW-AUDIT: ${r.action} ${r.comment ? r.comment.replace(/"/g, '') : 'rule'}: "`;
-              const logLine = `-A ${chain} ${ifaceFlag} ${proto} ${remote} ${ports} ${logPrefix}`.replace(/\s+/g, ' ').trim();
-              lines.push(logLine);
-              const acceptLine = `-A ${chain} ${ifaceFlag} ${proto} ${remote} ${ports} -j ACCEPT`.replace(/\s+/g, ' ').trim();
-              lines.push(acceptLine);
-            } else {
-              lines.push(
-                `-A ${chain} ${ifaceFlag} ${proto} ${remote} ${ports} -j ${action}`.replace(/\s+/g, ' ').trim()
-              );
+          const ifaceFlag = iface ? (chain === 'IN' ? `-i ${iface}` : `-o ${iface}`) : '';
+          for (const addr of addrs) {
+            const remote = addr ? (chain === 'IN' ? `-s ${addr}` : `-d ${addr}`) : '';
+            for (const p of portArgs) {
+              const match = `-A ${chainName} ${ifaceFlag} ${proto} ${remote} ${p} ${comment}`;
+              if (logOnly) {
+                // Log-only never changes the verdict: log, then hand the packet
+                // back to the rest of the built-in chain.
+                push(`${match} -j LOG --log-prefix ${iptLogPrefix(`${r.action} ${commentText || 'rule'}`)}`);
+                push(`${match} -j RETURN`);
+              } else {
+                push(`${match} -j ${action}`);
+              }
             }
           }
         }
-      };
-
-      if (r.direction === 'IN') emit('INPUT');
-      else if (r.direction === 'OUT') emit('OUTPUT');
-      else {
-        emit('INPUT');
-        emit('OUTPUT');
       }
-    }
-    
-    // In log-only mode, add catch-all rules to log all remaining traffic
-    if (logOnly) {
-      lines.push('-A INPUT -j LOG --log-prefix "FW-AUDIT: ALLOW: catch-all: "');
-      lines.push('-A INPUT -j ACCEPT');
-      lines.push('-A OUTPUT -j LOG --log-prefix "FW-AUDIT: ALLOW: catch-all: "');
-      lines.push('-A OUTPUT -j ACCEPT');
-    }
-    
-    lines.push('COMMIT');
+    };
+    if (r.direction === 'IN' || r.direction === 'BOTH') emit('IN');
+    if (r.direction === 'OUT' || r.direction === 'BOTH') emit('OUT');
   }
 
-  const text = lines.join('\n') + '\n';
-  return { backend, text, sha256: sha256(text) };
+  if (logOnly) {
+    push(`-A ${IN} ${iptComment('catch_all')} -j LOG --log-prefix "FW-AUDIT: ALLOW: catch-all: "`);
+    push(`-A ${IN} ${iptComment('default')} -j RETURN`);
+    push(`-A ${OUT} ${iptComment('catch_all')} -j LOG --log-prefix "FW-AUDIT: ALLOW: catch-all: "`);
+  } else {
+    push(`-A ${IN} ${iptComment('default')} -j ${defaultAccept ? 'RETURN' : 'DROP'}`);
+  }
+  // Output default is accept: hand back to the rest of OUTPUT.
+  push(`-A ${OUT} ${iptComment('default')} -j RETURN`);
+  lines.push('COMMIT');
+  return lines.join('\n') + '\n';
 }
 
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
 
+/**
+ * Compile a host policy. Throws CompileError on invalid input (bad ports,
+ * addresses, interface/set names, or ports combined with protocol "any"/"icmp").
+ */
+export function compileHostPolicy(input: CompileInput): CompileOutput {
+  const backend = input.host.firewallBackend;
+  const logOnly = input.logOnlyMode ?? false;
+
+  if (backend === 'nftables') {
+    const text = compileNft(input, logOnly);
+    return { backend, text, sha256: sha256(text) };
+  }
+  if (backend !== 'iptables') throw new CompileError(`Unsupported firewall backend: "${backend}"`);
+  const text = compileIptablesFamily(input, logOnly, 4);
+  const ip6tablesRules = compileIptablesFamily(input, logOnly, 6);
+  return { backend, text, sha256: sha256(text), ip6tablesRules };
+}
+
+/** Exposed for callers that need to validate a single address the same way the compiler does. */
+export function normalizeCidr(value: string): string {
+  return sanitizeCidr(value);
+}

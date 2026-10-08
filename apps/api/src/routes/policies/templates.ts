@@ -4,12 +4,22 @@ import { z } from 'zod';
 import { pool } from '../../db/pool.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 import { instantiateTemplate, previewInstantiation } from '../../services/template-engine.js';
+import {
+  interfaceNamesSchema,
+  interfaceRolesSchema,
+  interfaceScopeTypeSchema,
+  portsSchema,
+  protocolSchema,
+  ruleCommentSchema,
+  sourceTypeSchema,
+  validateRuleSemantics
+} from '../../lib/rule-validation.js';
 
 export const templatesRouter = Router();
 templatesRouter.use(requireAuth);
 
 // List all templates
-templatesRouter.get('/', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+templatesRouter.get('/', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const category = req.query.category ? String(req.query.category) : null;
   let query = `SELECT pt.*, t.name as target_tag_name,
     (SELECT COUNT(*) FROM policy_template_rules ptr WHERE ptr.policy_template_id = pt.id) as rule_count,
@@ -29,7 +39,7 @@ templatesRouter.get('/', requireRole('viewer', 'operator', 'admin'), async (req,
 });
 
 // Get categories
-templatesRouter.get('/categories', requireRole('viewer', 'operator', 'admin'), async (_req, res) => {
+templatesRouter.get('/categories', requireRole('viewer', 'operator', 'approver', 'admin'), async (_req, res) => {
   const { rows } = await pool.query(
     `SELECT DISTINCT category FROM policy_templates WHERE category IS NOT NULL ORDER BY category ASC`
   );
@@ -37,7 +47,7 @@ templatesRouter.get('/categories', requireRole('viewer', 'operator', 'admin'), a
 });
 
 // Get single template with rules
-templatesRouter.get('/:id', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+templatesRouter.get('/:id', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const { rows } = await pool.query(
     `SELECT pt.*, t.name as target_tag_name FROM policy_templates pt LEFT JOIN tags t ON t.id = pt.target_tag_id WHERE pt.id = $1`,
     [req.params.id]
@@ -58,9 +68,9 @@ const templateSchema = z.object({
   category: z.string().optional(),
   targetTagId: z.string().uuid().optional().nullable(),
   autoApply: z.boolean().default(false),
-  interfaceScopeType: z.enum(['ALL_INTERFACES', 'INTERFACE_ROLE', 'INTERFACE_NAME']).default('INTERFACE_ROLE'),
-  interfaceScopeRoles: z.array(z.string()).optional(),
-  interfaceScopeNames: z.array(z.string()).optional(),
+  interfaceScopeType: interfaceScopeTypeSchema.default('INTERFACE_ROLE'),
+  interfaceScopeRoles: interfaceRolesSchema.optional(),
+  interfaceScopeNames: interfaceNamesSchema.optional(),
 });
 
 // Create template
@@ -92,7 +102,7 @@ templatesRouter.post('/', requireRole('operator', 'admin'), async (req, res) => 
 // Update template
 templatesRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = templateSchema.partial().safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
   const b = parsed.data;
 
   const { rows } = await pool.query(
@@ -138,22 +148,81 @@ templatesRouter.delete('/:id', requireRole('operator', 'admin'), async (req, res
 
 // Template rules CRUD
 const templateRuleSchema = z.object({
-  orderIndex: z.number().int().default(0),
+  orderIndex: z.number().int().min(0).default(0),
   direction: z.enum(['IN', 'OUT', 'BOTH']).default('IN'),
   action: z.enum(['ALLOW', 'DENY']).default('ALLOW'),
-  protocol: z.enum(['tcp', 'udp', 'icmp', 'any']).default('tcp'),
-  ports: z.string().optional().nullable(),
-  sourceType: z.enum(['CIDR', 'TAG', 'VLAN', 'HOST']).default('CIDR'),
-  sourceValue: z.string().default('0.0.0.0/0'),
+  protocol: protocolSchema.default('tcp'),
+  ports: portsSchema.or(z.literal('')).optional().nullable(),
+  sourceType: sourceTypeSchema.default('CIDR'),
+  sourceValue: z.string().trim().min(1).default('0.0.0.0/0'),
   logMode: z.enum(['NONE', 'LOG', 'LOG_RATE_LIMITED']).default('NONE'),
-  comment: z.string().optional(),
+  comment: ruleCommentSchema.optional().nullable(),
   usePolicyInterfaceScope: z.boolean().default(true),
-  interfaceScopeType: z.string().optional(),
-  interfaceScopeRoles: z.array(z.string()).optional(),
-  interfaceScopeNames: z.array(z.string()).optional(),
+  interfaceScopeType: interfaceScopeTypeSchema.optional().nullable(),
+  interfaceScopeRoles: interfaceRolesSchema.optional().nullable(),
+  interfaceScopeNames: interfaceNamesSchema.optional().nullable(),
 });
 
-templatesRouter.get('/:id/rules', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+// Partial (no defaults) for updates, so omitted fields are not overwritten with defaults
+const templateRuleUpdateSchema = z.object({
+  orderIndex: z.number().int().min(0),
+  direction: z.enum(['IN', 'OUT', 'BOTH']),
+  action: z.enum(['ALLOW', 'DENY']),
+  protocol: protocolSchema,
+  ports: portsSchema.or(z.literal('')).nullable(),
+  sourceType: sourceTypeSchema,
+  sourceValue: z.string().trim().min(1),
+  logMode: z.enum(['NONE', 'LOG', 'LOG_RATE_LIMITED']),
+  comment: ruleCommentSchema.nullable(),
+  usePolicyInterfaceScope: z.boolean(),
+  interfaceScopeType: interfaceScopeTypeSchema.nullable(),
+  interfaceScopeRoles: interfaceRolesSchema.nullable(),
+  interfaceScopeNames: interfaceNamesSchema.nullable(),
+}).partial();
+
+const TEMPLATE_RULE_COLUMNS: Record<string, { column: string; nullable: boolean }> = {
+  orderIndex: { column: 'order_index', nullable: false },
+  direction: { column: 'direction', nullable: false },
+  action: { column: 'action', nullable: false },
+  protocol: { column: 'protocol', nullable: false },
+  ports: { column: 'ports', nullable: true },
+  sourceType: { column: 'source_type', nullable: false },
+  sourceValue: { column: 'source_value', nullable: false },
+  logMode: { column: 'log_mode', nullable: false },
+  comment: { column: 'comment', nullable: true },
+  usePolicyInterfaceScope: { column: 'use_policy_interface_scope', nullable: false },
+  interfaceScopeType: { column: 'interface_scope_type', nullable: true },
+  interfaceScopeRoles: { column: 'interface_scope_roles', nullable: true },
+  interfaceScopeNames: { column: 'interface_scope_names', nullable: true },
+};
+
+/** Validate stored template rules (DB rows) before they are instantiated into a policy. */
+function validateStoredTemplateRules(rules: any[]): string[] {
+  const problems: string[] = [];
+  for (const r of rules) {
+    const label = `Rule #${r.order_index}`;
+    if (!protocolSchema.safeParse(r.protocol).success) problems.push(`${label}: invalid protocol '${r.protocol}'`);
+    if (!sourceTypeSchema.safeParse(r.source_type).success) problems.push(`${label}: invalid source type '${r.source_type}'`);
+    if (r.interface_scope_type != null && !interfaceScopeTypeSchema.safeParse(r.interface_scope_type).success) {
+      problems.push(`${label}: invalid interface scope type '${r.interface_scope_type}'`);
+    }
+    if (r.interface_scope_names != null && !interfaceNamesSchema.safeParse(r.interface_scope_names).success) {
+      problems.push(`${label}: invalid interface name(s)`);
+    }
+    if (r.interface_scope_roles != null && !interfaceRolesSchema.safeParse(r.interface_scope_roles).success) {
+      problems.push(`${label}: invalid interface role(s)`);
+    }
+    if (r.comment != null && r.comment !== '' && !ruleCommentSchema.safeParse(r.comment).success) {
+      problems.push(`${label}: invalid comment`);
+    }
+    for (const p of validateRuleSemantics({ protocol: r.protocol, ports: r.ports, sourceType: r.source_type, sourceValue: r.source_value })) {
+      problems.push(`${label}: ${p}`);
+    }
+  }
+  return problems;
+}
+
+templatesRouter.get('/:id/rules', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const { rows } = await pool.query(
     `SELECT * FROM policy_template_rules WHERE policy_template_id = $1 ORDER BY order_index ASC`,
     [req.params.id]
@@ -165,13 +234,15 @@ templatesRouter.post('/:id/rules', requireRole('operator', 'admin'), async (req,
   const parsed = templateRuleSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
   const b = parsed.data;
+  const problems = validateRuleSemantics({ protocol: b.protocol, ports: b.ports ?? null, sourceType: b.sourceType, sourceValue: b.sourceValue });
+  if (problems.length) return res.status(400).json({ error: 'invalid_rule', message: problems.join('; '), details: problems });
 
   const { rows } = await pool.query(
     `INSERT INTO policy_template_rules
       (policy_template_id, order_index, direction, action, protocol, ports, source_type, source_value,
        log_mode, comment, use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
-    [req.params.id, b.orderIndex, b.direction, b.action, b.protocol, b.ports ?? null,
+    [req.params.id, b.orderIndex, b.direction, b.action, b.protocol, b.ports || null,
      b.sourceType, b.sourceValue, b.logMode, b.comment ?? null,
      b.usePolicyInterfaceScope, b.interfaceScopeType ?? null,
      b.interfaceScopeRoles ?? null, b.interfaceScopeNames ?? null]
@@ -180,30 +251,42 @@ templatesRouter.post('/:id/rules', requireRole('operator', 'admin'), async (req,
 });
 
 templatesRouter.put('/rules/:ruleId', requireRole('operator', 'admin'), async (req, res) => {
-  const parsed = templateRuleSchema.partial().safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
-  const b = parsed.data;
+  const parsed = templateRuleUpdateSchema.safeParse(req.body ?? {});
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
+  const b = parsed.data as Record<string, unknown>;
 
+  const presentKeys = Object.keys(TEMPLATE_RULE_COLUMNS).filter((k) => b[k] !== undefined);
+  for (const k of presentKeys) {
+    if (b[k] === null && !TEMPLATE_RULE_COLUMNS[k].nullable) {
+      return res.status(400).json({ error: 'invalid_body', message: `${k} cannot be null` });
+    }
+  }
+
+  const existing = await pool.query(`SELECT * FROM policy_template_rules WHERE id = $1`, [req.params.ruleId]);
+  const cur = existing.rows[0];
+  if (!cur) return res.status(404).json({ error: 'not_found' });
+
+  const problems = validateRuleSemantics({
+    protocol: (presentKeys.includes('protocol') ? b.protocol : cur.protocol) as string,
+    ports: (presentKeys.includes('ports') ? b.ports : cur.ports) as string | null,
+    sourceType: (presentKeys.includes('sourceType') ? b.sourceType : cur.source_type) as string,
+    sourceValue: (presentKeys.includes('sourceValue') ? b.sourceValue : cur.source_value) as string
+  });
+  if (problems.length) return res.status(400).json({ error: 'invalid_rule', message: problems.join('; '), details: problems });
+
+  if (presentKeys.length === 0) return res.json({ rule: cur });
+
+  const sets: string[] = [];
+  const params: unknown[] = [req.params.ruleId];
+  for (const k of presentKeys) {
+    let value = b[k];
+    if (k === 'ports' && value === '') value = null;
+    params.push(value);
+    sets.push(`${TEMPLATE_RULE_COLUMNS[k].column} = $${params.length}`);
+  }
   const { rows } = await pool.query(
-    `UPDATE policy_template_rules
-     SET order_index = COALESCE($2, order_index),
-         direction = COALESCE($3, direction),
-         action = COALESCE($4, action),
-         protocol = COALESCE($5, protocol),
-         ports = COALESCE($6, ports),
-         source_type = COALESCE($7, source_type),
-         source_value = COALESCE($8, source_value),
-         log_mode = COALESCE($9, log_mode),
-         comment = COALESCE($10, comment),
-         use_policy_interface_scope = COALESCE($11, use_policy_interface_scope),
-         interface_scope_type = COALESCE($12, interface_scope_type),
-         interface_scope_roles = COALESCE($13, interface_scope_roles),
-         interface_scope_names = COALESCE($14, interface_scope_names)
-     WHERE id = $1 RETURNING *`,
-    [req.params.ruleId, b.orderIndex ?? null, b.direction ?? null, b.action ?? null,
-     b.protocol ?? null, b.ports ?? null, b.sourceType ?? null, b.sourceValue ?? null,
-     b.logMode ?? null, b.comment ?? null, b.usePolicyInterfaceScope ?? null,
-     b.interfaceScopeType ?? null, b.interfaceScopeRoles ?? null, b.interfaceScopeNames ?? null]
+    `UPDATE policy_template_rules SET ${sets.join(', ')} WHERE id = $1 RETURNING *`,
+    params
   );
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
   res.json({ rule: rows[0] });
@@ -219,7 +302,7 @@ templatesRouter.delete('/rules/:ruleId', requireRole('operator', 'admin'), async
 templatesRouter.post('/:id/instantiate', requireRole('operator', 'admin'), async (req, res) => {
   const bodySchema = z.object({
     name: z.string().optional(),
-    scopeType: z.string().optional(),
+    scopeType: z.enum(['TAG', 'VLAN', 'HOST_LIST']).optional(),
     scopeTagId: z.string().uuid().optional(),
     scopeVlanId: z.string().uuid().optional(),
     hostIds: z.array(z.string().uuid()).optional(),
@@ -227,8 +310,19 @@ templatesRouter.post('/:id/instantiate', requireRole('operator', 'admin'), async
   const parsed = bodySchema.safeParse(req.body ?? {});
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
 
-  const userRes = await pool.query(`SELECT id FROM users WHERE username=$1 LIMIT 1`, [req.auth!.username]);
-  const userId = userRes.rows[0]?.id ?? null;
+  const userId = req.auth!.userId;
+
+  // Validate the template's rules before turning them into a policy (template-engine copies them verbatim)
+  const tpl = await pool.query(`SELECT id FROM policy_templates WHERE id = $1`, [req.params.id]);
+  if (!tpl.rows[0]) return res.status(404).json({ error: 'not_found' });
+  const { rows: tplRules } = await pool.query(
+    `SELECT * FROM policy_template_rules WHERE policy_template_id = $1 ORDER BY order_index ASC`,
+    [req.params.id]
+  );
+  const problems = validateStoredTemplateRules(tplRules);
+  if (problems.length) {
+    return res.status(400).json({ error: 'invalid_template_rules', message: `Template contains invalid rules: ${problems.join('; ')}`, details: problems });
+  }
 
   try {
     const result = await instantiateTemplate(req.params.id, userId, parsed.data);
@@ -239,7 +333,7 @@ templatesRouter.post('/:id/instantiate', requireRole('operator', 'admin'), async
 });
 
 // Preview instantiation
-templatesRouter.post('/:id/preview', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+templatesRouter.post('/:id/preview', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   try {
     const result = await previewInstantiation(req.params.id);
     res.json(result);

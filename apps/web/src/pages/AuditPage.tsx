@@ -1,10 +1,27 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { api } from '../lib/api';
+
+/** Convert a datetime-local value (local wall-clock time) to an ISO string, or undefined if invalid/empty. */
+function localToIso(v: string): string | undefined {
+  if (!v) return undefined;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
+}
+
+function mergeSorted(prev: string[], next: Iterable<string>): string[] {
+  const set = new Set(prev);
+  let changed = false;
+  for (const v of next) {
+    if (!set.has(v)) { set.add(v); changed = true; }
+  }
+  return changed ? Array.from(set).sort() : prev;
+}
 
 export function AuditPage() {
   const [events, setEvents] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
   
   // Filters
   const [filterActor, setFilterActor] = useState('');
@@ -13,50 +30,54 @@ export function AuditPage() {
   const [filterFrom, setFilterFrom] = useState('');
   const [filterTo, setFilterTo] = useState('');
   
-  // Get unique values for dropdowns
+  // Dropdown options. Seeded from the initial unfiltered load and only ever
+  // grown afterwards, so applying a filter never hides the other choices.
   const [allActors, setAllActors] = useState<string[]>([]);
   const [allActions, setAllActions] = useState<string[]>([]);
   const [allEntityTypes, setAllEntityTypes] = useState<string[]>([]);
 
-  useEffect(() => {
-    loadData();
-  }, []);
+  const requestIdRef = useRef(0);
+  const firstLoadRef = useRef(true);
 
   useEffect(() => {
-    loadData();
+    // Initial load runs immediately; subsequent filter changes are debounced.
+    const delay = firstLoadRef.current ? 0 : 300;
+    firstLoadRef.current = false;
+    const handle = setTimeout(() => {
+      void loadData();
+    }, delay);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterActor, filterAction, filterEntityType, filterFrom, filterTo]);
 
   async function loadData() {
+    const requestId = ++requestIdRef.current;
     setLoading(true);
     try {
       const params: any = {};
       if (filterActor) params.actor = filterActor;
       if (filterAction) params.action = filterAction;
       if (filterEntityType) params.entityType = filterEntityType;
-      if (filterFrom) params.from = filterFrom;
-      if (filterTo) params.to = filterTo;
+      const fromIso = localToIso(filterFrom);
+      const toIso = localToIso(filterTo);
+      if (fromIso) params.from = fromIso;
+      if (toIso) params.to = toIso;
       
       const res = await api.audit(params);
-      setEvents(res.events || []);
+      if (requestId !== requestIdRef.current) return; // stale response
+      const list = res.events || [];
+      setEvents(list);
+      setError('');
       
-      // Extract unique values for filters
-      const actors = new Set<string>();
-      const actions = new Set<string>();
-      const entityTypes = new Set<string>();
-      
-      res.events.forEach((e: any) => {
-        if (e.actor_username) actors.add(e.actor_username);
-        if (e.action) actions.add(e.action);
-        if (e.entity_type) entityTypes.add(e.entity_type);
-      });
-      
-      setAllActors(Array.from(actors).sort());
-      setAllActions(Array.from(actions).sort());
-      setAllEntityTypes(Array.from(entityTypes).sort());
+      setAllActors(prev => mergeSorted(prev, list.map((e: any) => e.actor_username).filter(Boolean)));
+      setAllActions(prev => mergeSorted(prev, list.map((e: any) => e.action).filter(Boolean)));
+      setAllEntityTypes(prev => mergeSorted(prev, list.map((e: any) => e.entity_type).filter(Boolean)));
     } catch (e: any) {
+      if (requestId !== requestIdRef.current) return;
       console.error('Failed to load audit events:', e);
+      setError(String(e?.message ?? e));
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) setLoading(false);
     }
   }
 
@@ -233,6 +254,8 @@ export function AuditPage() {
           </button>
         )}
       </div>
+
+      {error && <div className="error-banner">{error}</div>}
 
       {/* Filters */}
       <div className="card">

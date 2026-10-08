@@ -1,5 +1,20 @@
 import { useState, useEffect } from 'react';
-import { api } from '../lib/api';
+import { api, errorMessage } from '../lib/api';
+
+/** Parse a JSON object from a textarea. Returns an error message instead of silently falling back to {}. */
+function parseConfigJson(text: string): { ok: true; value: Record<string, unknown> } | { ok: false; error: string } {
+  if (!text.trim()) return { ok: false, error: 'Configuration JSON is required (use {} if none is needed).' };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e: any) {
+    return { ok: false, error: `Configuration is not valid JSON: ${e?.message ?? e}` };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, error: 'Configuration must be a JSON object, e.g. {"key": "value"}.' };
+  }
+  return { ok: true, value: parsed as Record<string, unknown> };
+}
 
 const EVENT_TYPES = [
   'POLICY_SUBMITTED', 'POLICY_APPROVED', 'POLICY_REJECTED',
@@ -25,6 +40,7 @@ export function NotificationsPage() {
   const [showAddRule, setShowAddRule] = useState(false);
   const [tab, setTab] = useState<'channels' | 'log'>('channels');
   const [form, setForm] = useState({ name: '', type: 'slack', config: '', enabled: true });
+  const [configError, setConfigError] = useState('');
   const [ruleForm, setRuleForm] = useState({ eventType: 'DEPLOYMENT_COMPLETED', enabled: true });
 
   const load = async () => {
@@ -50,13 +66,14 @@ export function NotificationsPage() {
 
   const createChannel = async () => {
     try {
-      let config = {};
-      try { config = JSON.parse(form.config); } catch { /* keep empty */ }
-      await api.notifications.createChannel({ name: form.name, type: form.type, config, enabled: form.enabled });
+      const parsed = parseConfigJson(form.config);
+      if (!parsed.ok) { setConfigError(parsed.error); return; }
+      setConfigError('');
+      await api.notifications.createChannel({ name: form.name, type: form.type, config: parsed.value, enabled: form.enabled });
       setShowCreate(false);
       setForm({ name: '', type: 'slack', config: '', enabled: true });
       load();
-    } catch (e: any) { setError(e.message); }
+    } catch (e: any) { setError(errorMessage(e)); }
   };
 
   const deleteChannel = async (id: string) => {
@@ -150,9 +167,10 @@ export function NotificationsPage() {
               <div style={{ padding: '6px 12px', background: '#292018', borderRadius: '6px 6px 0 0', fontSize: '11.5px', color: '#d4c9b8', fontFamily: "'JetBrains Mono', monospace" }}>
                 Example: {CHANNEL_TYPES.find(t => t.value === form.type)?.configHint || '{}'}
               </div>
-              <textarea value={form.config} onChange={e => setForm(f => ({ ...f, config: e.target.value }))}
+              <textarea value={form.config} onChange={e => { setConfigError(''); setForm(f => ({ ...f, config: e.target.value })); }}
                 placeholder={CHANNEL_TYPES.find(t => t.value === form.type)?.configHint || '{}'}
                 rows={3} style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '13px', borderRadius: '0 0 6px 6px' }} />
+              {configError && <div style={{ color: '#a63d2f', fontSize: '12.5px', marginTop: 4 }}>{configError}</div>}
               {form.type === 'slack' && (
                 <small>Create an incoming webhook in Slack: App Settings → Incoming Webhooks → Add New Webhook to Workspace</small>
               )}

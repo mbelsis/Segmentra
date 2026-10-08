@@ -1,10 +1,24 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-import { api } from '../lib/api';
+import { api, errorMessage, isApiError } from '../lib/api';
+import { hasRole, useAuth } from '../lib/auth-context';
+
+/** Convert a datetime-local value (local wall-clock time) to an ISO-8601 UTC string. */
+function localDateTimeToIso(v: string): string {
+  return new Date(v).toISOString();
+}
+
+/** Convert a date-only value (YYYY-MM-DD, local) to an ISO string at local start/end of day. */
+function localDateToIso(v: string, endOfDay: boolean): string {
+  return new Date(`${v}T${endOfDay ? '23:59:59.999' : '00:00:00'}`).toISOString();
+}
 
 export function DeploymentsPage() {
   const navigate = useNavigate();
+  const { roles } = useAuth();
+  const canOperate = hasRole(roles, 'operator', 'admin');
+  const canApprove = hasRole(roles, 'approver', 'admin');
   const [deployments, setDeployments] = useState<any[]>([]);
   const [tags, setTags] = useState<any[]>([]);
   const [vlans, setVlans] = useState<any[]>([]);
@@ -14,6 +28,8 @@ export function DeploymentsPage() {
 
   // Filtering and pagination state
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const requestIdRef = useRef(0);
   const [filterMode, setFilterMode] = useState<string>('');
   const [filterStatus, setFilterStatus] = useState<string>('');
   const [filterTag, setFilterTag] = useState<string>('');
@@ -40,29 +56,32 @@ export function DeploymentsPage() {
   const [safetyCheck, setSafetyCheck] = useState<any>(null);
 
   useEffect(() => {
+    async function loadData() {
+      try {
+        const [tagsRes, vlansRes, hostsRes] = await Promise.all([
+          api.tags(),
+          api.vlans(),
+          api.allHosts()
+        ]);
+        setTags(tagsRes.tags);
+        setVlans(vlansRes.vlans);
+        setHosts(hostsRes.hosts);
+      } catch (e: any) {
+        setError(String(e.message || e));
+      }
+    }
     loadData();
   }, []);
 
+  // Debounce free-text search so we don't fire a request per keystroke.
   useEffect(() => {
-    loadDeployments();
-  }, [currentPage, searchQuery, filterMode, filterStatus, filterTag, filterVlan, filterFromDate, filterToDate, sortBy, sortOrder]);
+    const t = setTimeout(() => setDebouncedSearch(searchQuery), 300);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
 
-  async function loadData() {
-    try {
-      const [tagsRes, vlansRes, hostsRes] = await Promise.all([
-        api.tags(),
-        api.vlans(),
-        api.hosts()
-      ]);
-      setTags(tagsRes.tags);
-      setVlans(vlansRes.vlans);
-      setHosts(hostsRes.hosts);
-    } catch (e: any) {
-      setError(String(e.message || e));
-    }
-  }
-
-  async function loadDeployments() {
+  const loadDeployments = useCallback(async () => {
+    // Ignore responses from requests superseded by a newer one.
+    const requestId = ++requestIdRef.current;
     try {
       const params: any = {
         page: currentPage,
@@ -70,21 +89,27 @@ export function DeploymentsPage() {
         sortBy,
         sortOrder
       };
-      if (searchQuery.trim()) params.search = searchQuery.trim();
+      if (debouncedSearch.trim()) params.search = debouncedSearch.trim();
       if (filterMode) params.mode = filterMode;
       if (filterStatus) params.status = filterStatus;
       if (filterTag) params.tag = filterTag;
       if (filterVlan) params.vlan = filterVlan;
-      if (filterFromDate) params.fromDate = filterFromDate;
-      if (filterToDate) params.toDate = filterToDate;
+      if (filterFromDate) params.fromDate = localDateToIso(filterFromDate, false);
+      if (filterToDate) params.toDate = localDateToIso(filterToDate, true);
 
       const dRes = await api.deployments(params);
+      if (requestId !== requestIdRef.current) return;
       setDeployments(dRes.deployments);
       setPagination(dRes.pagination);
     } catch (e: any) {
+      if (requestId !== requestIdRef.current) return;
       setError(String(e.message || e));
     }
-  }
+  }, [currentPage, debouncedSearch, filterMode, filterStatus, filterTag, filterVlan, filterFromDate, filterToDate, sortBy, sortOrder]);
+
+  useEffect(() => {
+    loadDeployments();
+  }, [loadDeployments]);
 
   function resetForm() {
     setFormPolicyVersionId('');
@@ -149,11 +174,11 @@ export function DeploymentsPage() {
       }
 
       if (formScheduledAt) {
-        payload.scheduledAt = formScheduledAt;
+        payload.scheduledAt = localDateTimeToIso(formScheduledAt);
       }
 
       if (formExpiresAt) {
-        payload.expiresAt = formExpiresAt;
+        payload.expiresAt = localDateTimeToIso(formExpiresAt);
         payload.expiryAction = formExpiryAction;
       }
 
@@ -161,11 +186,17 @@ export function DeploymentsPage() {
       resetForm();
       loadDeployments();
     } catch (e: any) {
-      const errorMsg = e.message || String(e);
+      if (isApiError(e) && e.code === 'safety_check_failed' && e.body?.safetyCheck) {
+        setSafetyCheck(e.body.safetyCheck);
+        setError(e.message);
+        return;
+      }
+      const code = isApiError(e) ? e.code ?? '' : '';
+      const errorMsg = errorMessage(e);
       // Try to extract a more user-friendly error message
-      if (errorMsg.includes('policy_version_not_approved') || errorMsg.includes('not_approved')) {
-        setError('Cannot deploy: Policy version must be APPROVED. Please approve the policy version first before deploying.');
-      } else if (errorMsg.includes('policy_version_not_found') || errorMsg.includes('not_found')) {
+      if (code === 'policy_version_not_approved' || errorMsg.includes('not_approved')) {
+        setError('Cannot deploy: Policy version must be APPROVED (or previously DEPLOYED). Please approve the policy version first before deploying.');
+      } else if (code === 'policy_version_not_found' || code === 'not_found') {
         setError('Policy version not found. Please check the version ID.');
       } else {
         setError(errorMsg);
@@ -179,12 +210,38 @@ export function DeploymentsPage() {
       await api.startDeployment(deploymentId);
       loadDeployments();
     } catch (e: any) {
-      setError(String(e.message || e));
+      if (isApiError(e) && e.code === 'deployment_requires_approval') {
+        setError('This deployment requires approval by an approver before it can be started.');
+      } else {
+        setError(errorMessage(e));
+      }
+      loadDeployments();
+    }
+  }
+
+  async function cancelDeployment(deploymentId: string) {
+    if (!confirm('Cancel this deployment? It will not be run.')) return;
+    try {
+      await api.cancelDeployment(deploymentId);
+      loadDeployments();
+    } catch (e: any) {
+      setError(errorMessage(e));
+    }
+  }
+
+  async function approveDeployment(deploymentId: string) {
+    if (!confirm('Approve this deployment so it can be started?')) return;
+    try {
+      await api.approveDeployment(deploymentId);
+      loadDeployments();
+    } catch (e: any) {
+      setError(errorMessage(e));
     }
   }
 
   function getStatusBadge(status: string) {
     const colors: Record<string, string> = {
+      SCHEDULED: '#7E57C2',
       QUEUED: '#888',
       RUNNING: '#2196F3',
       PAUSED: '#FF9800',
@@ -230,12 +287,14 @@ export function DeploymentsPage() {
     <div className="page">
       <div className="page-header">
         <h2>Deployments</h2>
-        <button onClick={() => setShowCreate(true)} className="btn-primary">+ Create Deployment</button>
+        {canOperate && (
+          <button onClick={() => setShowCreate(true)} className="btn-primary">+ Create Deployment</button>
+        )}
       </div>
 
       {error && <div className="error-banner">{error}</div>}
 
-      {showCreate && (
+      {showCreate && canOperate && (
         <div className="card">
           <h3>Create Deployment</h3>
           <div style={{ padding: '10px 14px', background: '#fdf6ec', border: '1px solid #e8d5a8', borderRadius: 8, marginBottom: 16, fontSize: '13px', color: '#5c4633' }}>
@@ -252,10 +311,10 @@ export function DeploymentsPage() {
                 type="text"
                 value={formPolicyVersionId}
                 onChange={(e) => setFormPolicyVersionId(e.target.value)}
-                placeholder="Paste approved policy version UUID"
+                placeholder="Paste approved/deployed policy version UUID"
               />
               <small style={{ color: '#666', fontSize: '0.85em' }}>
-                Use an APPROVED policy version. Get the ID from the Policy Sets page.
+                Use an APPROVED or DEPLOYED policy version. Get the ID from the Policy Sets page.
               </small>
             </div>
             <div className="form-group" style={{ position: 'relative' }}>
@@ -461,7 +520,7 @@ export function DeploymentsPage() {
                 onChange={(e) => setFormExpiresAt(e.target.value)}
               />
               <small style={{ color: '#666', fontSize: '0.85em' }}>
-                Leave empty for no expiry. Set a date to create a time-limited deployment (e.g., temporary vendor access, maintenance window). Upon expiration, the user will be notified to manually restore to another policy.
+                Leave empty for no expiry. Set a date to create a time-limited deployment (e.g., temporary vendor access, maintenance window). When it expires, Segmentra performs the action chosen below automatically (checked every minute).
               </small>
             </div>
 
@@ -473,8 +532,8 @@ export function DeploymentsPage() {
                   onChange={(e) => setFormExpiryAction(e.target.value as any)}
                 >
                   <option value="NOTIFY_ONLY">Notify Only — send alert, rules stay active</option>
-                  <option value="REMOVE">Remove — notify to manually rollback rules on hosts</option>
-                  <option value="REVERT">Revert — notify to manually re-deploy the previous policy</option>
+                  <option value="REMOVE">Remove — automatically remove Segmentra rules from the hosts</option>
+                  <option value="REVERT">Revert — automatically re-deploy the previous policy version</option>
                 </select>
                 <small style={{ color: '#666', fontSize: '0.85em' }}>
                   {formExpiryAction === 'NOTIFY_ONLY' && (<span>
@@ -484,16 +543,10 @@ export function DeploymentsPage() {
                     <br /><strong>iptables:</strong> <code style={{ background: '#f5ebe0', padding: '1px 4px', borderRadius: 3, fontSize: '0.9em' }}>sudo iptables-restore &lt; /var/backups/segmentra/iptables.&lt;timestamp&gt;</code>
                   </span>)}
                   {formExpiryAction === 'REMOVE' && (<span>
-                    The deployment will be marked as expired and a notification sent requesting manual rollback.
-                    <br /><br />To restore the previous ruleset from the backup on each host:
-                    <br /><strong>nftables:</strong> <code style={{ background: '#f5ebe0', padding: '1px 4px', borderRadius: 3, fontSize: '0.9em' }}>sudo nft -f /var/backups/segmentra/nft.ruleset.&lt;timestamp&gt;</code>
-                    <br /><strong>iptables:</strong> <code style={{ background: '#f5ebe0', padding: '1px 4px', borderRadius: 3, fontSize: '0.9em' }}>sudo iptables-restore &lt; /var/backups/segmentra/iptables.&lt;timestamp&gt;</code>
+                    On expiry Segmentra connects to every host where this deployment succeeded (using each host's SSH credential) and removes the Segmentra nftables table / iptables chains, so the host falls back to its non-Segmentra rules. Hosts whose rules were since replaced by a later deployment are skipped. Per-host results appear on the deployment page and a notification is sent; hosts where removal failed still enforce the expired policy and need manual cleanup.
                   </span>)}
                   {formExpiryAction === 'REVERT' && (<span>
-                    The deployment will be marked as expired and a notification sent requesting you to re-deploy the previous policy version. Create a new deployment with the prior version to restore.
-                    <br /><br />For immediate rollback via SSH:
-                    <br /><strong>nftables:</strong> <code style={{ background: '#f5ebe0', padding: '1px 4px', borderRadius: 3, fontSize: '0.9em' }}>sudo nft -f /var/backups/segmentra/nft.ruleset.&lt;timestamp&gt;</code>
-                    <br /><strong>iptables:</strong> <code style={{ background: '#f5ebe0', padding: '1px 4px', borderRadius: 3, fontSize: '0.9em' }}>sudo iptables-restore &lt; /var/backups/segmentra/iptables.&lt;timestamp&gt;</code>
+                    On expiry Segmentra finds the most recent earlier deployment of the same policy set (a different version that succeeded on these hosts) and automatically starts a new deployment of that version to the hosts that ran it. The expiry is pre-authorised by this deployment, so no new approval is needed, but the previous version must still be APPROVED or DEPLOYED. If there is no previous version, nothing is changed and a notification is sent instead.
                   </span>)}
                 </small>
               </div>
@@ -627,6 +680,7 @@ export function DeploymentsPage() {
                 style={{ width: '100%', padding: '6px 8px', border: '1px solid #ddd', borderRadius: 4 }}
               >
                 <option value="">All Statuses</option>
+                <option value="SCHEDULED">Scheduled</option>
                 <option value="QUEUED">Queued</option>
                 <option value="RUNNING">Running</option>
                 <option value="PAUSED">Paused</option>
@@ -752,21 +806,44 @@ export function DeploymentsPage() {
                 <td><code style={{ fontSize: '0.85em' }}>{d.policy_version_id.slice(0, 8)}...</code></td>
                 <td>{d.mode}</td>
                 <td>{d.target_count} host(s)</td>
-                <td>{getStatusBadge(d.status)}</td>
+                <td>
+                  {getStatusBadge(d.status)}
+                  {d.requires_approval && !d.approved_by && (
+                    <span style={{ marginLeft: 6, padding: '1px 6px', borderRadius: 4, background: '#fdf6ec', border: '1px solid #e8d5a8', color: '#8b6914', fontSize: '11px', fontWeight: 600 }}>
+                      Needs approval
+                    </span>
+                  )}
+                  {d.status === 'SCHEDULED' && d.scheduled_at && (
+                    <div style={{ fontSize: '11px', color: '#666' }}>{new Date(d.scheduled_at).toLocaleString()}</div>
+                  )}
+                </td>
                 <td style={{ fontSize: '12.5px' }}>{d.created_by_username || '-'}</td>
                 <td>{new Date(d.created_at).toLocaleString()}</td>
                 <td>
                   <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                    {d.status === 'QUEUED' && (
-                      <button onClick={() => startDeployment(d.id)} className="btn-small btn-primary">Start</button>
+                    {canApprove && d.requires_approval && !d.approved_by && ['QUEUED', 'SCHEDULED'].includes(d.status) && (
+                      <button onClick={() => approveDeployment(d.id)} className="btn-small" style={{ background: '#8b6914', color: 'white' }}>Approve</button>
                     )}
-                    {d.status === 'RUNNING' && (
+                    {canOperate && d.status === 'QUEUED' && (
+                      <button
+                        onClick={() => startDeployment(d.id)}
+                        className="btn-small btn-primary"
+                        disabled={d.requires_approval && !d.approved_by}
+                        title={d.requires_approval && !d.approved_by ? 'Awaiting approval' : undefined}
+                      >
+                        Start
+                      </button>
+                    )}
+                    {canOperate && (d.status === 'QUEUED' || d.status === 'SCHEDULED') && (
+                      <button onClick={() => cancelDeployment(d.id)} className="btn-small" style={{ background: '#999', color: 'white' }}>Cancel</button>
+                    )}
+                    {canOperate && d.status === 'RUNNING' && (
                       <>
                         <button onClick={() => pauseDeployment(d.id)} className="btn-small" style={{ background: '#FF9800', color: 'white' }}>Pause</button>
                         <button onClick={() => stopDeployment(d.id)} className="btn-small" style={{ background: '#F44336', color: 'white' }}>Stop</button>
                       </>
                     )}
-                    {d.status === 'PAUSED' && (
+                    {canOperate && d.status === 'PAUSED' && (
                       <>
                         <button onClick={() => resumeDeployment(d.id)} className="btn-small btn-primary">Resume</button>
                         <button onClick={() => stopDeployment(d.id)} className="btn-small" style={{ background: '#F44336', color: 'white' }}>Stop</button>
@@ -779,10 +856,10 @@ export function DeploymentsPage() {
             ))}
             {deployments.length === 0 && (
               <tr>
-                <td colSpan={7} className="empty-state" style={{ textAlign: 'center', padding: '24px' }}>
+                <td colSpan={8} className="empty-state" style={{ textAlign: 'center', padding: '24px' }}>
                   {searchQuery || filterMode || filterStatus || filterTag || filterVlan || filterFromDate || filterToDate
                     ? 'No deployments match your filters. Try adjusting your search criteria.'
-                    : 'No deployments yet. Click "Create Deployment" to create one.'}
+                    : canOperate ? 'No deployments yet. Click "Create Deployment" to create one.' : 'No deployments yet.'}
                 </td>
               </tr>
             )}

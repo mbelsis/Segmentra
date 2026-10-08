@@ -22,6 +22,9 @@ services:
       db:
         condition: service_healthy
     environment:
+      # The image defaults to NODE_ENV=production, where the seed refuses to create the
+      # default admin/admin123 user the test logs in with.
+      NODE_ENV: development
       DATABASE_URL: postgres://segmentra:segmentra@db:5432/segmentra
       JWT_SECRET: integration-test-secret-1234567890
       SEGMENTRA_KEK_B64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=

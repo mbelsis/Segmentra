@@ -5,6 +5,8 @@ import { pool } from '../../db/pool.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 import { comparePolicyVersions } from '../../services/policy-diff.js';
 import { isPolicyVersionHighRisk } from '../../services/high-risk.js';
+import { recordPolicyVersionEditor } from '../../lib/policy-editors.js';
+import { interfaceNamesSchema, interfaceRolesSchema, interfaceScopeTypeSchema } from '../../lib/rule-validation.js';
 
 export const policyVersionsRouter = Router();
 policyVersionsRouter.use(requireAuth);
@@ -27,31 +29,43 @@ policyVersionsRouter.get('/policy-sets/:id/versions', requireRole('viewer', 'ope
 });
 
 const createVersionSchema = z.object({
-  changeSummary: z.string().optional(),
-  interfaceScopeType: z.enum(['ALL_INTERFACES', 'INTERFACE_ROLE', 'INTERFACE_NAME']).default('INTERFACE_ROLE'),
-  interfaceScopeRoles: z.array(z.string()).optional(),
-  interfaceScopeNames: z.array(z.string()).optional()
+  changeSummary: z.string().max(2000).optional(),
+  interfaceScopeType: interfaceScopeTypeSchema.default('INTERFACE_ROLE'),
+  interfaceScopeRoles: interfaceRolesSchema.optional(),
+  interfaceScopeNames: interfaceNamesSchema.optional()
 });
+
+/**
+ * Lock the policy set row and compute the next version number inside the caller's transaction,
+ * so concurrent creates/clones can't pick the same number (backed by the unique index from migration 025).
+ * Returns null if the policy set does not exist.
+ */
+async function nextVersionNumber(client: { query: (text: string, params?: any[]) => Promise<any> }, policySetId: string): Promise<number | null> {
+  const ps = await client.query(`SELECT id FROM policy_sets WHERE id=$1 FOR UPDATE`, [policySetId]);
+  if (!ps.rows[0]) return null;
+  const latest = await client.query(
+    `SELECT COALESCE(MAX(version_number), 0)::int AS v FROM policy_versions WHERE policy_set_id=$1`,
+    [policySetId]
+  );
+  return (latest.rows[0]?.v ?? 0) + 1;
+}
 
 // Write operations require operator/admin
 policyVersionsRouter.post('/policy-sets/:id/versions', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = createVersionSchema.safeParse(req.body ?? {});
-  if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
   const b = parsed.data;
+
+  const userId = req.auth!.userId;
+  if (!userId) return res.status(401).json({ error: 'user_not_found' });
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const latest = await client.query(
-      `SELECT COALESCE(MAX(version_number), 0)::int AS v FROM policy_versions WHERE policy_set_id=$1`,
-      [req.params.id]
-    );
-    const nextVersion = (latest.rows[0]?.v ?? 0) + 1;
-
-    const userId = req.auth!.userId;
-    if (!userId) {
+    const nextVersion = await nextVersionNumber(client, req.params.id);
+    if (nextVersion === null) {
       await client.query('ROLLBACK');
-      return res.status(401).json({ error: 'user_not_found' });
+      return res.status(404).json({ error: 'policy_set_not_found' });
     }
 
     const { rows } = await client.query(
@@ -69,13 +83,12 @@ policyVersionsRouter.post('/policy-sets/:id/versions', requireRole('operator', '
         b.interfaceScopeNames ?? null
       ]
     );
+    await recordPolicyVersionEditor(client, rows[0].id, userId);
     await client.query('COMMIT');
     res.status(201).json({ version: rows[0] });
   } catch (e) {
-    await client.query('ROLLBACK');
-    // eslint-disable-next-line no-console
-    console.error(e);
-    res.status(500).json({ error: 'create_failed' });
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
   } finally {
     client.release();
   }
@@ -112,7 +125,7 @@ policyVersionsRouter.get('/policy-versions/:versionId', requireRole('viewer', 'o
 
 policyVersionsRouter.put('/policy-versions/:versionId', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = createVersionSchema.partial().safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
   const b = parsed.data;
   const { rows } = await pool.query(
     `UPDATE policy_versions
@@ -125,30 +138,48 @@ policyVersionsRouter.put('/policy-versions/:versionId', requireRole('operator', 
     [req.params.versionId, b.changeSummary ?? null, b.interfaceScopeType ?? null, b.interfaceScopeRoles ?? null, b.interfaceScopeNames ?? null]
   );
   if (!rows[0]) return res.status(404).json({ error: 'not_found_or_not_editable' });
+  await recordPolicyVersionEditor(pool, rows[0].id, req.auth!.userId);
   res.json({ version: rows[0] });
 });
 
 policyVersionsRouter.post('/policy-versions/:versionId/submit-approval', requireRole('operator', 'admin'), async (req, res) => {
-  const userRes = await pool.query(`SELECT id FROM users WHERE username=$1 LIMIT 1`, [req.auth!.username]);
-  const userId = userRes.rows[0]?.id ?? null;
-  
+  const userId = req.auth!.userId;
+
   // Evaluate high-risk status before submission
   const isHighRisk = await isPolicyVersionHighRisk({
     policyVersionId: req.params.versionId
   });
   
-  const { rows } = await pool.query(
-    `UPDATE policy_versions
-     SET status='PENDING_APPROVAL', submitted_at=now(), rejection_reason=NULL, is_high_risk=$2
-     WHERE id=$1 AND (status='DRAFT' OR status='REJECTED')
-     RETURNING *`,
-    [req.params.versionId, isHighRisk]
-  );
+  const client = await pool.connect();
+  let rows: any[] = [];
+  let previousStatus: string | null = null;
+  try {
+    await client.query('BEGIN');
+    const prev = await client.query(`SELECT status FROM policy_versions WHERE id=$1 FOR UPDATE`, [req.params.versionId]);
+    previousStatus = prev.rows[0]?.status ?? null;
+    if (previousStatus === 'DRAFT' || previousStatus === 'REJECTED') {
+      const upd = await client.query(
+        `UPDATE policy_versions
+         SET status='PENDING_APPROVAL', submitted_at=now(), submitted_by=$3, rejection_reason=NULL, is_high_risk=$2
+         WHERE id=$1
+         RETURNING *`,
+        [req.params.versionId, isHighRisk, userId]
+      );
+      rows = upd.rows;
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
   if (!rows[0]) return res.status(404).json({ error: 'not_found_or_not_submittable' });
+  const resubmitted = previousStatus === 'REJECTED';
   await pool.query(
     `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
      VALUES ($1,'POLICY_SUBMIT','policy_version',$2,$3)`,
-    [userId, req.params.versionId, { by: req.auth!.username, resubmitted: rows[0].status === 'REJECTED', isHighRisk }]
+    [userId, req.params.versionId, { by: req.auth!.username, resubmitted, isHighRisk }]
   );
   res.json({ version: rows[0] });
 });
@@ -160,23 +191,33 @@ policyVersionsRouter.post(
     const approverId = req.auth!.userId;
     if (!approverId) return res.status(401).json({ error: 'user_not_found' });
 
-    const vRes = await pool.query(`SELECT created_by, is_high_risk FROM policy_versions WHERE id=$1`, [req.params.versionId]);
+    const vRes = await pool.query(
+      `SELECT created_by, submitted_by, is_high_risk,
+              EXISTS (SELECT 1 FROM policy_version_editors e WHERE e.policy_version_id = pv.id AND e.user_id = $2) AS is_editor
+       FROM policy_versions pv WHERE id=$1`,
+      [req.params.versionId, approverId]
+    );
     if (!vRes.rows[0]) return res.status(404).json({ error: 'not_found' });
 
     const isHighRisk = vRes.rows[0].is_high_risk === true;
 
-    // Separation of duties: approver must be different from creator
-    if (vRes.rows[0].created_by && vRes.rows[0].created_by === approverId) {
-      return res.status(400).json({
-        error: 'approver_must_differ',
-        message: 'You cannot approve a policy version that you created. A different approver is required for separation of duties.'
+    // Separation of duties: the approver must not have created, edited or submitted this version
+    const v = vRes.rows[0];
+    if (v.created_by === approverId || v.submitted_by === approverId || v.is_editor) {
+      return res.status(403).json({
+        error: 'cannot_approve_own_changes',
+        message: 'You cannot approve a policy version that you created, edited or submitted. A different approver is required for separation of duties.'
       });
     }
 
+    // Re-check the same conditions atomically with the status transition
     const { rows } = await pool.query(
-      `UPDATE policy_versions
+      `UPDATE policy_versions pv
        SET status='APPROVED', approved_by=$2, approved_at=now()
-       WHERE id=$1 AND status='PENDING_APPROVAL'
+       WHERE pv.id=$1 AND pv.status='PENDING_APPROVAL'
+         AND pv.created_by IS DISTINCT FROM $2
+         AND pv.submitted_by IS DISTINCT FROM $2
+         AND NOT EXISTS (SELECT 1 FROM policy_version_editors e WHERE e.policy_version_id = pv.id AND e.user_id = $2)
        RETURNING *`,
       [req.params.versionId, approverId]
     );
@@ -217,8 +258,8 @@ policyVersionsRouter.post(
 );
 
 policyVersionsRouter.post('/policy-versions/:versionId/clone', requireRole('operator', 'admin'), async (req, res) => {
-  const userRes = await pool.query(`SELECT id FROM users WHERE username=$1 LIMIT 1`, [req.auth!.username]);
-  const userId = userRes.rows[0]?.id ?? null;
+  const userId = req.auth!.userId;
+  if (!userId) return res.status(401).json({ error: 'user_not_found' });
 
   const client = await pool.connect();
   try {
@@ -232,12 +273,12 @@ policyVersionsRouter.post('/policy-versions/:versionId/clone', requireRole('oper
     }
     const sourceVersion = sourceVersionRes.rows[0];
 
-    // Get the latest version number for this policy set
-    const latestRes = await client.query(
-      `SELECT COALESCE(MAX(version_number), 0)::int AS v FROM policy_versions WHERE policy_set_id=$1`,
-      [sourceVersion.policy_set_id]
-    );
-    const nextVersion = (latestRes.rows[0]?.v ?? 0) + 1;
+    // Get the next version number for this policy set (locks the policy set row)
+    const nextVersion = await nextVersionNumber(client, sourceVersion.policy_set_id);
+    if (nextVersion === null) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'policy_set_not_found' });
+    }
 
     // Create new version with same settings but new version number
     const newVersionRes = await client.query(
@@ -256,6 +297,7 @@ policyVersionsRouter.post('/policy-versions/:versionId/clone', requireRole('oper
       ]
     );
     const newVersion = newVersionRes.rows[0];
+    await recordPolicyVersionEditor(client, newVersion.id, userId);
 
     // Clone all rules from source version
     const sourceRulesRes = await client.query(
@@ -300,16 +342,14 @@ policyVersionsRouter.post('/policy-versions/:versionId/clone', requireRole('oper
     await client.query('COMMIT');
     res.status(201).json({ version: newVersion });
   } catch (e) {
-    await client.query('ROLLBACK');
-    // eslint-disable-next-line no-console
-    console.error(e);
-    res.status(500).json({ error: 'clone_failed' });
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
   } finally {
     client.release();
   }
 });
 
-policyVersionsRouter.get('/policy-versions/:versionId/diff', async (req, res) => {
+policyVersionsRouter.get('/policy-versions/:versionId/diff', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const from = String(req.query.fromVersionId ?? '');
   if (!from) return res.status(400).json({ error: 'missing_fromVersionId' });
 
@@ -352,9 +392,14 @@ policyVersionsRouter.delete('/policy-versions/:versionId', requireRole('operator
     });
   }
 
-  // Delete rules first, then version
-  await pool.query(`DELETE FROM policy_rules WHERE policy_version_id = $1`, [req.params.versionId]);
-  await pool.query(`DELETE FROM policy_versions WHERE id = $1`, [req.params.versionId]);
+  // Delete atomically only if still DRAFT/REJECTED (rules cascade)
+  const del = await pool.query(
+    `DELETE FROM policy_versions WHERE id = $1 AND status IN ('DRAFT', 'REJECTED') RETURNING id`,
+    [req.params.versionId]
+  );
+  if (!del.rows[0]) {
+    return res.status(409).json({ error: 'cannot_delete', message: 'The version changed state and can no longer be deleted.' });
+  }
 
   await pool.query(
     `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)

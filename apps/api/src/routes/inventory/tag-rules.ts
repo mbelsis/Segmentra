@@ -3,7 +3,26 @@ import { z } from 'zod';
 
 import { pool } from '../../db/pool.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
-import { evaluateRule, evaluateAllRules, evaluateHostAgainstRules } from '../../services/tag-rule-engine.js';
+import {
+  evaluateAllRules,
+  evaluateHostAgainstRules,
+  evaluateRule,
+  previewCriteria,
+  removeRuleAssignedTags,
+  validateCriteria,
+} from '../../services/tag-rule-engine.js';
+
+/** Re-apply rule-assigned tags now; returns an error message instead of failing the request. */
+async function reconcileNow(context: string): Promise<string | null> {
+  try {
+    await evaluateAllRules();
+    return null;
+  } catch (e: any) {
+    // eslint-disable-next-line no-console
+    console.error(`[Tag Rules] Re-evaluation after ${context} failed:`, e);
+    return e?.message ?? 'reevaluation_failed';
+  }
+}
 
 export const tagRulesRouter = Router();
 tagRulesRouter.use(requireAuth);
@@ -41,20 +60,38 @@ tagRulesRouter.get('/:id', requireRole('viewer', 'operator', 'approver', 'admin'
   res.json({ tagRule: rows[0], matchedHosts });
 });
 
+const criteriaSchema = z.object({
+  conditions: z.array(z.object({
+    field: z.enum(['hostname', 'mgmt_ip', 'vlan_id', 'vlan_tag', 'os_family', 'environment', 'firewall_backend', 'tag']),
+    operator: z.enum(['equals', 'not_equals', 'matches', 'contains', 'in_cidr', 'has_tag']),
+    value: z.string().max(500),
+  })).max(50),
+  logic: z.enum(['AND', 'OR']).default('AND'),
+});
+
 const tagRuleSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
   tagId: z.string().uuid(),
   enabled: z.boolean().default(true),
   priority: z.number().int().default(0),
-  criteria: z.object({
-    conditions: z.array(z.object({
-      field: z.enum(['hostname', 'mgmt_ip', 'vlan_id', 'vlan_tag', 'os_family', 'environment', 'firewall_backend', 'tag']),
-      operator: z.enum(['equals', 'not_equals', 'matches', 'contains', 'in_cidr', 'has_tag']),
-      value: z.string(),
-    })),
-    logic: z.enum(['AND', 'OR']).default('AND'),
-  }),
+  criteria: criteriaSchema,
+});
+
+// Preview body: same shape as create, but only `criteria` is needed (tagId/name optional).
+const previewSchema = tagRuleSchema.partial().extend({ criteria: criteriaSchema });
+
+/**
+ * Preview which hosts a rule would match. Performs NO writes.
+ * POST /api/tag-rules/preview  -> { hosts: Array<{ id, hostname }> }
+ */
+tagRulesRouter.post('/preview', requireRole('operator', 'admin'), async (req, res) => {
+  const parsed = previewSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
+  const problems = validateCriteria(parsed.data.criteria);
+  if (problems.length) return res.status(400).json({ error: 'invalid_criteria', message: problems.join('; '), details: problems });
+  const hosts = await previewCriteria(parsed.data.criteria);
+  res.json({ hosts });
 });
 
 // Create tag rule
@@ -62,6 +99,11 @@ tagRulesRouter.post('/', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = tagRuleSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
   const b = parsed.data;
+  const problems = validateCriteria(b.criteria);
+  if (problems.length) return res.status(400).json({ error: 'invalid_criteria', message: problems.join('; '), details: problems });
+
+  const tagRes = await pool.query(`SELECT 1 FROM tags WHERE id = $1`, [b.tagId]);
+  if (!tagRes.rows[0]) return res.status(400).json({ error: 'tag_not_found' });
 
   const userRes = await pool.query(`SELECT id FROM users WHERE username=$1 LIMIT 1`, [req.auth!.username]);
   const userId = userRes.rows[0]?.id ?? null;
@@ -84,55 +126,106 @@ tagRulesRouter.post('/', requireRole('operator', 'admin'), async (req, res) => {
 // Update tag rule
 tagRulesRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = tagRuleSchema.partial().safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
   const b = parsed.data;
+  if (b.criteria) {
+    const problems = validateCriteria(b.criteria);
+    if (problems.length) return res.status(400).json({ error: 'invalid_criteria', message: problems.join('; '), details: problems });
+  }
+  if (b.tagId) {
+    const tagRes = await pool.query(`SELECT 1 FROM tags WHERE id = $1`, [b.tagId]);
+    if (!tagRes.rows[0]) return res.status(400).json({ error: 'tag_not_found' });
+  }
 
-  const { rows } = await pool.query(
-    `UPDATE tag_rules
-     SET name = COALESCE($2, name),
-         description = COALESCE($3, description),
-         tag_id = COALESCE($4, tag_id),
-         enabled = COALESCE($5, enabled),
-         priority = COALESCE($6, priority),
-         criteria = COALESCE($7, criteria),
-         updated_at = now()
-     WHERE id = $1
-     RETURNING *`,
-    [
-      req.params.id,
-      b.name ?? null,
-      b.description ?? null,
-      b.tagId ?? null,
-      b.enabled ?? null,
-      b.priority ?? null,
-      b.criteria ? JSON.stringify(b.criteria) : null,
-    ]
-  );
-  if (!rows[0]) return res.status(404).json({ error: 'not_found' });
+  const client = await pool.connect();
+  let updated: any;
+  let removedTags = 0;
+  try {
+    await client.query('BEGIN');
+    const before = await client.query(`SELECT tag_id, enabled FROM tag_rules WHERE id = $1 FOR UPDATE`, [req.params.id]);
+    if (!before.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'not_found' });
+    }
 
-  await pool.query(
-    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
-     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
-    [req.auth!.username, 'TAG_RULE_UPDATE', 'tag_rule', req.params.id, JSON.stringify({ name: rows[0].name })]
-  );
+    const { rows } = await client.query(
+      `UPDATE tag_rules
+       SET name = COALESCE($2, name),
+           description = COALESCE($3, description),
+           tag_id = COALESCE($4, tag_id),
+           enabled = COALESCE($5, enabled),
+           priority = COALESCE($6, priority),
+           criteria = COALESCE($7, criteria),
+           updated_at = now()
+       WHERE id = $1
+       RETURNING *`,
+      [
+        req.params.id,
+        b.name ?? null,
+        b.description ?? null,
+        b.tagId ?? null,
+        b.enabled ?? null,
+        b.priority ?? null,
+        b.criteria ? JSON.stringify(b.criteria) : null,
+      ]
+    );
+    updated = rows[0];
 
-  res.json({ tagRule: rows[0] });
+    // Retargeted, disabled or re-scoped: drop what this rule assigned; re-evaluation below
+    // re-applies the (new) tag to hosts that still match an enabled rule.
+    const tagChanged = before.rows[0].tag_id !== updated.tag_id;
+    const disabled = before.rows[0].enabled && !updated.enabled;
+    if (tagChanged || disabled || b.criteria) {
+      removedTags = await removeRuleAssignedTags(req.params.id, client);
+    }
+
+    await client.query(
+      `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+       VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
+      [req.auth!.username, 'TAG_RULE_UPDATE', 'tag_rule', req.params.id, JSON.stringify({ name: updated.name, tagChanged, disabled, removedTags })]
+    );
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+
+  const reevaluationError = removedTags > 0 || updated.enabled ? await reconcileNow('rule update') : null;
+  res.json({ tagRule: updated, removedTagAssignments: removedTags, reevaluationError });
 });
 
 // Delete tag rule
 tagRulesRouter.delete('/:id', requireRole('operator', 'admin'), async (req, res) => {
-  // Remove auto-assigned tags from this rule first
-  await pool.query(`DELETE FROM host_tags WHERE source = 'rule' AND source_rule_id = $1`, [req.params.id]);
-  const { rowCount } = await pool.query(`DELETE FROM tag_rules WHERE id = $1`, [req.params.id]);
-  if (!rowCount) return res.status(404).json({ error: 'not_found' });
+  const client = await pool.connect();
+  let removedTags = 0;
+  try {
+    await client.query('BEGIN');
+    // Remove auto-assigned tags from this rule first (FK is ON DELETE SET NULL, which would
+    // otherwise orphan them as un-owned "rule" tags).
+    removedTags = await removeRuleAssignedTags(req.params.id, client);
+    const { rowCount } = await client.query(`DELETE FROM tag_rules WHERE id = $1`, [req.params.id]);
+    if (!rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'not_found' });
+    }
+    await client.query(
+      `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
+       VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
+      [req.auth!.username, 'TAG_RULE_DELETE', 'tag_rule', req.params.id, JSON.stringify({ ruleId: req.params.id, removedTags })]
+    );
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
 
-  await pool.query(
-    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
-     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
-    [req.auth!.username, 'TAG_RULE_DELETE', 'tag_rule', req.params.id, JSON.stringify({ ruleId: req.params.id })]
-  );
-
-  res.json({ ok: true });
+  // Another enabled rule may still assign the same tag to some of those hosts.
+  const reevaluationError = removedTags > 0 ? await reconcileNow('rule delete') : null;
+  res.json({ ok: true, removedTagAssignments: removedTags, reevaluationError });
 });
 
 // Evaluate a single rule
@@ -141,18 +234,15 @@ tagRulesRouter.post('/:id/evaluate', requireRole('operator', 'admin'), async (re
     const result = await evaluateRule(req.params.id);
     res.json(result);
   } catch (e: any) {
-    res.status(400).json({ error: e.message });
+    if (e?.message === 'Tag rule not found') return res.status(404).json({ error: 'not_found' });
+    throw e;
   }
 });
 
 // Evaluate all rules
 tagRulesRouter.post('/evaluate-all', requireRole('operator', 'admin'), async (_req, res) => {
-  try {
-    const result = await evaluateAllRules();
-    res.json(result);
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
+  const result = await evaluateAllRules();
+  res.json(result);
 });
 
 // Evaluate rules for a specific host
@@ -161,6 +251,7 @@ tagRulesRouter.post('/evaluate-host/:hostId', requireRole('operator', 'admin'), 
     const result = await evaluateHostAgainstRules(req.params.hostId);
     res.json(result);
   } catch (e: any) {
-    res.status(400).json({ error: e.message });
+    if (e?.message === 'Host not found') return res.status(404).json({ error: 'not_found' });
+    throw e;
   }
 });

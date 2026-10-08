@@ -378,23 +378,96 @@ async function execInService(service, ...args) {
   return dockerCompose('exec', '-T', service, ...args);
 }
 
+const FOREIGN_RULE_PATTERNS = [
+  /^:DOCKER-USER /m,
+  /^-A FORWARD -j DOCKER-USER$/m,
+  /^-A DOCKER-USER -j RETURN$/m,
+  /^:f2b-sshd /m,
+  /^-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd$/m,
+  /^-A f2b-sshd -j RETURN$/m
+];
+
+/** Simulate other tools (Docker, fail2ban) owning rules on the targets; Segmentra must leave them alone. */
+async function seedForeignRules(policies) {
+  log('Seeding fake Docker / fail2ban chains on each target');
+  for (const policy of policies) {
+    const script = [
+      'iptables -N DOCKER-USER',
+      'iptables -A DOCKER-USER -j RETURN',
+      'iptables -A FORWARD -j DOCKER-USER',
+      'iptables -N f2b-sshd',
+      'iptables -A f2b-sshd -j RETURN',
+      'iptables -I INPUT 1 -p tcp -m multiport --dports 22 -j f2b-sshd'
+    ].join(' && ');
+    await execInService(policy.hostService, 'sh', '-c', script);
+  }
+}
+
+function countLines(text, line) {
+  return text.split('\n').filter((l) => l.trim() === line).length;
+}
+
 async function verifyIptablesState(policies) {
   log('Inspecting deployed iptables rules in each target');
   for (const policy of policies) {
     const { stdout } = await execInService(policy.hostService, 'iptables-save');
-    if (!/-A INPUT\b[^\n]*-s 172\.29\.0\.0\/24\b[^\n]*-p tcp\b[^\n]*--dport 22\b[^\n]*-j ACCEPT/.test(stdout)) {
+    if (!/-A SEGMENTRA-IN\b[^\n]*-s 172\.29\.0\.0\/24\b[^\n]*-p tcp\b[^\n]*--dport 22\b[^\n]*-j ACCEPT/.test(stdout)) {
       throw new Error(`Missing management SSH baseline on ${policy.hostName}`);
+    }
+    if (countLines(stdout, '-A INPUT -j SEGMENTRA-IN') !== 1 || countLines(stdout, '-A OUTPUT -j SEGMENTRA-OUT') !== 1) {
+      throw new Error(`INPUT/OUTPUT jumps to SEGMENTRA-IN/OUT must exist exactly once on ${policy.hostName}`);
+    }
+    if (!/^:INPUT ACCEPT /m.test(stdout)) {
+      throw new Error(`Built-in INPUT policy was changed on ${policy.hostName}`);
+    }
+    if (!/^-A SEGMENTRA-IN [^\n]*-j DROP$/m.test(stdout.split('\n').filter((l) => l.startsWith('-A SEGMENTRA-IN ')).pop() ?? '')) {
+      throw new Error(`SEGMENTRA-IN must end with the default DROP on ${policy.hostName}`);
+    }
+    for (const re of FOREIGN_RULE_PATTERNS) {
+      if (!re.test(stdout)) throw new Error(`Foreign (Docker/fail2ban) rule ${re} was removed on ${policy.hostName}`);
     }
 
     if (policy.allowFrom) {
       const escapedSource = policy.allowFrom.replaceAll('.', '\\.').replace('/', '\\/');
-      if (!new RegExp(`-A INPUT\\b[^\\n]*-s ${escapedSource}\\b[^\\n]*-p icmp\\b[^\\n]*-j ACCEPT`).test(stdout)) {
+      if (!new RegExp(`-A SEGMENTRA-IN\\b[^\\n]*-s ${escapedSource}\\b[^\\n]*-p icmp\\b[^\\n]*-j ACCEPT`).test(stdout)) {
         throw new Error(`Missing expected ICMP allow rule on ${policy.hostName}`);
       }
-    } else if (stdout.includes('-A INPUT -p icmp -s')) {
+    } else if (/-A SEGMENTRA-IN [^\n]*-p icmp [^\n]*-j ACCEPT/.test(stdout)) {
       throw new Error(`Unexpected ICMP allow rule found on ${policy.hostName}`);
     }
   }
+}
+
+async function complianceStatus(token, hostId) {
+  const result = await apiRequest('GET', `/compliance/hosts/${hostId}`, { token });
+  return result;
+}
+
+async function verifyCompliance(operatorToken, policies) {
+  log('Checking drift detection (compliance) for each target');
+  for (const policy of policies) {
+    const before = await complianceStatus(operatorToken, policy.hostId);
+    if (before.status !== 'compliant') {
+      throw new Error(`Expected ${policy.hostName} to be compliant right after deployment, got ${before.status}: ${before.message ?? before.error ?? ''}`);
+    }
+    // Churn by other tools must not count as drift
+    await execInService(policy.hostService, 'sh', '-c', 'iptables -I DOCKER-USER 1 -s 10.99.0.0/16 -j RETURN && iptables -N DOCKER-ISOLATION-STAGE-1 && iptables -A FORWARD -j DOCKER-ISOLATION-STAGE-1');
+    const churned = await complianceStatus(operatorToken, policy.hostId);
+    if (churned.status !== 'compliant') {
+      throw new Error(`Docker chain churn was reported as drift on ${policy.hostName}: ${churned.status} ${churned.message ?? ''}`);
+    }
+    await execInService(policy.hostService, 'sh', '-c', 'iptables -D DOCKER-USER -s 10.99.0.0/16 -j RETURN && iptables -D FORWARD -j DOCKER-ISOLATION-STAGE-1 && iptables -X DOCKER-ISOLATION-STAGE-1');
+  }
+}
+
+async function verifyDriftOnMissingJump(operatorToken, policy) {
+  log(`Removing the OUTPUT jump on ${policy.hostName} to confirm drift is reported`);
+  await execInService(policy.hostService, 'iptables', '-D', 'OUTPUT', '-j', 'SEGMENTRA-OUT');
+  const drifted = await complianceStatus(operatorToken, policy.hostId);
+  if (drifted.status !== 'drifted') {
+    throw new Error(`Expected drifted after removing the OUTPUT jump on ${policy.hostName}, got ${drifted.status}`);
+  }
+  await execInService(policy.hostService, 'iptables', '-I', 'OUTPUT', '1', '-j', 'SEGMENTRA-OUT');
 }
 
 async function assertPing(sourceService, destinationIp, shouldSucceed) {
@@ -437,6 +510,8 @@ async function main() {
     const createdHosts = await createHosts(operatorToken);
     const policies = await createPolicies(operatorToken, approverToken, createdHosts);
 
+    await seedForeignRules(policies);
+
     await runDeploymentRound('PASSWORD', adminToken, operatorToken, policies);
     await verifyIptablesState(policies);
     await verifyPingMatrix();
@@ -444,6 +519,8 @@ async function main() {
     await runDeploymentRound('KEY', adminToken, operatorToken, policies);
     await verifyIptablesState(policies);
     await verifyPingMatrix();
+    await verifyCompliance(operatorToken, policies);
+    await verifyDriftOnMissingJump(operatorToken, policies[0]);
 
     log('Docker SSH integration test completed successfully');
   } finally {

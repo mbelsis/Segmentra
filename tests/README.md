@@ -23,7 +23,7 @@ The test currently verifies:
 
 ## What It Starts
 
-The test stack is defined in [docker-compose.yml](/C:/Users/mbelsis/Documents/GitHub/Segmentra/tests/docker-ssh-integration/docker-compose.yml).
+The test stack is defined in [docker-compose.yml](docker-ssh-integration/docker-compose.yml).
 
 It starts these temporary services:
 
@@ -43,7 +43,7 @@ Each target container is Alpine-based and is configured with:
 
 ## How The Test Works
 
-The starter script is [run-docker-ssh-integration.mjs](/C:/Users/mbelsis/Documents/GitHub/Segmentra/tests/run-docker-ssh-integration.mjs).
+The starter script is [run-docker-ssh-integration.mjs](run-docker-ssh-integration.mjs).
 
 At a high level, it performs these steps:
 
@@ -65,11 +65,11 @@ At a high level, it performs these steps:
     - `target-b` allows ICMP only from `target-c`
     - `target-c` allows no ICMP sources
 11. Submits each policy for approval and approves it with a different user.
-12. Runs one deployment round with a global SSH password credential.
-13. Reads `iptables-save` output inside each target and checks for the expected management SSH baseline and ICMP allow rules.
+12. Seeds fake Docker (`DOCKER-USER`) and fail2ban (`f2b-sshd`) chains and jumps in each target, then runs one deployment round with a global SSH password credential.
+13. Reads `iptables-save` output inside each target and checks the expected management SSH baseline and ICMP allow rules in `SEGMENTRA-IN`, that the `INPUT`/`OUTPUT` jumps exist exactly once, that the built-in policies are unchanged and that the Docker/fail2ban rules are untouched.
 14. Runs real `ping` commands between the containers to confirm the traffic behavior matches the ACL.
 15. Runs a second deployment round with a global SSH key credential.
-16. Repeats the firewall inspection and live `ping` validation.
+16. Repeats the firewall inspection and live `ping` validation, then checks drift detection: each host is `compliant`, stays `compliant` after Docker chain churn, and is `drifted` once a Segmentra jump is removed.
 17. Tears the stack down, unless `--keep` is passed.
 
 ## Traffic Behavior That Is Verified
@@ -158,9 +158,10 @@ docker compose -f tests/docker-ssh-integration/docker-compose.yml -p segmentra-i
 
 You should see:
 
-- the default input policy set to `DROP`
-- a management SSH allow rule for `172.29.0.0/24` on port `22`
+- `-A INPUT -j SEGMENTRA-IN` and `-A OUTPUT -j SEGMENTRA-OUT` (once each); built-in policies stay `ACCEPT`
+- a management SSH allow rule for `172.29.0.0/24` on port `22` in `SEGMENTRA-IN`, which ends with the default `DROP`
 - host-specific ICMP allow rules only where expected
+- the fake `DOCKER-USER` / `f2b-sshd` chains and their jumps unchanged
 
 ### 4. Re-run the live ping checks manually
 
@@ -178,11 +179,11 @@ Expected result:
 
 ## Files Involved
 
-- [tests/run-docker-ssh-integration.mjs](/C:/Users/mbelsis/Documents/GitHub/Segmentra/tests/run-docker-ssh-integration.mjs): starter script and test driver
-- [tests/docker-ssh-integration/docker-compose.yml](/C:/Users/mbelsis/Documents/GitHub/Segmentra/tests/docker-ssh-integration/docker-compose.yml): temporary integration stack
-- [tests/docker-ssh-integration/target/Dockerfile](/C:/Users/mbelsis/Documents/GitHub/Segmentra/tests/docker-ssh-integration/target/Dockerfile): Alpine SSH target image
-- [tests/docker-ssh-integration/target/entrypoint.sh](/C:/Users/mbelsis/Documents/GitHub/Segmentra/tests/docker-ssh-integration/target/entrypoint.sh): target runtime configuration
-- [tests/docker-ssh-integration/README.md](/C:/Users/mbelsis/Documents/GitHub/Segmentra/tests/docker-ssh-integration/README.md): narrower README for this specific stack
+- [tests/run-docker-ssh-integration.mjs](run-docker-ssh-integration.mjs): starter script and test driver
+- [tests/docker-ssh-integration/docker-compose.yml](docker-ssh-integration/docker-compose.yml): temporary integration stack
+- [tests/docker-ssh-integration/target/Dockerfile](docker-ssh-integration/target/Dockerfile): Alpine SSH target image
+- [tests/docker-ssh-integration/target/entrypoint.sh](docker-ssh-integration/target/entrypoint.sh): target runtime configuration
+- [tests/docker-ssh-integration/README.md](docker-ssh-integration/README.md): narrower README for this specific stack
 
 ## Cleanup
 

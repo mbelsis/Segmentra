@@ -2,10 +2,7 @@ import { Router } from 'express';
 import { checkHostReadiness, type SshHostInfo } from '@segmentra/executor';
 import { pool } from '../db/pool.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
-import { readSecretPlaintext } from '../services/secrets.js';
-import path from 'node:path';
-import fs from 'node:fs';
-import os from 'node:os';
+import { getSshCredentialForHost, type MaterializedSshCredential } from '../services/ssh-credentials.js';
 
 const hostReadinessRouter = Router();
 hostReadinessRouter.use(requireAuth, requireRole('operator', 'admin'));
@@ -31,28 +28,27 @@ hostReadinessRouter.post('/hosts/:hostId/check', async (req, res) => {
 
   const host = hostRes.rows[0];
 
-  // Get SSH credential
-  const credRes = await pool.query(
-    `SELECT * FROM ssh_credentials WHERE scope_type='GLOBAL' ORDER BY created_at DESC LIMIT 1`
-  );
-  const cred = credRes.rows[0];
-
-  if (!cred) {
-    return res.status(400).json({ error: 'missing_ssh_credential' });
+  if (!host.mgmt_ip) {
+    return res.status(400).json({ error: 'missing_mgmt_ip', message: 'Host has no management IP' });
   }
 
-  const keyPem = (await readSecretPlaintext(cred.private_key_secret_id)).toString('utf8');
-  // Use os.tmpdir() for temporary keys to avoid dependency on BUNDLES_DIR existing
-  const tempKeyPath = path.join(os.tmpdir(), `segmentra_readiness_key_${hostId}_${Date.now()}`);
-  fs.writeFileSync(tempKeyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
+  let cred: MaterializedSshCredential;
+  try {
+    cred = await getSshCredentialForHost(hostId);
+  } catch (e: any) {
+    if (e?.message === 'missing_ssh_credential') return res.status(400).json({ error: 'missing_ssh_credential' });
+    throw e;
+  }
 
   try {
     const sshHostInfo: SshHostInfo = {
       hostname: host.hostname,
-      ip: String(host.mgmt_ip),
-      port: host.ssh_port || 22,
+      ip: String(host.mgmt_ip).split('/')[0],
+      port: Number(host.ssh_port) || 22,
       username: cred.username,
-      privateKeyPath: tempKeyPath
+      authMethod: cred.authMethod,
+      privateKeyPath: cred.privateKeyPath,
+      password: cred.password
     };
 
     const result = await checkHostReadiness(sshHostInfo);
@@ -60,19 +56,16 @@ hostReadinessRouter.post('/hosts/:hostId/check', async (req, res) => {
     // Update host firewall_backend if auto-detected
     if (result.backend !== 'unknown' && host.firewall_backend === 'auto') {
       await pool.query(
-        `UPDATE hosts SET firewall_backend=$1 WHERE id=$2`,
+        `UPDATE hosts SET firewall_backend=$1, updated_at=now() WHERE id=$2`,
         [result.backend, hostId]
       );
     }
 
     return res.json(result);
   } catch (error: any) {
-    return res.status(500).json({ error: 'check_failed', message: error.message });
+    return res.status(502).json({ error: 'check_failed', message: error.message });
   } finally {
-    // Clean up temp key file
-    if (fs.existsSync(tempKeyPath)) {
-      fs.unlinkSync(tempKeyPath);
-    }
+    cred.cleanup();
   }
 });
 

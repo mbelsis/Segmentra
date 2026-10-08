@@ -1,11 +1,14 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 
-import { api } from '../lib/api';
+import { api, errorMessage } from '../lib/api';
+import { useAuth, hasRole } from '../lib/auth-context';
 
 export function PolicySetDetailPage() {
   const { policySetId } = useParams();
   const navigate = useNavigate();
+  const { roles } = useAuth();
+  const canManage = hasRole(roles, 'operator', 'admin');
   const [policySet, setPolicySet] = useState<any>(null);
   const [versions, setVersions] = useState<any[]>([]);
   const [tags, setTags] = useState<any[]>([]);
@@ -31,7 +34,7 @@ export function PolicySetDetailPage() {
       setTags(tagsRes.tags);
       setVlans(vlansRes.vlans);
     } catch (e: any) {
-      setError(String(e.message || e));
+      setError(errorMessage(e));
     }
   }
 
@@ -52,6 +55,7 @@ export function PolicySetDetailPage() {
       DRAFT: '#888',
       PENDING_APPROVAL: '#2196F3',
       APPROVED: '#4CAF50',
+      DEPLOYED: '#2e7d32',
       REJECTED: '#F44336',
       ARCHIVED: '#999'
     };
@@ -67,7 +71,7 @@ export function PolicySetDetailPage() {
       });
       navigate(`/policy-version/${v.version.id}`);
     } catch (e: any) {
-      setError(String(e.message || e));
+      setError(errorMessage(e));
     }
   }
 
@@ -77,7 +81,7 @@ export function PolicySetDetailPage() {
       await api.submitApproval(versionId);
       loadData();
     } catch (e: any) {
-      setError(String(e.message || e));
+      setError(errorMessage(e));
     }
   }
 
@@ -88,7 +92,7 @@ export function PolicySetDetailPage() {
       loadData();
       navigate(`/policy-version/${v.version.id}`);
     } catch (e: any) {
-      setError(String(e.message || e));
+      setError(errorMessage(e));
     }
   }
 
@@ -98,7 +102,7 @@ export function PolicySetDetailPage() {
       await api.deleteVersion(versionId);
       loadData();
     } catch (e: any) {
-      setError(String(e.message || e));
+      setError(errorMessage(e));
     }
   }
 
@@ -108,12 +112,15 @@ export function PolicySetDetailPage() {
       await api.archiveVersion(versionId);
       loadData();
     } catch (e: any) {
-      setError(String(e.message || e));
+      setError(errorMessage(e));
     }
   }
 
   if (!policySetId) return <div className="error">Missing policy set ID</div>;
-  if (!policySet) return <div>Loading...</div>;
+  if (!policySet) {
+    if (error) return <div className="error-banner">Failed to load policy set: {error}</div>;
+    return <div>Loading...</div>;
+  }
 
   return (
     <div className="page">
@@ -122,7 +129,7 @@ export function PolicySetDetailPage() {
           <button onClick={() => navigate('/policies')} className="btn-secondary" style={{ marginBottom: 8 }}>← Back to Policy Sets</button>
           <h2>{policySet.name}</h2>
         </div>
-        <button onClick={createVersion} className="btn-primary">+ New Version</button>
+        {canManage && <button onClick={createVersion} className="btn-primary">+ New Version</button>}
       </div>
 
       {error && <div className="error-banner">{error}</div>}
@@ -168,6 +175,7 @@ export function PolicySetDetailPage() {
             {versions.map((v) => {
               const isDraft = v.status === 'DRAFT';
               const isApproved = v.status === 'APPROVED';
+              const isDeployed = v.status === 'DEPLOYED';
               const isRejected = v.status === 'REJECTED';
               return (
                 <tr key={v.id}>
@@ -226,19 +234,19 @@ export function PolicySetDetailPage() {
                   <td>
                     <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                       <button onClick={() => navigate(`/policy-version/${v.id}`)} className="btn-small btn-primary">View Rules</button>
-                      {isDraft && (
+                      {canManage && isDraft && (
                         <button onClick={() => submitForApproval(v.id)} className="btn-small btn-secondary">Submit for Approval</button>
                       )}
-                      {isRejected && (
+                      {canManage && isRejected && (
                         <button onClick={() => submitForApproval(v.id)} className="btn-small btn-secondary">Resubmit for Approval</button>
                       )}
-                      {isApproved && (
+                      {canManage && (isApproved || isDeployed) && (
                         <button onClick={() => cloneVersion(v.id)} className="btn-small btn-secondary">Clone</button>
                       )}
-                      {(isApproved || v.status === 'DEPLOYED' || v.status === 'PENDING_APPROVAL') && v.status !== 'ARCHIVED' && (
+                      {canManage && (isApproved || isDeployed || v.status === 'PENDING_APPROVAL') && (
                         <button onClick={() => archiveVersion(v.id)} className="btn-small btn-secondary" style={{ color: '#78644e' }}>Archive</button>
                       )}
-                      {(isDraft || isRejected) && (
+                      {canManage && (isDraft || isRejected) && (
                         <button onClick={() => deleteVersion(v.id)} className="btn-small btn-danger">Delete</button>
                       )}
                     </div>
@@ -249,7 +257,7 @@ export function PolicySetDetailPage() {
             {versions.length === 0 && (
               <tr>
                 <td colSpan={8} className="empty-state">
-                  No versions yet. Click "New Version" to create one.
+                  No versions yet.{canManage && ' Click "New Version" to create one.'}
                 </td>
               </tr>
             )}

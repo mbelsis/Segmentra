@@ -3,6 +3,26 @@ import { z } from 'zod';
 
 import { pool } from '../../db/pool.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
+import { isValidIp } from '../../services/ip-utils.js';
+import { evaluateHostAgainstRules } from '../../services/tag-rule-engine.js';
+
+/** Re-run tag rules for a host after attributes changed; never fails the request. */
+function reevaluateHostTags(hostId: string) {
+  void evaluateHostAgainstRules(hostId).catch((e) => {
+    // eslint-disable-next-line no-console
+    console.error(`[Hosts] Tag rule re-evaluation for host ${hostId} failed:`, e);
+  });
+}
+
+/** Hosts referenced by deployment history cannot be deleted (deployment_hosts FK has no cascade). */
+async function hostsWithDeploymentHistory(hostIds: string[]): Promise<Array<{ id: string; hostname: string }>> {
+  const { rows } = await pool.query(
+    `SELECT DISTINCT h.id, h.hostname FROM deployment_hosts dh JOIN hosts h ON h.id = dh.host_id
+      WHERE dh.host_id = ANY($1::uuid[]) ORDER BY h.hostname`,
+    [hostIds]
+  );
+  return rows;
+}
 
 export const hostsRouter = Router();
 
@@ -18,8 +38,10 @@ hostsRouter.get('/', requireRole('viewer', 'operator', 'approver', 'admin'), asy
   const env = String(req.query.env ?? '');
   const backend = String(req.query.backend ?? '');
   const enabled = req.query.enabled !== undefined ? req.query.enabled === 'true' || req.query.enabled === '1' : undefined;
-  const page = Math.max(1, parseInt(String(req.query.page ?? '1'), 10));
-  const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? '50'), 10)));
+  const parsedPage = parseInt(String(req.query.page ?? '1'), 10);
+  const parsedLimit = parseInt(String(req.query.limit ?? '50'), 10);
+  const limit = Math.min(1000, Math.max(1, Number.isFinite(parsedLimit) ? parsedLimit : 50));
+  const page = Math.max(1, Number.isFinite(parsedPage) ? parsedPage : 1);
   const offset = (page - 1) * limit;
 
   const where: string[] = [];
@@ -97,16 +119,17 @@ hostsRouter.get('/', requireRole('viewer', 'operator', 'approver', 'admin'), asy
   const hostIds = Array.from(hostMap.keys());
   if (hostIds.length > 0) {
     const tagRows = await pool.query(
-      `SELECT ht.host_id, t.id, t.name
+      `SELECT ht.host_id, t.id, t.name, ht.source, ht.source_rule_id
        FROM host_tags ht
        JOIN tags t ON t.id = ht.tag_id
-       WHERE ht.host_id = ANY($1::uuid[])`,
+       WHERE ht.host_id = ANY($1::uuid[])
+       ORDER BY t.name`,
       [hostIds]
     );
     for (const tagRow of tagRows.rows) {
       const host = hostMap.get(tagRow.host_id);
       if (host) {
-        host.tags.push({ id: tagRow.id, name: tagRow.name });
+        host.tags.push({ id: tagRow.id, name: tagRow.name, source: tagRow.source, sourceRuleId: tagRow.source_rule_id });
       }
     }
   }
@@ -124,7 +147,11 @@ hostsRouter.get('/', requireRole('viewer', 'operator', 'approver', 'admin'), asy
 
 const createHostSchema = z.object({
   hostname: z.string().min(1).max(255).regex(/^[a-zA-Z0-9._-]+$/, 'Hostname can only contain letters, numbers, dots, hyphens, and underscores'),
-  mgmtIp: z.string().optional(),
+  mgmtIp: z
+    .string()
+    .trim()
+    .optional()
+    .refine((v) => v === undefined || v === '' || isValidIp(v), { message: 'mgmtIp must be a valid IPv4 or IPv6 address' }),
   sshPort: z.number().int().min(1).max(65535).optional(),
   environment: z.string().optional(),
   osFamily: z.string().optional(),
@@ -137,7 +164,7 @@ const createHostSchema = z.object({
 // Write operations require operator/admin
 hostsRouter.post('/', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = createHostSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
   const b = parsed.data;
 
   const client = await pool.connect();
@@ -150,7 +177,7 @@ hostsRouter.post('/', requireRole('operator', 'admin'), async (req, res) => {
        RETURNING *`,
       [
         b.hostname,
-        b.mgmtIp ?? null,
+        b.mgmtIp || null,
         b.sshPort ?? 22,
         b.environment ?? null,
         b.osFamily ?? null,
@@ -165,13 +192,14 @@ hostsRouter.post('/', requireRole('operator', 'admin'), async (req, res) => {
     if (b.tagIds && b.tagIds.length > 0) {
       for (const tagId of b.tagIds) {
         await client.query(
-          `INSERT INTO host_tags (host_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+          `INSERT INTO host_tags (host_id, tag_id, source) VALUES ($1, $2, 'manual') ON CONFLICT DO NOTHING`,
           [host.id, tagId]
         );
       }
     }
     
     await client.query('COMMIT');
+    reevaluateHostTags(host.id);
     
     // Fetch host with tags and VLAN
     const hostWithTags = await client.query(
@@ -217,7 +245,8 @@ hostsRouter.get('/:id', requireRole('viewer', 'operator', 'approver', 'admin'), 
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
   
   const tagRows = await pool.query(
-    `SELECT t.id, t.name FROM host_tags ht JOIN tags t ON t.id = ht.tag_id WHERE ht.host_id = $1`,
+    `SELECT t.id, t.name, ht.source, ht.source_rule_id AS "sourceRuleId"
+       FROM host_tags ht JOIN tags t ON t.id = ht.tag_id WHERE ht.host_id = $1 ORDER BY t.name`,
     [req.params.id]
   );
   
@@ -233,8 +262,10 @@ const updateHostSchema = createHostSchema.partial();
 
 hostsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = updateHostSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
   const b = parsed.data;
+  // vlanId: null explicitly clears the VLAN; omitting it keeps the current value.
+  const clearVlan = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'vlanId') && b.vlanId === null;
 
   const client = await pool.connect();
   try {
@@ -248,7 +279,7 @@ hostsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
            environment = COALESCE($5, environment),
            os_family = COALESCE($6, os_family),
            firewall_backend = COALESCE($7, firewall_backend),
-           vlan_id = COALESCE($8, vlan_id),
+           vlan_id = CASE WHEN $10::boolean THEN NULL ELSE COALESCE($8, vlan_id) END,
            enabled = COALESCE($9, enabled),
            updated_at = now()
        WHERE id=$1
@@ -256,13 +287,14 @@ hostsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
       [
         req.params.id,
         b.hostname ?? null,
-        b.mgmtIp ?? null,
+        b.mgmtIp || null,
         b.sshPort ?? null,
         b.environment ?? null,
         b.osFamily ?? null,
         b.firewallBackend ?? null,
         b.vlanId ?? null,
-        typeof b.enabled === 'boolean' ? b.enabled : null
+        typeof b.enabled === 'boolean' ? b.enabled : null,
+        clearVlan
       ]
     );
     if (!rows[0]) {
@@ -270,22 +302,23 @@ hostsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
       return res.status(404).json({ error: 'not_found' });
     }
     
-    // Update tags if provided
+    // Update tags if provided. tagIds is the desired set of MANUAL tags: rule-assigned tags
+    // (source='rule') are managed by tag rules and are left untouched, including their source.
     if (b.tagIds !== undefined) {
-      // Remove all existing tags
-      await client.query(`DELETE FROM host_tags WHERE host_id = $1`, [req.params.id]);
-      // Add new tags
-      if (b.tagIds.length > 0) {
-        for (const tagId of b.tagIds) {
-          await client.query(
-            `INSERT INTO host_tags (host_id, tag_id) VALUES ($1, $2)`,
-            [req.params.id, tagId]
-          );
-        }
+      await client.query(
+        `DELETE FROM host_tags WHERE host_id = $1 AND source <> 'rule' AND NOT (tag_id = ANY($2::uuid[]))`,
+        [req.params.id, b.tagIds]
+      );
+      for (const tagId of b.tagIds) {
+        await client.query(
+          `INSERT INTO host_tags (host_id, tag_id, source) VALUES ($1, $2, 'manual') ON CONFLICT (host_id, tag_id) DO NOTHING`,
+          [req.params.id, tagId]
+        );
       }
     }
     
     await client.query('COMMIT');
+    reevaluateHostTags(req.params.id);
     
     // Fetch updated host with tags and VLAN
     const hostWithTags = await client.query(
@@ -296,7 +329,8 @@ hostsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
       [req.params.id]
     );
     const tagRows = await client.query(
-      `SELECT t.id, t.name FROM host_tags ht JOIN tags t ON t.id = ht.tag_id WHERE ht.host_id = $1`,
+      `SELECT t.id, t.name, ht.source, ht.source_rule_id AS "sourceRuleId"
+         FROM host_tags ht JOIN tags t ON t.id = ht.tag_id WHERE ht.host_id = $1 ORDER BY t.name`,
       [req.params.id]
     );
     
@@ -321,9 +355,22 @@ hostsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
 });
 
 hostsRouter.delete('/:id', requireRole('operator', 'admin'), async (req, res) => {
-  const { rowCount } = await pool.query(`DELETE FROM hosts WHERE id=$1`, [
-    req.params.id
-  ]);
+  const referenced = await hostsWithDeploymentHistory([req.params.id]);
+  if (referenced.length > 0) {
+    return res.status(409).json({
+      error: 'host_has_deployment_history',
+      message: 'This host has deployment history and cannot be deleted. Disable it instead.'
+    });
+  }
+  let rowCount: number | null;
+  try {
+    ({ rowCount } = await pool.query(`DELETE FROM hosts WHERE id=$1`, [req.params.id]));
+  } catch (e: any) {
+    if (e?.code === '23503') {
+      return res.status(409).json({ error: 'host_in_use', message: 'This host is still referenced by other records.' });
+    }
+    throw e;
+  }
   if (!rowCount) return res.status(404).json({ error: 'not_found' });
 
   await pool.query(
@@ -343,11 +390,25 @@ const bulkOperationSchema = z.object({
 hostsRouter.post('/bulk/delete', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = bulkOperationSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
-  
-  const { rowCount } = await pool.query(
-    `DELETE FROM hosts WHERE id = ANY($1::uuid[])`,
-    [parsed.data.hostIds]
-  );
+
+  const referenced = await hostsWithDeploymentHistory(parsed.data.hostIds);
+  if (referenced.length > 0) {
+    return res.status(409).json({
+      error: 'host_has_deployment_history',
+      message: `${referenced.length} host(s) have deployment history and cannot be deleted. Disable them instead.`,
+      hosts: referenced
+    });
+  }
+
+  let rowCount: number | null;
+  try {
+    ({ rowCount } = await pool.query(`DELETE FROM hosts WHERE id = ANY($1::uuid[])`, [parsed.data.hostIds]));
+  } catch (e: any) {
+    if (e?.code === '23503') {
+      return res.status(409).json({ error: 'host_in_use', message: 'One or more hosts are still referenced by other records.' });
+    }
+    throw e;
+  }
 
   await pool.query(
     `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
@@ -390,7 +451,7 @@ hostsRouter.post('/bulk/assign-tag', requireRole('operator', 'admin'), async (re
     let added = 0;
     for (const hostId of parsed.data.hostIds) {
       const result = await client.query(
-        `INSERT INTO host_tags (host_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        `INSERT INTO host_tags (host_id, tag_id, source) VALUES ($1, $2, 'manual') ON CONFLICT DO NOTHING`,
         [hostId, parsed.data.tagId]
       );
       if (result.rowCount) added++;
@@ -471,7 +532,7 @@ hostsRouter.post('/bulk/import', requireRole('operator', 'admin'), async (req, r
     return res.status(400).json({ error: 'missing_hostname_column', message: 'CSV must have a hostname column' });
   }
 
-  const results: Array<{ hostname: string; success: boolean; error?: string }> = [];
+  const results: Array<{ row: number; hostname: string; success: boolean; error?: string; warnings?: string[] }> = [];
   const client = await pool.connect();
 
   try {
@@ -492,67 +553,70 @@ hostsRouter.post('/bulk/import', requireRole('operator', 'admin'), async (req, r
     }
 
     for (let i = 0; i < dataRows.length; i++) {
+      const rowNumber = i + 2;
       const row = dataRows[i];
       const hostname = row[hostnameIdx]?.trim();
-      
+      const fail = (error: string) => results.push({ row: rowNumber, hostname: hostname || `Row ${rowNumber}`, success: false, error });
+
       if (!hostname) {
-        results.push({ hostname: `Row ${i + 2}`, success: false, error: 'Missing hostname' });
+        fail('Missing hostname');
         continue;
       }
 
       // Validate hostname format (same as single host creation)
       if (!/^[a-zA-Z0-9._-]+$/.test(hostname) || hostname.length > 255) {
-        results.push({ hostname, success: false, error: 'Invalid hostname. Only letters, numbers, dots, hyphens, and underscores allowed (max 255 chars).' });
+        fail('Invalid hostname. Only letters, numbers, dots, hyphens, and underscores allowed (max 255 chars).');
         continue;
       }
 
+      // ---- Validate the whole row before touching the database ----
+      const mgmtIp = ipIdx >= 0 ? row[ipIdx]?.trim() || null : null;
+      if (mgmtIp && !isValidIp(mgmtIp)) {
+        fail(`Invalid management IP: ${mgmtIp}`);
+        continue;
+      }
+
+      const sshPortRaw = sshPortIdx >= 0 ? row[sshPortIdx]?.trim() ?? '' : '';
+      const sshPort = sshPortRaw ? Number(sshPortRaw) : 22;
+      if ((sshPortRaw && !/^\d+$/.test(sshPortRaw)) || !Number.isInteger(sshPort) || sshPort < 1 || sshPort > 65535) {
+        fail(`Invalid SSH port: ${sshPortRaw}`);
+        continue;
+      }
+
+      let vlanId: string | null = null;
+      if (vlanIdx >= 0 && row[vlanIdx]?.trim()) {
+        const vlanValue = row[vlanIdx].trim();
+        vlanId = vlanMap.get(vlanValue.toLowerCase()) || vlanTagMap.get(vlanValue) || null;
+        if (!vlanId) {
+          fail(`VLAN not found: ${vlanValue}`);
+          continue;
+        }
+      }
+
+      const tagIds: string[] = [];
+      const missingTags: string[] = [];
+      if (tagIdx >= 0 && row[tagIdx]?.trim()) {
+        // Tags may be separated by ';' or '|' (or ',' inside a quoted field)
+        const tagValues = row[tagIdx].split(/[,;|]/).map(t => t.trim()).filter(Boolean);
+        for (const tagValue of tagValues) {
+          const tagId = tagMap.get(tagValue.toLowerCase());
+          if (tagId) tagIds.push(tagId);
+          else missingTags.push(tagValue);
+        }
+      }
+
+      const firewallBackend = backendIdx >= 0 ? (row[backendIdx]?.trim().toLowerCase() || 'auto') : 'auto';
+      if (!['nftables', 'iptables', 'auto'].includes(firewallBackend)) {
+        fail(`Invalid firewall backend: ${firewallBackend}`);
+        continue;
+      }
+
+      const enabledRaw = enabledIdx >= 0 ? row[enabledIdx]?.trim().toLowerCase() ?? '' : '';
+      const enabled = !(enabledRaw === 'false' || enabledRaw === '0' || enabledRaw === 'no');
+
+      // ---- Write the row inside a savepoint so one bad row can't poison the transaction ----
+      await client.query('SAVEPOINT import_row');
       try {
-        const mgmtIp = ipIdx >= 0 ? row[ipIdx]?.trim() || null : null;
-        const sshPort = sshPortIdx >= 0 ? (row[sshPortIdx]?.trim() ? parseInt(row[sshPortIdx].trim(), 10) : 22) : 22;
-        if (sshPort < 1 || sshPort > 65535) {
-          results.push({ hostname, success: false, error: `Invalid SSH port: ${sshPort}` });
-          continue;
-        }
-
-        // Resolve VLAN
-        let vlanId: string | null = null;
-        if (vlanIdx >= 0 && row[vlanIdx]?.trim()) {
-          const vlanValue = row[vlanIdx].trim();
-          vlanId = vlanMap.get(vlanValue.toLowerCase()) || vlanTagMap.get(vlanValue) || null;
-          if (!vlanId) {
-            results.push({ hostname, success: false, error: `VLAN not found: ${vlanValue}` });
-            continue;
-          }
-        }
-
-        // Resolve tags
-        const tagIds: string[] = [];
-        const missingTags: string[] = [];
-        if (tagIdx >= 0 && row[tagIdx]?.trim()) {
-          const tagValues = row[tagIdx].split(',').map(t => t.trim()).filter(Boolean);
-          for (const tagValue of tagValues) {
-            const tagId = tagMap.get(tagValue.toLowerCase());
-            if (tagId) {
-              tagIds.push(tagId);
-            } else {
-              missingTags.push(tagValue);
-            }
-          }
-        }
-        // Warn about missing tags but don't fail the import
-        if (missingTags.length > 0) {
-          // Continue with import, but note missing tags in a warning (we'll add this to results if needed)
-        }
-
-        const firewallBackend = backendIdx >= 0 ? (row[backendIdx]?.trim().toLowerCase() || 'auto') : 'auto';
-        if (!['nftables', 'iptables', 'auto'].includes(firewallBackend)) {
-          results.push({ hostname, success: false, error: `Invalid firewall backend: ${firewallBackend}` });
-          continue;
-        }
-
-        const enabled = enabledIdx >= 0 ? (row[enabledIdx]?.trim().toLowerCase() !== 'false' && row[enabledIdx]?.trim().toLowerCase() !== '0') : true;
-
-        // Insert host
         const hostRes = await client.query(
           `INSERT INTO hosts (hostname, mgmt_ip, ssh_port, firewall_backend, vlan_id, enabled)
            VALUES ($1, $2, $3, $4, $5, $6)
@@ -569,18 +633,31 @@ hostsRouter.post('/bulk/import', requireRole('operator', 'admin'), async (req, r
 
         const hostId = hostRes.rows[0].id;
 
-        // Update tags (delete old, add new)
-        await client.query(`DELETE FROM host_tags WHERE host_id=$1`, [hostId]);
-        for (const tagId of tagIds) {
+        // Replace MANUAL tags only; rule-assigned tags stay managed by tag rules.
+        if (tagIdx >= 0) {
           await client.query(
-            `INSERT INTO host_tags (host_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-            [hostId, tagId]
+            `DELETE FROM host_tags WHERE host_id = $1 AND source <> 'rule' AND NOT (tag_id = ANY($2::uuid[]))`,
+            [hostId, tagIds]
           );
+          for (const tagId of tagIds) {
+            await client.query(
+              `INSERT INTO host_tags (host_id, tag_id, source) VALUES ($1, $2, 'manual') ON CONFLICT DO NOTHING`,
+              [hostId, tagId]
+            );
+          }
         }
 
-        results.push({ hostname, success: true });
+        await client.query('RELEASE SAVEPOINT import_row');
+        results.push({
+          row: rowNumber,
+          hostname,
+          success: true,
+          ...(missingTags.length > 0 ? { warnings: [`Unknown tags ignored: ${missingTags.join(', ')}`] } : {})
+        });
       } catch (e: any) {
-        results.push({ hostname, success: false, error: e.message || String(e) });
+        await client.query('ROLLBACK TO SAVEPOINT import_row');
+        await client.query('RELEASE SAVEPOINT import_row');
+        fail(e?.detail || e?.message || String(e));
       }
     }
 
@@ -595,16 +672,23 @@ hostsRouter.post('/bulk/import', requireRole('operator', 'admin'), async (req, r
       [req.auth!.username, 'HOST_BULK_IMPORT', 'host', JSON.stringify({ imported, failed })]
     );
 
+    if (imported > 0) {
+      void import('../../services/tag-rule-engine.js')
+        .then(({ evaluateAllRules }) => evaluateAllRules())
+        .catch((e) => {
+          // eslint-disable-next-line no-console
+          console.error('[Hosts] Tag rule evaluation after import failed:', e);
+        });
+    }
+
     res.json({
       imported,
       failed,
       results
     });
   } catch (e) {
-    await client.query('ROLLBACK');
-    // eslint-disable-next-line no-console
-    console.error(e);
-    res.status(500).json({ error: 'import_failed' });
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
   } finally {
     client.release();
   }

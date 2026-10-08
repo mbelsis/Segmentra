@@ -1,4 +1,51 @@
 import { pool } from '../db/pool.js';
+import {
+  DEFAULT_OUTBOUND_TIMEOUT_MS,
+  normalizeHost,
+  postJsonSafe,
+  safeResolve,
+  validateOutboundUrl,
+  type SafeHttpResponse,
+} from '../lib/safe-http.js';
+
+/**
+ * Validate an outbound webhook URL (SSRF guard). Only http/https are allowed; loopback,
+ * link-local and cloud-metadata destinations are rejected unless
+ * SEGMENTRA_ALLOW_PRIVATE_WEBHOOKS=true. With resolveDns (default) the hostname is also
+ * resolved and every address checked — this is advisory (e.g. when saving a channel); the
+ * authoritative check happens at connect time inside postJsonSafe's lookup, so DNS
+ * rebinding between this check and the request cannot bypass it.
+ * Throws an Error whose message starts with "invalid_webhook_url:".
+ */
+export async function validateWebhookUrl(rawUrl: unknown, opts: { resolveDns?: boolean } = {}): Promise<URL> {
+  const url = validateOutboundUrl(rawUrl);
+  if (opts.resolveDns === false || process.env.SEGMENTRA_ALLOW_PRIVATE_WEBHOOKS === 'true') return url;
+  const host = normalizeHost(url.hostname);
+  try {
+    await safeResolve(host);
+  } catch (e: any) {
+    if (e?.name === 'BlockedDestinationError') throw new Error(`invalid_webhook_url: ${e.message}`);
+    throw new Error(`invalid_webhook_url: cannot resolve host "${host}"`);
+  }
+  return url;
+}
+
+/** POST JSON with the SSRF-safe client (validated IP is the one connected to; no redirects; 10s timeout). */
+async function postJson(rawUrl: string, headers: Record<string, string>, body: unknown): Promise<SafeHttpResponse> {
+  try {
+    return await postJsonSafe(rawUrl, headers, body, { timeoutMs: DEFAULT_OUTBOUND_TIMEOUT_MS });
+  } catch (e: any) {
+    if (e?.name === 'BlockedDestinationError') throw new Error(`invalid_webhook_url: ${e.message}`);
+    throw e;
+  }
+}
+
+function describeBadResponse(service: string, resp: SafeHttpResponse): string {
+  if (resp.status >= 300 && resp.status < 400) {
+    return `${service} returned redirect ${resp.status} (redirects are not followed)`;
+  }
+  return `${service} returned ${resp.status}`;
+}
 
 export type NotificationEventType =
   | 'POLICY_SUBMITTED'
@@ -10,7 +57,8 @@ export type NotificationEventType =
   | 'COMPLIANCE_DRIFT'
   | 'POLICY_EXPIRING_SOON'
   | 'POLICY_EXPIRED'
-  | 'EXCESSIVE_RULES_DETECTED';
+  | 'EXCESSIVE_RULES_DETECTED'
+  | 'AUDIT_RESTORE_FAILED';
 
 interface NotificationPayload {
   eventType: NotificationEventType;
@@ -90,12 +138,8 @@ async function sendSlack(config: any, payload: NotificationPayload): Promise<voi
     }],
   };
 
-  const resp = await fetch(webhookUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(slackPayload),
-  });
-  if (!resp.ok) throw new Error(`Slack returned ${resp.status}`);
+  const resp = await postJson(webhookUrl, { 'Content-Type': 'application/json' }, slackPayload);
+  if (!resp.ok) throw new Error(describeBadResponse('Slack', resp));
 }
 
 async function sendEmail(config: any, payload: NotificationPayload): Promise<void> {
@@ -117,22 +161,20 @@ async function sendWebhook(config: any, payload: NotificationPayload): Promise<v
   if (config.authHeader) {
     headers['Authorization'] = config.authHeader;
   }
-  if (config.customHeaders) {
-    Object.assign(headers, config.customHeaders);
+  if (config.customHeaders && typeof config.customHeaders === 'object') {
+    for (const [k, v] of Object.entries(config.customHeaders)) {
+      if (typeof v === 'string' && /^[A-Za-z0-9-]+$/.test(k)) headers[k] = v;
+    }
   }
 
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      event: payload.eventType,
-      subject: payload.subject,
-      data: payload.body,
-      timestamp: new Date().toISOString(),
-      source: 'segmentra',
-    }),
+  const resp = await postJson(url, headers, {
+    event: payload.eventType,
+    subject: payload.subject,
+    data: payload.body,
+    timestamp: new Date().toISOString(),
+    source: 'segmentra',
   });
-  if (!resp.ok) throw new Error(`Webhook returned ${resp.status}`);
+  if (!resp.ok) throw new Error(describeBadResponse('Webhook', resp));
 }
 
 /**
