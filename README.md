@@ -254,6 +254,18 @@ docker compose up -d --build     # build the images and start db, API, web (ngin
 
 Then open `http://<host>` (port 80). To upgrade: `git pull && docker compose up -d --build` (migrations run automatically). See [Building the Docker Images](docs/installation.md#building-the-docker-images) and [Upgrading](docs/installation.md#upgrading-to-a-new-version) for what each image contains, rebuilding single images and pushing to a registry.
 
+### Security hardening
+
+Segmentra can change the firewall of every managed host and stores SSH credentials with `sudo` rights on all of them, so a compromised Segmentra means compromised hosts. Before going to production:
+
+- **Use the hardened override:** `docker compose -f docker-compose.yml -f docker-compose.hardened.yml up -d --build`. This removes the Docker socket, makes the containers read-only, drops Linux capabilities, sets resource limits and publishes only nginx. It requires the SSH Direct executor.
+- **Network:** serve the UI over TLS (reverse proxy) and make it reachable only from a management network or VPN.
+- **Managed hosts:** use a dedicated SSH user with keys, restricted to logins from the Segmentra host, and set a management VLAN.
+- **Secrets:** `chmod 600 .env` and back it up separately from database backups.
+- **People:** use LDAP with MFA at your identity provider, keep few admins, and forward the audit log to a SIEM.
+
+The full guide, including what is already hardened and the remaining gaps, is in [docs/security.md](docs/security.md#hardening-a-production-install).
+
 For detailed installation instructions, see [installation.md](docs/installation.md).
 
 ---
@@ -363,7 +375,7 @@ The core workflow was tested end to end through the web UI against Docker contai
 | [Installation Guide](docs/installation.md) | Dev and production setup |
 | [Architecture](docs/Architecture.md) | API endpoints, database schema, RBAC matrix |
 | [User Guide](docs/guide.md) | Step-by-step usage for all features |
-| [Security: Credentials and Secrets](docs/security.md) | How SSH passwords/keys and LDAP passwords are encrypted, the encryption key, and who can access them |
+| [Security: Credentials, Secrets and Hardening](docs/security.md) | How credentials are encrypted, the encryption key, who can access them, and how to harden a production install |
 | [OT/IoT Guide](docs/iot.md) | IoT microsegmentation with gateway model |
 | [Gateway Setup](docs/gateway-setup-guide.md) | Linux gateway firewall configuration |
 | [Kubernetes Guide](docs/kubernetes.md) | K8s NetworkPolicy management |

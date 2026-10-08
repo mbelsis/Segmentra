@@ -1,0 +1,71 @@
+# Hardened production override for Segmentra.
+#
+# Use together with the base file:
+#   docker compose -f docker-compose.yml -f docker-compose.hardened.yml up -d --build
+#
+# What it changes (see docs/security.md, "Hardening a production install"):
+#   - No Docker socket in the API container (it is root-equivalent on the Docker host).
+#     The Ansible runner is not started; use the SSH Direct executor
+#     (Admin > Deployment Executor > SSH Direct) BEFORE the first deployment.
+#     To keep Ansible, don't use this file for segmentra-app, or run Segmentra on a dedicated VM.
+#   - Read-only root filesystems; only volumes and small tmpfs mounts are writable.
+#   - All Linux capabilities dropped (only the few each image needs are added back),
+#     no-new-privileges, PID and memory limits.
+#   - PostgreSQL and the API are not published on the host at all; only nginx (port 80) is.
+#
+# Requires Docker Compose 2.24 or later (for !override / !reset).
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  read_only: true
+  restart: unless-stopped
+
+services:
+  segmentra-db:
+    <<: *hardening
+    # The entrypoint starts as root, fixes data-directory ownership and switches to "postgres".
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    # Not published on the host: only the API reaches it over the compose network.
+    ports: !reset []
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+    shm_size: 128m
+    pids_limit: 200
+    mem_limit: 1g
+
+  # Not needed with the SSH Direct executor. Started only with: --profile ansible
+  segmentra-ansible-runner:
+    profiles: ["ansible"]
+
+  segmentra-app:
+    <<: *hardening
+    # Runs as the non-root "node" user and needs no capabilities.
+    # API only reachable through nginx (segmentra-web); not published on the host.
+    ports: !reset []
+    depends_on: !override
+      segmentra-db:
+        condition: service_healthy
+    group_add: !reset []
+    volumes: !override
+      - segmentra_bundles:/bundles
+      - segmentra_ssh_known_hosts:/home/node/.ssh
+    tmpfs:
+      # Temporary SSH key files (0600) and compiled policy files live here while in use.
+      - /tmp:size=64m,mode=1777
+    pids_limit: 256
+    mem_limit: 1g
+
+  segmentra-web:
+    <<: *hardening
+    # nginx master binds port 80 and switches to the "nginx" user for its workers.
+    cap_add: [CHOWN, NET_BIND_SERVICE, SETGID, SETUID]
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+      - /tmp
+    pids_limit: 100
+    mem_limit: 256m

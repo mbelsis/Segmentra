@@ -1,6 +1,8 @@
-# Security: Credentials and Secrets
+# Security: Credentials, Secrets and Hardening
 
-This page explains how Segmentra stores and uses sensitive data: SSH passwords and private keys, LDAP bind passwords and integration secrets. It also explains what operators need to do to keep that data safe.
+This page explains how Segmentra stores and uses sensitive data (SSH passwords and private keys, LDAP bind passwords, integration secrets) and how to harden a production installation.
+
+> **Why this matters:** whoever controls Segmentra can change the firewall on every managed host, and Segmentra holds SSH credentials with `sudo` rights on all of them. Treat it like a bastion host or a configuration-management server: a small number of trusted admins, reachable only from a management network, and monitored.
 
 ## Summary
 
@@ -60,6 +62,83 @@ Secrets are decrypted only when Segmentra needs to reach a host (deployments, re
 - **Login protection:** JWT sessions expire after 12 hours. Failed logins are rate-limited. In production the API refuses weak or placeholder `JWT_SECRET` values and requires at least 32 characters.
 - **Change control:** new policy versions must be approved by an `approver` or `admin` who did not create, edit or submit them. All actions are written to the Audit Log, which can be forwarded to a SIEM.
 - **Outbound calls:** notification webhooks can't be pointed at loopback, link-local or cloud-metadata addresses, and the check happens at connection time so DNS rebinding doesn't work.
+
+## Hardening a production install
+
+### What the shipped images already do
+
+- The API container runs as the non-root `node` user. The images are multi-stage builds, so compilers and dev dependencies are not in the runtime image.
+- `.dockerignore` keeps `.env`, keys and local data out of the build context, so no secrets are baked into images.
+- In the base `docker-compose.yml`, PostgreSQL and the API are published on `127.0.0.1` only. Browsers reach the API through nginx (`segmentra-web`).
+- In production (`NODE_ENV=production`) the API refuses to start without a strong `JWT_SECRET` (32+ characters, no placeholder values) and `SEGMENTRA_KEK_B64`, and the seed doesn't create a default admin password.
+- Secrets are encrypted at rest, SSH host keys are verified (trust on first use), failed logins are rate-limited, and every change is audited.
+
+### Hardened compose override (`docker-compose.hardened.yml`)
+
+The repository includes an override file that applies the container hardening below. Use it together with the base file:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.hardened.yml up -d --build
+```
+
+It does the following:
+
+| Setting | Effect |
+|---|---|
+| No Docker socket in `segmentra-app`; `segmentra-ansible-runner` is not started | Removes the biggest risk: the socket is root-equivalent on the Docker host. **Use the SSH Direct executor** (Admin → Deployment Executor → SSH Direct) before the first deployment. |
+| `read_only: true` on all containers | Root filesystems can't be modified. Only the named volumes (database, bundles, SSH known_hosts) and small `tmpfs` mounts (`/tmp`, nginx cache, Postgres socket) are writable. Temporary SSH key files live in the API's `tmpfs /tmp`. |
+| `cap_drop: [ALL]` | No Linux capabilities in the API container. The database and nginx get back only the few they need to start and switch to their unprivileged users. |
+| `no-new-privileges:true` | Processes can't gain privileges through setuid binaries. |
+| `pids_limit`, `mem_limit` | Limits the damage of a runaway or abused process. |
+| No published ports for PostgreSQL and the API | Only nginx (port 80, or `WEB_PORT`) is reachable from outside the Docker network. |
+
+It was tested with a full deployment flow through nginx: SSH password credential, readiness check, policy, approval, deployment to a target host. Requires Docker Compose 2.24 or later.
+
+If you need the Ansible executor, don't apply the `segmentra-app` part of this file, or start the runner with `--profile ansible` and add the socket back. In that case run Segmentra on a **dedicated VM** so that the socket only exposes that VM.
+
+### Checklist
+
+**1. Network access**
+- Serve the UI over **TLS**. Segmentra doesn't terminate TLS itself: put a reverse proxy or load balancer with a certificate in front of `segmentra-web`, or add TLS to its nginx configuration, and set `CORS_ORIGIN` to the HTTPS URL.
+- Make the UI reachable only from a management network or VPN. Never expose it to the internet. Firewall the Docker host itself.
+- Leave the API and PostgreSQL unpublished (the hardened override does this). If you set `API_BIND=0.0.0.0`, review `TRUST_PROXY`.
+
+**2. Docker host**
+- Prefer a dedicated VM for Segmentra. Keep the host OS and Docker up to date.
+- Remove the Docker socket mount unless you use the Ansible executor (see above).
+- Rebuild regularly to pick up base-image security updates: `docker compose build --pull && docker compose up -d`. Scan images with a scanner such as Trivy or Grype. For reproducible builds, pin base images by digest in the Dockerfiles.
+
+**3. Accounts on managed hosts**
+- Use a **dedicated SSH user** (for example `segmentra`), not `root`. Prefer **SSH keys** over passwords.
+- Restrict where that user can log in from: in `authorized_keys` use `from="<Segmentra host IP>"` before the key, or in `sshd_config` use `AllowUsers segmentra@<Segmentra host IP>`. Set a **management VLAN** in Segmentra so the deployed baseline only allows SSH from that subnet.
+- **sudo:** Segmentra currently runs its host scripts as `sudo -n sh -c '<script>'` (backups, apply, restore, log collection), so the SSH user needs **full passwordless sudo**. Restricting sudo to individual firewall commands is not possible today. Treat the Segmentra credential as root on every managed host and protect it accordingly.
+
+**4. Secrets**
+- Keep `.env` at `chmod 600`, owned by the account that runs Docker. Back it up **separately** from database backups. Losing `SEGMENTRA_KEK_B64` makes stored secrets unrecoverable; leaking it together with a database dump exposes them.
+- For stricter setups, inject the variables from your secret manager or Docker secrets instead of a plain `.env` file.
+- To rotate `JWT_SECRET`, change it and restart the API; all users are logged out. There is no built-in KEK rotation (see "The encryption key" above).
+- Remove `SEGMENTRA_BOOTSTRAP_TOKEN` after the first admin exists.
+
+**5. Database**
+- Use a strong `POSTGRES_PASSWORD` (the installer generates one).
+- Encrypt and restrict database backups. They contain encrypted secrets, policies and the audit log.
+
+**6. Users and roles**
+- Prefer LDAP / Active Directory with multi-factor authentication at the identity provider. Segmentra has no built-in MFA.
+- Keep the number of `admin` users small. Give people separate `operator` and `approver` roles. Policy approvals already require a different person than the author.
+- Disable accounts of people who leave. JWT sessions stay valid until they expire (12 hours).
+
+**7. Monitoring**
+- Forward the **Audit Log** to your SIEM (Integrations → SIEM). Alert at least on: SSH credential changes, user and role changes, approvals of high-risk deployments, and Firewall Learning or policy-test starts (these put hosts into log-only mode).
+- Watch the API logs for repeated failed logins and restore failures.
+- Back up the database and `.env`, and test a restore.
+
+### Remaining gaps
+
+- No built-in TLS or MFA (use a reverse proxy and your identity provider).
+- No built-in rotation of `SEGMENTRA_KEK_B64`.
+- The SSH user needs full sudo on managed hosts.
+- Decrypted secrets are in the API process's memory while in use, so control of the API container means control of the credentials.
 
 ## Known gaps
 

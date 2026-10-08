@@ -245,6 +245,14 @@ Check progress with:
 docker compose logs -f segmentra-app
 ```
 
+For production, consider the hardened override, which removes the Docker socket and makes the containers read-only (requires the SSH Direct executor):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.hardened.yml up -d --build
+```
+
+See [security.md](security.md#hardening-a-production-install).
+
 ### Step 3: Access the UI
 
 Open **http://localhost** (port 80) and log in as `admin` with the `SEGMENTRA_ADMIN_PASSWORD` value.
