@@ -337,11 +337,18 @@ export function runSshCommand(
   } catch (e: any) {
     return Promise.resolve({ exitCode: 1, stdout: '', stderr: e.message });
   }
-  const w = withAuth(host, 'ssh', [...args, command]);
+  // Non-root login shells on Debian-family hosts don't have the sbin directories in PATH, so
+  // `command -v nft` / `iptables` lookups would fail even though the tools are installed.
+  // (Commands run through sudo use sudo's secure_path and are unaffected.)
+  const remoteCommand = `${REMOTE_PATH_PREFIX}${command}`;
+  const w = withAuth(host, 'ssh', [...args, remoteCommand]);
   return withPasswordRetry(host, () =>
     spawnWithTimeout(w.cmd, w.args, { env: w.env, timeoutMs: opts.timeoutMs, input: opts.input, detached: w.detached })
   ).then((r) => scrubResult(host, r));
 }
+
+/** Prepended to every remote command: make the standard admin tool directories available. */
+export const REMOTE_PATH_PREFIX = 'PATH="$PATH:/usr/local/sbin:/usr/sbin:/sbin"; export PATH; ';
 
 /** Upload a local file to the remote host. */
 export function scpUpload(host: SshTarget, localPath: string, remotePath: string, opts: SshConnectionOptions = {}): Promise<ExecResult> {
