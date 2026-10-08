@@ -1,10 +1,10 @@
 # Dependencies
 node_modules/
+**/node_modules/
 
 # Build output
 dist/
-apps/api/dist/
-packages/*/dist/
+**/dist/
 
 # Environment and secrets
 .env
@@ -12,6 +12,7 @@ packages/*/dist/
 *.pem
 *.key
 .dev-admin-jwt.txt
+.dev-jwt-secret
 
 # IDE
 .idea/
@@ -25,6 +26,7 @@ Thumbs.db
 
 # Deployment bundles (contain SSH keys)
 data/bundles/
+apps/api/data/
 
 # Temp files
 *.tmp
