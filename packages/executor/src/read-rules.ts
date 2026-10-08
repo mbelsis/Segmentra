@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import type { SshHostInfo } from './types.js';
-import { runSshCommand, shq, type SshConnectionOptions } from './ssh-options.js';
+import { runSshCommand, runSshSudo, sudoSh, type SshConnectionOptions } from './ssh-options.js';
 
 export interface ReadRulesResult {
   hostname: string;
@@ -49,7 +49,7 @@ export async function readHostFirewallRules(host: SshHostInfo, opts: SshConnecti
     backend = detectResult.stdout.trim() === 'nft' ? 'nftables' : 'iptables';
   }
 
-  const result = await run(liveRulesReadCommand(backend));
+  const result = await runSshSudo(host, liveRulesReadScript(backend), opts);
 
   if (result.exitCode !== 0) {
     return {
@@ -79,16 +79,21 @@ export const LIVE_HASH_VERSION_PREFIX = 'v2:';
 export const IP6TABLES_SECTION_MARKER = '# ---- segmentra: ip6tables-save ----';
 
 /**
- * Remote command printing the full live ruleset (run as the SSH user, uses sudo -n):
- * `nft list ruleset`, or `iptables-save` followed by `ip6tables-save` (when available)
- * after IP6TABLES_SECTION_MARKER. Exit status is that of nft / iptables-save.
+ * Root shell script printing the full live ruleset: `nft list ruleset`, or `iptables-save`
+ * followed by `ip6tables-save` (when available) after IP6TABLES_SECTION_MARKER. Exit status
+ * is that of nft / iptables-save. Run it with runSshSudo (honours the host's sudo mode).
  */
-export function liveRulesReadCommand(backend: 'nftables' | 'iptables'): string {
-  if (backend === 'nftables') return 'sudo -n nft list ruleset 2>&1';
-  const script =
+export function liveRulesReadScript(backend: 'nftables' | 'iptables'): string {
+  if (backend === 'nftables') return 'nft list ruleset 2>&1';
+  return (
     `iptables-save 2>&1 || exit $?; ` +
-    `if command -v ip6tables-save >/dev/null 2>&1; then echo '${IP6TABLES_SECTION_MARKER}'; ip6tables-save 2>/dev/null || true; fi`;
-  return `sudo -n sh -c ${shq(script)}`;
+    `if command -v ip6tables-save >/dev/null 2>&1; then echo '${IP6TABLES_SECTION_MARKER}'; ip6tables-save 2>/dev/null || true; fi`
+  );
+}
+
+/** liveRulesReadScript wrapped in passwordless sudo (`sudo -n sh -c ...`). */
+export function liveRulesReadCommand(backend: 'nftables' | 'iptables'): string {
+  return sudoSh(liveRulesReadScript(backend));
 }
 
 function extractNftTable(text: string): string | null {

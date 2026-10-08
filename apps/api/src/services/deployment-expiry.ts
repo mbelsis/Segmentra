@@ -4,7 +4,7 @@ import { pool } from '../db/pool.js';
 import { claimDeploymentForStart, runDeploymentInBackground } from '../routes/deployments.js';
 import { createAuditEvent } from './audit.js';
 import { sendNotification } from './notifications.js';
-import { getSshCredentialForHost, type MaterializedSshCredential } from './ssh-credentials.js';
+import { getSshCredentialForHost, sshAuthFields, type MaterializedSshCredential } from './ssh-credentials.js';
 
 /**
  * Policy expiry processor (runs every minute from index.ts).
@@ -149,10 +149,7 @@ async function handleRemove(dep: any, hosts: ExpiringHost[]): Promise<{ outcome:
         hostname: h.hostname,
         ip: String(h.mgmt_ip),
         port: Number(h.ssh_port) || 22,
-        username: cred.username,
-        authMethod: cred.authMethod,
-        privateKeyPath: cred.authMethod === 'key' ? cred.privateKeyPath : undefined,
-        password: cred.authMethod === 'password' ? cred.password : undefined,
+        ...sshAuthFields(cred),
         backend: h.firewall_backend === 'nftables' || h.firewall_backend === 'iptables' ? h.firewall_backend : 'auto',
       };
       const r = await removeSegmentraPolicy(sshHost, { timeoutMs: REMOVE_SSH_TIMEOUT_MS });

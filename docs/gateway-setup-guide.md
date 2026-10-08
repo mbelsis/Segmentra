@@ -184,21 +184,25 @@ sudo chmod 600 /home/segmentra/.ssh/authorized_keys
 sudo chown -R segmentra:segmentra /home/segmentra/.ssh
 ```
 
-Store the matching private key (or a password) in **Admin → SSH Credentials**. Segmentra encrypts it at rest; see [security.md](security.md) for how credentials are stored and protected.
+Store the matching private key (with its passphrase, if it has one) or a password in **Admin → SSH Credentials**. Segmentra encrypts it at rest; see [security.md](security.md) for how credentials are stored and protected.
 
-Configure passwordless sudo for firewall commands:
+Configure sudo. Segmentra runs its host scripts as `sudo sh -c '…'`, so the SSH user needs **full sudo rights**. A sudoers entry limited to `nft`/`iptables` is not enough and makes deployments fail. sudo may ask for a password: then give the account a password and choose *sudo with a separate password* (key login) or *sudo with the login password* (password login) under **Privilege escalation** on the credential. Restrict *where* the account can log in from (see [security.md](security.md#checklist)).
 
 ```bash
-cat << 'EOF' | sudo tee /etc/sudoers.d/segmentra
-segmentra ALL=(ALL) NOPASSWD: /usr/sbin/nft, /usr/sbin/nft *, /usr/sbin/iptables, /usr/sbin/iptables-save, /usr/sbin/iptables-restore, /bin/mkdir, /bin/cp, /bin/mv, /bin/chmod, /bin/touch, /bin/rm, /usr/bin/tee, /usr/bin/systemctl reload rsyslog, /usr/bin/systemctl restart rsyslog
-EOF
+# sudo with a password (set a password for the account: sudo passwd segmentra)
+echo 'segmentra ALL=(ALL) ALL' | sudo tee /etc/sudoers.d/segmentra
+# or passwordless sudo (credential: "sudo without password")
+# echo 'segmentra ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/segmentra
 sudo chmod 440 /etc/sudoers.d/segmentra
+sudo visudo -c
 ```
 
-Test:
+Do not set `Defaults requiretty` for this account (Segmentra has no terminal; readiness checks report it).
+
+Test as the `segmentra` user:
 ```bash
-sudo -u segmentra sudo -n nft list ruleset
-# Should work without password prompt
+sudo -k -S -p '' sh -c 'id -u'    # type the sudo password, prints 0
+sudo -n sh -c 'id -u'             # passwordless setup: prints 0 without a prompt
 ```
 
 ---

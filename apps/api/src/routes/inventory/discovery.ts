@@ -49,6 +49,7 @@ async function loadProfiles(id?: string) {
               SELECT json_agg(json_build_object(
                        'id', t.id, 'sshCredentialId', t.ssh_credential_id, 'sshCredentialName', c.name,
                        'sshCredentialUsername', c.username, 'sshCredentialAuthMethod', c.auth_method,
+                       'sshCredentialSudoMode', c.sudo_mode,
                        'sshPort', t.ssh_port, 'cidrs', t.cidrs, 'vlanIds', t.vlan_ids
                      ) ORDER BY t.position, t.created_at)
                 FROM discovery_targets t JOIN ssh_credentials c ON c.id = t.ssh_credential_id

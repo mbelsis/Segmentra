@@ -296,8 +296,8 @@ Base URL: `http://localhost:8080/api`
 ### Host Readiness (Operator/Admin role required)
 
 - `POST /host-readiness/hosts/:hostId/check` — Check if a host is ready for deployments
-  - Returns: `{ hostname, ready: boolean, backend: 'nftables'|'iptables'|'unknown', nftVersion?, iptablesVersion?, sudoAccess: boolean, kernelSupport: boolean, errors: string[], warnings: string[] }`
-  - Verifies: nft/iptables availability, passwordless sudo access, kernel module support
+  - Returns: `{ hostname, ready: boolean, backend: 'nftables'|'iptables'|'unknown', nftVersion?, iptablesVersion?, sudoAccess: boolean, sudoMode: 'nopasswd'|'password', sudoError?: 'password_required'|'wrong_password'|'tty_required'|'not_permitted', kernelSupport: boolean, errors: string[], warnings: string[] }`
+  - Verifies: nft/iptables availability, sudo with the credential's privilege escalation mode (runs `id -u` + a ruleset read via `sudo sh -c`), kernel module support
   - Auto-updates `firewall_backend` if set to "auto"
 
 ### Troubleshoot
@@ -328,10 +328,11 @@ Base URL: `http://localhost:8080/api`
 
 ### SSH Credentials (Admin role required)
 
-- `GET /ssh-credentials` — List all SSH credentials
-- `POST /ssh-credentials` — Create new SSH credential. Body: `{ name, username, privateKeyPem, passphrase?, scopeType, scopeId? }` (stores private key encrypted)
-- `PUT /ssh-credentials/:id` — Update SSH credential metadata. Body: `{ name?, username?, scopeType?, scopeId? }`
-  - **Note**: The `PUT` endpoint does **not** update the private key or passphrase. SSH keys are immutable for security reasons. To rotate SSH keys, create a new credential via `POST` and delete the old one.
+- `GET /ssh-credentials` — List all SSH credentials: `id, name, username, auth_method, sudo_mode, scope_type, scope_id, created_at, has_passphrase, has_sudo_password` (no secret values or secret IDs)
+- `POST /ssh-credentials` — Create new SSH credential. Body: `{ name, username, authMethod: 'KEY', privateKeyPem, passphrase?, … }` or `{ name, username, authMethod: 'PASSWORD', password, … }`, plus `sudoMode?: 'NOPASSWD'|'LOGIN_PASSWORD'|'SUDO_PASSWORD'` (default `NOPASSWD`), `sudoPassword?` (required for `SUDO_PASSWORD`), `scopeType`, `scopeId?`. Secrets are stored encrypted.
+  - The key (and passphrase) is validated with `ssh-keygen -y`; errors: `400 invalid_key_or_passphrase` (unreadable key, encrypted key without passphrase, wrong passphrase), `400 invalid_sudo_mode` (`LOGIN_PASSWORD` with a key credential), `400 sudo_password_required`
+- `PUT /ssh-credentials/:id` — Update a credential. Body: `{ name?, username?, scopeType?, scopeId?, sudoMode?, sudoPassword?, passphrase? }` (`passphrase` for key credentials, validated against the stored key; `null`/`''` removes it if the key is unencrypted; omitting `sudoPassword` keeps the stored one)
+  - **Note**: The `PUT` endpoint does **not** replace the private key or login password. To rotate them, create a new credential via `POST` and delete the old one.
 
 ### Tag Rules (Auto-Tagging) (Operator/Admin role required)
 
@@ -714,7 +715,11 @@ Migrations live in `packages/db/migrations/` as plain `NNN_description.sql` file
 - `name` (text)
 - `username` (text)
 - `private_key_secret_id` (uuid, FK → secret_store.id)
-- `passphrase_secret_id` (uuid, FK → secret_store.id, nullable)
+- `passphrase_secret_id` (uuid, FK → secret_store.id, nullable) — key passphrase
+- `password_secret_id` (uuid, FK → secret_store.id, nullable) — login password (`auth_method = 'PASSWORD'`)
+- `auth_method` (text) — `KEY|PASSWORD`
+- `sudo_mode` (text, default `NOPASSWD`) — `NOPASSWD|LOGIN_PASSWORD|SUDO_PASSWORD` (migration 029; `LOGIN_PASSWORD` only with `PASSWORD` auth)
+- `sudo_password_secret_id` (uuid, FK → secret_store.id, nullable) — separate sudo password (required for `SUDO_PASSWORD`)
 - `scope_type` (text) — `GLOBAL|TAG|VLAN|HOST`
 - `scope_id` (uuid, nullable) — Tag/VLAN/Host ID when scope_type is not GLOBAL
 - `created_at` (timestamptz)
@@ -1073,7 +1078,7 @@ Firewall Learning is a powerful feature that helps administrators discover the c
 
 #### Limitations
 
-- Requires SSH access and passwordless sudo on target hosts
+- Requires SSH access and full sudo rights (with or without a sudo password) on target hosts
 - Log file size depends on traffic volume (may be large for busy servers)
 - Log parsing may be slow for very large log files
 - rsyslog configuration changes require sudo access
@@ -1088,8 +1093,8 @@ Segmentra provides **agentless drift detection** by comparing current firewall r
 1. **Policy Hash Storage**: When a deployment succeeds, the SHA-256 hash of the compiled policy text is stored in `deployment_hosts.applied_hash`.
 
 2. **Rule Reading**: The compliance check uses SSH to read current firewall rules:
-   - For nftables: `sudo -n nft list ruleset`
-   - For iptables: `sudo -n iptables-save`
+   - For nftables: `nft list ruleset` (as root via `sudo sh -c`, passwordless or with the sudo password on stdin)
+   - For iptables: `iptables-save` (+ `ip6tables-save`), same way
 
 3. **Normalization & Hashing**: Rules are normalized (removing timestamps, comments) and hashed using SHA-256.
 
@@ -1276,9 +1281,9 @@ Before deploying, verify that hosts are ready to receive firewall policies.
    - Reads `nft --version` if available
    - Reads `iptables --version` if available
 
-3. **Sudo Access Verification**:
-   - Tests passwordless sudo for `nft list ruleset`
-   - Tests passwordless sudo for `iptables-save`
+3. **Sudo Access Verification** (with the credential's privilege escalation mode):
+   - Runs `id -u` and `nft list ruleset` / `iptables-save` in one `sudo sh -c` — `sudo -n` for *sudo without password*, `sudo -k -S -p ''` with the password on stdin otherwise — and requires uid 0
+   - Classifies sudo refusals (`sudoError`): `password_required`, `wrong_password`, `tty_required`, `not_permitted`
    - Verifies `iptables-restore` availability if needed
 
 4. **Kernel Support**:
@@ -1302,6 +1307,8 @@ Before deploying, verify that hosts are ready to receive firewall policies.
   nftVersion?: string;
   iptablesVersion?: string;
   sudoAccess: boolean;
+  sudoMode: 'nopasswd' | 'password';
+  sudoError?: 'password_required' | 'wrong_password' | 'tty_required' | 'not_permitted';
   kernelSupport: boolean;
   errors: string[];      // Critical issues preventing deployment
   warnings: string[];   // Non-critical issues (may still work)
@@ -1951,22 +1958,22 @@ The simulation uses simplified rule matching logic designed for quick analysis. 
 
 ### Host Readiness Issues
 
-#### Readiness Check Fails: "Passwordless sudo access required"
-**Symptom**: Readiness check shows `sudoAccess: false` with error about passwordless sudo
+#### Readiness Check Fails: sudo errors
+**Symptom**: Readiness check shows `sudoAccess: false`; `sudoError` and the error text say why. The same messages appear on failed deployments ("sudo failed: …").
 
-**Causes**:
-- SSH user doesn't have sudo access
-- Sudo requires password (not passwordless)
-- Sudoers configuration doesn't allow nft/iptables commands
+| `sudoError` | Error text (abridged) | Fix |
+|---|---|---|
+| `password_required` | sudo on this host requires a password for "user", but the SSH credential is set to "sudo without password" | Set the credential's *Privilege escalation* to *sudo with the login password* / *sudo with a separate password*, or give the account `NOPASSWD: ALL` |
+| `wrong_password` | sudo rejected the configured sudo password (incorrect password) | Update the credential's sudo password (or the login password for *sudo with the login password*) |
+| `tty_required` | sudo on this host requires a terminal (sudoers "Defaults requiretty") | Add `Defaults:<user> !requiretty` to a file in `/etc/sudoers.d/` |
+| `not_permitted` | "user" is not allowed to run "sh" as root via sudo | Give the account full sudo rights (`ALL`); a list of firewall commands is not enough |
 
-**Solutions**:
-1. Verify sudo access: `ssh user@host "sudo -n nft list ruleset"`
-2. Configure passwordless sudo for firewall commands:
-   ```bash
-   # On the host, add to /etc/sudoers.d/segmentra:
-   segmentra_user ALL=(ALL) NOPASSWD: /usr/sbin/nft, /usr/sbin/iptables, /usr/sbin/iptables-save, /usr/sbin/iptables-restore
-   ```
-3. Test: `sudo -n nft list ruleset` should work without password
+**Other checks**:
+1. Verify on the host as the SSH user: `sudo -k -S -p '' sh -c 'id -u'` (enter the password; prints `0`) or `sudo -n sh -c 'id -u'` for passwordless sudo
+2. Example sudoers entries (`/etc/sudoers.d/segmentra`): `segmentra_user ALL=(ALL) ALL` (sudo with password) or `segmentra_user ALL=(ALL) NOPASSWD: ALL`
+
+#### Readiness Check Fails: "SSH connection failed: … Permission denied (publickey) (the key was rejected or its passphrase is wrong …)"
+**Cause**: the key is not authorized for the user, or the stored key passphrase no longer matches (e.g. the key was re-encrypted). Passphrases are validated when a credential is saved; update it with `PUT /ssh-credentials/:id` `{ passphrase }`.
 
 #### Readiness Check Shows "nf_tables kernel module not loaded"
 **Symptom**: Warning about kernel module (but may still work)
@@ -2217,9 +2224,9 @@ The `docker-compose.yml` file defines:
 ### Security Considerations
 
 1. **Docker Socket Mount**: The app container mounts `/var/run/docker.sock` for Ansible executor. This gives full Docker access - treat as high trust.
-2. **Secret Encryption**: SSH keys and LDAP passwords are encrypted using AES-256-GCM. Store `SEGMENTRA_KEK_B64` securely.
+2. **Secret Encryption**: SSH keys, key passphrases, SSH/sudo passwords and LDAP passwords are encrypted using AES-256-GCM. Store `SEGMENTRA_KEK_B64` securely.
 3. **JWT Tokens**: Tokens expire after 12 hours. Store `JWT_SECRET` securely.
-4. **SSH Credentials**: Use sudo-capable accounts, not root. Ensure passwordless sudo for firewall commands.
+4. **SSH Credentials**: Use a dedicated account, not root, with full sudo rights — sudo with a password (stored encrypted, sent on stdin) or `NOPASSWD` (see docs/security.md).
 5. **LDAP**: Use LDAPS (port 636) for secure LDAP connections in production.
 
 ### Secret Storage & Encryption
@@ -2318,7 +2325,7 @@ Segmentra implements robust encryption for sensitive data stored in the database
 - Deployment timeout is fixed at 10 minutes per host.
 - No built-in rollback UI (rollback happens automatically on failure).
 - Firewall backend `auto` setting is now auto-detected before compilation via SSH. If auto-detection fails, it defaults to `nftables`. The detected backend is stored in the host record for future deployments. Executors validate that the compiled policy format matches the detected backend at runtime.
-- Drift detection requires SSH access and passwordless sudo. Hosts without SSH credentials configured cannot be checked for compliance.
+- Drift detection requires SSH access and sudo (passwordless or with the credential's sudo password). Hosts without SSH credentials configured cannot be checked for compliance.
 - Scheduled deployments use simple datetime comparison. When `scheduled_at <= now()`, the system clears `scheduled_at` and leaves the deployment in `QUEUED` status - manual start via `/deployments/:id/start` is still required. No support for recurring schedules, timezone handling, or complex scheduling rules.
 - **High-risk policy detection**: The system automatically evaluates policy versions for high-risk patterns and sets the `is_high_risk` flag. High-risk policies require a different approver (no self-approval, even for admins). Risk evaluation considers interface scope, target count, source ranges, and sensitive ports. See [High-Risk Policy Detection](#high-risk-policy-detection) for details.
 

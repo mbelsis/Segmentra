@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { promisify } from 'node:util';
-import { hashLiveRuleset, liveRulesReadCommand } from './read-rules.js';
+import { hashLiveRuleset, liveRulesReadScript } from './read-rules.js';
 import {
   SEGMENTRA_BACKUP_DIR,
   installHostScriptsSnippet,
@@ -17,9 +17,9 @@ import {
 } from './iptables-scripts.js';
 import {
   runSshCommand,
+  runSshSudo,
   scpUpload,
   shq,
-  sudoSh,
   type ExecResult,
   type SshConnectionOptions
 } from './ssh-options.js';
@@ -34,6 +34,10 @@ export interface SshHost {
   authMethod?: 'key' | 'password';
   privateKeyPath?: string;
   password?: string;
+  /** Passphrase of the private key (key auth); undefined for unencrypted keys. */
+  keyPassphrase?: string;
+  /** sudo password; undefined = passwordless sudo (sudo -n). */
+  sudoPassword?: string;
   policyFilePath: string; // local path to policy file
   /** iptables backend only: local path to the ip6tables-restore file (CompileOutput.ip6tablesRules). */
   ip6PolicyFilePath?: string;
@@ -161,6 +165,9 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
   const unit = `segmentra-revert-${timestamp.replace(/[^0-9A-Za-z]/g, '')}-${nonce}`;
   const run = (cmd: string, o: { timeoutMs?: number } = {}) =>
     runSshCommand(host, cmd, { knownHostsPath: opts.knownHostsPath, timeoutMs: o.timeoutMs ?? opts.timeoutMs });
+  // Root commands: one `sudo sh -c` per step, honouring the host's sudo mode (password or not).
+  const sudo = (script: string, o: { args?: string[] } = {}) =>
+    runSshSudo(host, script, { knownHostsPath: opts.knownHostsPath, timeoutMs: opts.timeoutMs, args: o.args });
 
   let stdout = '';
   let stderr = '';
@@ -176,13 +183,16 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
 
   try {
     // Step 1: Ensure backup directory exists
-    const mkdirResult = await run(sudoSh(`mkdir -p ${shq(BACKUP_DIR)} && chmod 700 ${shq(BACKUP_DIR)}`));
+    const mkdirResult = await sudo(`mkdir -p ${shq(BACKUP_DIR)} && chmod 700 ${shq(BACKUP_DIR)}`);
     add(mkdirResult);
     if (mkdirResult.exitCode !== 0) {
       // This is the first command on the host, so a failure here is usually SSH itself
       // (unreachable host, timeout, auth) rather than the directory: surface the real error.
-      const detail = (mkdirResult.stderr || mkdirResult.stdout || '').trim().split('\n').pop() || `exit code ${mkdirResult.exitCode}`;
-      const reason = mkdirResult.exitCode === 255 || mkdirResult.exitCode === 124 ? 'SSH connection failed' : 'could not create backup directory';
+      const detail =
+        (mkdirResult.stderr || mkdirResult.stdout || '').trim().split('\n').pop()?.replace(/^Error:\s*/, '') || `exit code ${mkdirResult.exitCode}`;
+      const reason = mkdirResult.sudoError
+        ? 'sudo failed'
+        : mkdirResult.exitCode === 255 || mkdirResult.exitCode === 124 ? 'SSH connection failed' : 'could not create backup directory';
       return fail(mkdirResult.exitCode, `Error: ${reason}: ${detail}`);
     }
 
@@ -222,7 +232,7 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
         : scopedBackupSnippet('iptables', paths.backupFile, paths.backupFile6, 'installed'),
       `test -s ${shq(paths.backupFile)}`
     ].join('\n');
-    const backupResult = await run(sudoSh(backupScript));
+    const backupResult = await sudo(backupScript);
     add(backupResult);
     if (backupResult.exitCode !== 0) {
       return fail(backupResult.exitCode, 'Error: failed to back up current firewall rules; deployment aborted (no changes made)');
@@ -254,7 +264,7 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
         ? `install -m 600 -o root "$1/${remoteUpload6}" /etc/segmentra.policy6 && rm -f "$1/${remoteUpload6}"`
         : 'rm -f /etc/segmentra.policy6'
     ].join('\n');
-    const setupResult = await run(`sudo -n sh -c ${shq(installScript)} segmentra "$HOME"`);
+    const setupResult = await sudo(installScript, { args: ['segmentra', '"$HOME"'] });
     add(setupResult);
     if (setupResult.exitCode !== 0) return fail(setupResult.exitCode, 'Error: failed to install policy file', { backupPath });
 
@@ -276,7 +286,7 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
     ].join('\n');
     const scheduledAt = Date.now();
     const deadline = scheduledAt + delay * 1000;
-    const schedResult = await run(sudoSh(scheduleScript));
+    const schedResult = await sudo(scheduleScript);
     add(schedResult);
     const token = (schedResult.stdout.trim().split('\n').pop() ?? '').trim();
     if (schedResult.exitCode !== 0 || !/^(systemd:[A-Za-z0-9-]+|pid:\d+)$/.test(token)) {
@@ -284,27 +294,23 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
     }
     stdout += `Automatic revert scheduled in ${delay}s (${token})\n`;
     // Exit code 9 = the revert already fired (or is firing); the deployment has been undone.
-    const cancelCmd = token.startsWith('systemd:')
-      ? sudoSh(
-          [
-            `if [ -e ${shq(marker)} ]; then exit 9; fi`,
-            `systemctl stop ${shq(`${unit}.timer`)} || exit 1`,
-            `systemctl reset-failed ${shq(`${unit}.timer`)} ${shq(`${unit}.service`)} >/dev/null 2>&1`,
-            `if [ -e ${shq(marker)} ]; then exit 9; fi`,
-            'exit 0'
-          ].join('\n')
-        )
-      : sudoSh(
-          [
-            `pid=${token.slice(4)}`,
-            `if [ -e ${shq(marker)} ] || ! kill -0 "$pid" 2>/dev/null; then exit 9; fi`,
-            'kill "$pid" 2>/dev/null',
-            'sleep 1',
-            'if kill -0 "$pid" 2>/dev/null; then exit 1; fi',
-            `if [ -e ${shq(marker)} ]; then exit 9; fi`,
-            'exit 0'
-          ].join('\n')
-        );
+    const cancelScript = token.startsWith('systemd:')
+      ? [
+          `if [ -e ${shq(marker)} ]; then exit 9; fi`,
+          `systemctl stop ${shq(`${unit}.timer`)} || exit 1`,
+          `systemctl reset-failed ${shq(`${unit}.timer`)} ${shq(`${unit}.service`)} >/dev/null 2>&1`,
+          `if [ -e ${shq(marker)} ]; then exit 9; fi`,
+          'exit 0'
+        ].join('\n')
+      : [
+          `pid=${token.slice(4)}`,
+          `if [ -e ${shq(marker)} ] || ! kill -0 "$pid" 2>/dev/null; then exit 9; fi`,
+          'kill "$pid" 2>/dev/null',
+          'sleep 1',
+          'if kill -0 "$pid" 2>/dev/null; then exit 1; fi',
+          `if [ -e ${shq(marker)} ]; then exit 9; fi`,
+          'exit 0'
+        ].join('\n');
     const revertFiredMsg = `The automatic revert already fired; Segmentra's previous state (${backupPath}) was restored and the deployment is NOT active`;
 
     // Step 7: Apply firewall rules (as root; redirects happen inside sudo).
@@ -312,16 +318,16 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
     // chains (iptables-restore --noflush) and inserts the INPUT/OUTPUT(/FORWARD) jumps in the same
     // transaction, then cleans up rules left by the legacy full-table design.
     const applyScript = ext === 'nft' ? 'nft -f /etc/segmentra.policy' : iptablesApplyScript();
-    const applyResult = await run(sudoSh(applyScript));
+    const applyResult = await sudo(applyScript);
     add(applyResult);
 
     if (applyResult.exitCode !== 0) {
       stdout += '\n=== Rollback (apply failed) ===\n';
-      const rb = await run(sudoSh(restoreScript));
+      const rb = await sudo(restoreScript);
       add(rb);
       if (rb.exitCode === 0) {
         stdout += `Restored ${backupPath}\n`;
-        const c = await run(cancelCmd);
+        const c = await sudo(cancelScript);
         add(c);
       } else {
         stderr += `Immediate rollback failed; automatic revert will retry within ${delay}s\n`;
@@ -353,11 +359,11 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
     }
 
     // Step 9: Cancel the revert (verifying it has not fired yet)
-    let cancelResult = await run(cancelCmd);
+    let cancelResult = await sudo(cancelScript);
     for (let attempt = 2; attempt <= 3 && cancelResult.exitCode !== 0 && cancelResult.exitCode !== 9; attempt++) {
       stderr += `Cancel attempt ${attempt - 1} failed: ${cancelResult.stderr.trim()}\n`;
       await new Promise((r) => setTimeout(r, 1000));
-      cancelResult = await run(cancelCmd);
+      cancelResult = await sudo(cancelScript);
     }
     add(cancelResult);
     if (cancelResult.exitCode === 9) {
@@ -373,13 +379,13 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
     stdout += 'Reachability verified; automatic revert cancelled\n';
     if (ext === 'iptables') {
       // Migration from the legacy design is confirmed; never match against the legacy policy again.
-      const retire = await run(sudoSh(retireLegacyPolicyScript()));
+      const retire = await sudo(retireLegacyPolicyScript());
       if (retire.exitCode !== 0) stderr += `Warning: could not retire legacy policy files: ${retire.stderr.trim()}\n`;
     }
 
     // Step 10: Read back live ruleset for drift detection (same read + normalization as readHostFirewallRules)
     let liveRulesHash: string | undefined;
-    const live = await run(liveRulesReadCommand(ext === 'nft' ? 'nftables' : 'iptables'));
+    const live = await sudo(liveRulesReadScript(ext === 'nft' ? 'nftables' : 'iptables'));
     if (live.exitCode === 0) {
       liveRulesHash = hashLiveRuleset(ext === 'nft' ? 'nftables' : 'iptables', live.stdout);
     } else {

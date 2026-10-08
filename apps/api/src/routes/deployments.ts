@@ -7,14 +7,14 @@ import { Router } from 'express';
 import { z } from 'zod';
 
 import { compileHostPolicy, type RuleDirection } from '@segmentra/compiler';
-import { runAnsiblePlaybook, runSshDeployment, checkHostReadiness, readHostFirewallRules, type SshHost, type SshHostInfo } from '@segmentra/executor';
+import { runAnsiblePlaybook, runSshDeployment, checkHostReadiness, checkPrivateKey, readHostFirewallRules, type AnsibleAgentKey, type SshHost, type SshHostInfo } from '@segmentra/executor';
 
 import { pool } from '../db/pool.js';
 import { env } from '../lib/env.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { addDestinationSets, compilerDestination, getProtectedDestinations } from '../services/forward-rules.js';
 import { createAuditEvent } from '../services/audit.js';
-import { getSshCredentialForHost, loadSshCredential, materializeSshCredential, type MaterializedSshCredential } from '../services/ssh-credentials.js';
+import { getSshCredentialForHost, loadSshCredential, materializeSshCredential, sshAuthFields, type MaterializedSshCredential } from '../services/ssh-credentials.js';
 import { checkDeploymentSafety } from '../services/safety-check.js';
 import { isPolicyVersionHighRisk } from '../services/high-risk.js';
 
@@ -72,10 +72,7 @@ async function recordLiveBaseline(deploymentId: string, host: any, backend?: 'nf
       hostname: host.hostname,
       ip: String(host.mgmt_ip),
       port: host.ssh_port || 22,
-      username: cred.username,
-      authMethod: cred.authMethod,
-      privateKeyPath: cred.authMethod === 'key' ? cred.privateKeyPath : undefined,
-      password: cred.authMethod === 'password' ? cred.password : undefined,
+      ...sshAuthFields(cred),
       backend: backend ?? 'auto'
     });
     if (read.success && read.rulesHash) {
@@ -663,19 +660,38 @@ const SAFE_INVENTORY_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /**
  * Write the per-host Ansible connection secrets. Key credentials are materialised once per
- * credential into <bundle>/.secrets/ (0600, dir 0700) and referenced by runner path from the
- * inventory; passwords never go into the INI inventory or onto a command line — they live in
- * <bundle>/host_vars/<inventory_name>.yml (0600) as !unsafe strings so Jinja never templates them.
+ * credential into <bundle>/.secrets/ (0600, dir 0700) exactly as stored — a passphrase-protected
+ * key stays encrypted on disk — and referenced by runner path from the inventory. Passwords
+ * never go into the INI inventory or onto a command line: the login password and the sudo
+ * (become) password live in <bundle>/host_vars/<inventory_name>.yml (0600) as !unsafe strings
+ * so Jinja never templates them. Key passphrases are never written anywhere: the playbook runs
+ * under ssh-agent in the runner and the passphrase reaches ssh-add only through the environment
+ * (see agentKeys() and runAnsiblePlaybook). Everything is removed by cleanup() after the run.
  */
-class AnsibleSecrets {
+export class AnsibleSecrets {
   private readonly secretsDir: string;
   private readonly hostVarsDir: string;
   private readonly keyByCred = new Map<string, MaterializedSshCredential>();
   private readonly files = new Set<string>();
+  private readonly agentKeyList: AnsibleAgentKey[] = [];
 
   constructor(private readonly bundleDir: string, private readonly deploymentId: string) {
     this.secretsDir = path.join(bundleDir, '.secrets');
     this.hostVarsDir = path.join(bundleDir, 'host_vars');
+  }
+
+  private writeHostVars(inventoryName: string, vars: Record<string, string>) {
+    fs.mkdirSync(this.hostVarsDir, { recursive: true, mode: 0o700 });
+    const file = path.join(this.hostVarsDir, `${inventoryName}.yml`);
+    const yaml = `---\n${Object.entries(vars).map(([k, v]) => `${k}: !unsafe ${yamlQuote(v)}`).join('\n')}\n`;
+    fs.writeFileSync(file, yaml, { encoding: 'utf8', mode: 0o600 });
+    fs.chmodSync(file, 0o600);
+    this.files.add(file);
+  }
+
+  /** Passphrase-protected keys to load into the run's ssh-agent (runner paths). */
+  agentKeys(): AnsibleAgentKey[] {
+    return [...this.agentKeyList];
   }
 
   /** Returns the inventory connection vars for the host (no secrets inline). Throws missing_ssh_credential. */
@@ -690,15 +706,11 @@ class AnsibleSecrets {
     if (authMethod === 'PASSWORD') {
       const m = await materializeSshCredential(cred);
       if (m.authMethod !== 'password') throw new Error('unexpected_credential_type');
-      fs.mkdirSync(this.hostVarsDir, { recursive: true, mode: 0o700 });
-      const file = path.join(this.hostVarsDir, `${host.inventoryName}.yml`);
-      const pw = yamlQuote(m.password);
-      // The playbook escalates with become/sudo on every task; sudo for a password user
-      // normally needs the same password.
-      const yaml = `---\nansible_password: !unsafe ${pw}\nansible_become_password: !unsafe ${pw}\n`;
-      fs.writeFileSync(file, yaml, { encoding: 'utf8', mode: 0o600 });
-      fs.chmodSync(file, 0o600);
-      this.files.add(file);
+      // The playbook escalates with become/sudo on every task. become password: the configured
+      // sudo password (login or separate); with "sudo without password" the login password is
+      // still provided (Ansible only sends it when sudo prompts).
+      const become = m.sudo.mode === 'PASSWORD' ? m.sudo.password : m.password;
+      this.writeHostVars(host.inventoryName, { ansible_password: m.password, ansible_become_password: become });
       vars.push('ansible_connection=ssh');
       return vars.join(' ');
     }
@@ -709,10 +721,23 @@ class AnsibleSecrets {
       fs.mkdirSync(this.secretsDir, { recursive: true, mode: 0o700 });
       m = await materializeSshCredential(cred, this.secretsDir);
       this.keyByCred.set(credKey, m);
+      if (m.authMethod === 'key' && m.keyPassphrase) {
+        // ssh matches the agent's key through the public half next to the (encrypted) key file.
+        const check = await checkPrivateKey(fs.readFileSync(m.privateKeyPath, 'utf8'), m.keyPassphrase);
+        if (!check.ok || !check.publicKey) throw new Error('invalid_key_or_passphrase');
+        const pubPath = `${m.privateKeyPath}.pub`;
+        fs.writeFileSync(pubPath, `${check.publicKey}\n`, { encoding: 'utf8', mode: 0o600 });
+        this.files.add(pubPath);
+        this.agentKeyList.push({
+          keyPath: `/bundles/${this.deploymentId}/.secrets/${path.basename(m.privateKeyPath)}`,
+          passphrase: m.keyPassphrase
+        });
+      }
     }
     if (m.authMethod !== 'key') throw new Error('unexpected_credential_type');
     const runnerKeyPath = `/bundles/${this.deploymentId}/.secrets/${path.basename(m.privateKeyPath)}`;
     vars.push(`ansible_ssh_private_key_file=${runnerKeyPath}`);
+    if (m.sudo.mode === 'PASSWORD') this.writeHostVars(host.inventoryName, { ansible_become_password: m.sudo.password });
     return vars.join(' ');
   }
 
@@ -720,6 +745,7 @@ class AnsibleSecrets {
   cleanup() {
     for (const m of this.keyByCred.values()) m.cleanup();
     this.keyByCred.clear();
+    this.agentKeyList.length = 0;
     for (const f of this.files) {
       try { fs.rmSync(f, { force: true }); } catch { /* best effort */ }
     }
@@ -860,10 +886,7 @@ async function generateBundle(deploymentId: string, opts: { ansible: boolean } =
             hostname: h.hostname,
             ip: String(h.mgmt_ip),
             port: h.ssh_port || 22,
-            username: materialized.username,
-            authMethod: materialized.authMethod,
-            privateKeyPath: materialized.authMethod === 'key' ? materialized.privateKeyPath : undefined,
-            password: materialized.authMethod === 'password' ? materialized.password : undefined
+            ...sshAuthFields(materialized)
           };
           const readinessResult = await checkHostReadiness(sshHostInfo);
           backend = readinessResult.backend === 'iptables' ? 'iptables' : 'nftables';
@@ -1029,7 +1052,8 @@ async function generateBundle(deploymentId: string, opts: { ansible: boolean } =
     hostPolicyFiles,
     hostRows: hostRows.rows as any[],
     warnings,
-    cleanupSecrets: () => ansibleSecrets?.cleanup()
+    cleanupSecrets: () => ansibleSecrets?.cleanup(),
+    ansibleAgentKeys: () => ansibleSecrets?.agentKeys() ?? []
   };
 }
 
@@ -1100,7 +1124,7 @@ async function executeDeploymentStartInner(
     const executor = executorRes.rows[0]?.value ?? 'ansible';
 
     // Hosts stay PENDING until their own deployment begins (so the stale-timeout only applies to hosts actually running)
-    const { bundleDir, hostPolicyHashes, hostPolicyFiles, hostRows, warnings, cleanupSecrets } =
+    const { bundleDir, hostPolicyHashes, hostPolicyFiles, hostRows, warnings, cleanupSecrets, ansibleAgentKeys } =
       await generateBundle(deploymentId, { ansible: executor !== 'ssh' });
     try {
 
@@ -1162,10 +1186,7 @@ async function executeDeploymentStartInner(
             hostname: h.hostname,
             ip: String(h.mgmt_ip),
             port: h.ssh_port || 22,
-            username: cred.username,
-            authMethod: cred.authMethod,
-            privateKeyPath: cred.authMethod === 'key' ? cred.privateKeyPath : undefined,
-            password: cred.authMethod === 'password' ? cred.password : undefined,
+            ...sshAuthFields(cred),
             policyFilePath: policyFile.path,
             ip6PolicyFilePath: policyFile.ip6Path,
             backend: policyFile.backend
@@ -1232,6 +1253,7 @@ async function executeDeploymentStartInner(
         runnerContainer: env.ANSIBLE_RUNNER_CONTAINER,
         inventoryPath: `/bundles/${deploymentId}/inventory.ini`,
         playbookPath: `/runner/playbooks/apply-firewall.yml`,
+        agentKeys: ansibleAgentKeys(),
         stdoutPath,
         stderrPath
       });

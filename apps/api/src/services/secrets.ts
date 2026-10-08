@@ -1,7 +1,7 @@
 import { pool } from '../db/pool.js';
 import { decryptBlob, encryptBlob } from './crypto.js';
 
-export type SecretType = 'SSH_KEY' | 'SSH_PASSWORD' | 'LDAP_BIND' | 'TLS_CA_CERT';
+export type SecretType = 'SSH_KEY' | 'SSH_KEY_PASSPHRASE' | 'SSH_PASSWORD' | 'SUDO_PASSWORD' | 'LDAP_BIND' | 'TLS_CA_CERT';
 
 export async function createSecret(params: {
   name: string;

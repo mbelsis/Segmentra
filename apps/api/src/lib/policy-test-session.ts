@@ -6,7 +6,7 @@ import { restoreAuditSession, retrieveAuditLogs, type AuditSshHost } from '@segm
 
 import { pool } from '../db/pool.js';
 import { parseFirewallLogs, groupCommunicationFlows } from '../services/log-parser.js';
-import { getSshCredentialForHost, type MaterializedSshCredential } from '../services/ssh-credentials.js';
+import { getSshCredentialForHost, sshAuthFields, type MaterializedSshCredential } from '../services/ssh-credentials.js';
 
 /** Statuses of a policy test session that still own the host's firewall. */
 export const ACTIVE_TEST_SESSION_STATUSES = ['PENDING', 'DEPLOYING', 'RUNNING'] as const;
@@ -15,17 +15,13 @@ export function buildAuditHost(
   host: { hostname: string; mgmt_ip: unknown; ssh_port?: number | null; firewall_backend?: string | null },
   cred: MaterializedSshCredential
 ): AuditSshHost {
-  const base = {
+  return {
     hostname: host.hostname,
     ip: String(host.mgmt_ip),
     port: host.ssh_port || 22,
-    username: cred.username,
+    ...sshAuthFields(cred),
     backend: (host.firewall_backend === 'iptables' ? 'iptables' : 'nftables') as 'nftables' | 'iptables'
   };
-  if (cred.authMethod === 'password') {
-    return { ...base, authMethod: 'password', password: cred.password };
-  }
-  return { ...base, authMethod: 'key', privateKeyPath: cred.privateKeyPath };
 }
 
 /**

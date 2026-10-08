@@ -1,5 +1,5 @@
 import type { SshHostInfo } from './types.js';
-import { runSshCommand, type SshConnectionOptions } from './ssh-options.js';
+import { runSshCommand, runSshSudo, usesSudoPassword, type SshConnectionOptions, type SudoErrorKind } from './ssh-options.js';
 
 export interface HostReadinessResult {
   hostname: string;
@@ -8,6 +8,10 @@ export interface HostReadinessResult {
   nftVersion?: string;
   iptablesVersion?: string;
   sudoAccess: boolean;
+  /** How sudo was tested: 'nopasswd' (sudo -n) or 'password' (sudo -k -S with the configured password). */
+  sudoMode: 'nopasswd' | 'password';
+  /** Why the sudo test failed, when sudoAccess is false and sudo itself refused. */
+  sudoError?: SudoErrorKind;
   kernelSupport: boolean;
   errors: string[];
   warnings: string[];
@@ -18,7 +22,8 @@ export interface HostReadinessResult {
  * Verifies:
  * - SSH connectivity (key or password auth)
  * - Presence and versions of nft/iptables
- * - Passwordless sudo access for firewall commands
+ * - sudo access with the configured method: passwordless (`sudo -n`) or with the
+ *   configured sudo password (`sudo -k -S`, password on stdin); Segmentra runs `sh` as root
  * - Kernel/module support for nftables (if applicable)
  */
 export async function checkHostReadiness(host: SshHostInfo, opts: SshConnectionOptions = {}): Promise<HostReadinessResult> {
@@ -37,6 +42,7 @@ export async function checkHostReadiness(host: SshHostInfo, opts: SshConnectionO
     ready: true,
     backend: 'unknown',
     sudoAccess: false,
+    sudoMode: usesSudoPassword(host) ? 'password' : 'nopasswd',
     kernelSupport: false,
     errors: [],
     warnings: []
@@ -46,7 +52,12 @@ export async function checkHostReadiness(host: SshHostInfo, opts: SshConnectionO
   const ping = await run('echo segmentra-ok');
   if (ping.exitCode !== 0 || !ping.stdout.includes('segmentra-ok')) {
     result.ready = false;
-    result.errors.push(`SSH connection failed: ${(ping.stderr || ping.stdout).trim() || `exit code ${ping.exitCode}`}`);
+    const detail = (ping.stderr || ping.stdout).trim() || `exit code ${ping.exitCode}`;
+    const hint =
+      host.keyPassphrase && /Permission denied/i.test(detail)
+        ? ' (the key was rejected or its passphrase is wrong; check the credential\'s key passphrase)'
+        : '';
+    result.errors.push(`SSH connection failed: ${detail}${hint}`);
     return result;
   }
 
@@ -81,27 +92,28 @@ export async function checkHostReadiness(host: SshHostInfo, opts: SshConnectionO
     if (iptablesVersion.exitCode === 0) result.iptablesVersion = iptablesVersion.stdout.trim();
   }
 
-  // Check passwordless sudo for firewall commands
-  const sudoTests: string[] = [];
-  if (hasNft) sudoTests.push('sudo -n nft list ruleset 2>&1');
-  if (hasIptables) sudoTests.push('sudo -n iptables-save 2>&1');
-
-  let sudoPassed = false;
-  for (const testCmd of sudoTests) {
-    const sudoTest = await run(testCmd);
-    const output = `${sudoTest.stdout}\n${sudoTest.stderr}`.toLowerCase();
-    // Exit code 0 = success; otherwise sudo worked only if it didn't ask for a password
-    if (sudoTest.exitCode === 0 || (sudoTest.exitCode !== 1 && !output.includes('password'))) {
-      sudoPassed = true;
-      break;
-    }
-  }
-
-  if (!sudoPassed) {
-    result.ready = false;
-    result.errors.push('Passwordless sudo access required for firewall commands (nft/iptables)');
-  } else {
+  // Check sudo with the configured method. Deployments run every root step as `sudo sh -c`,
+  // so test exactly that (and that the shell really runs as root), plus read the ruleset.
+  const readCmd = useIptables ? 'iptables-save >/dev/null' : 'nft list ruleset >/dev/null';
+  const sudoTest = await runSshSudo(host, `id -u; ${readCmd}`, opts);
+  const uid = sudoTest.stdout.trim().split('\n')[0]?.trim();
+  if (sudoTest.exitCode === 0 && uid === '0') {
     result.sudoAccess = true;
+  } else {
+    result.ready = false;
+    if (sudoTest.sudoError) {
+      result.sudoError = sudoTest.sudoError;
+      result.errors.push((sudoTest.stderr.trim().split('\n').pop() ?? '').replace(/^Error:\s*/, ''));
+    } else if (uid === '0') {
+      const detail = (sudoTest.stderr || sudoTest.stdout).trim().split('\n').pop() ?? '';
+      result.sudoAccess = true;
+      result.errors.push(`Reading the firewall ruleset as root failed${detail ? `: ${detail}` : ''}`);
+    } else {
+      const detail = (sudoTest.stderr || sudoTest.stdout).trim().split('\n').pop() || `exit code ${sudoTest.exitCode}`;
+      result.errors.push(
+        `${usesSudoPassword(host) ? 'sudo with the configured password' : 'Passwordless sudo'} failed: ${detail}`
+      );
+    }
   }
 
   if (hasNft) {

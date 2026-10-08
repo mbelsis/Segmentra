@@ -16,7 +16,28 @@ type NewCredForm = {
   authMethod: 'PASSWORD' | 'KEY';
   password: string;
   privateKeyPem: string;
+  passphrase: string;
+  sudoMode: SudoMode;
+  sudoPassword: string;
   makeGlobal: boolean;
+};
+
+type SudoMode = 'NOPASSWD' | 'LOGIN_PASSWORD' | 'SUDO_PASSWORD';
+
+const SUDO_MODE_SHORT: Record<string, string> = {
+  NOPASSWD: 'sudo: no password',
+  LOGIN_PASSWORD: 'sudo: login password',
+  SUDO_PASSWORD: 'sudo: separate password'
+};
+
+/** Discovery's sudo findings (see DiscoverySudo in the executor). */
+const DISCOVERY_SUDO_LABELS: Record<string, string> = {
+  nopasswd: 'passwordless',
+  password: 'with password',
+  password_required: 'needs a password (not configured)',
+  password_rejected: 'password rejected',
+  tty_required: 'requires a tty',
+  none: 'none'
 };
 
 type ScheduleMode = 'manual' | '15' | '60' | '360' | '1440' | 'custom';
@@ -36,7 +57,10 @@ function emptyTarget(): TargetForm {
 }
 
 function emptyNewCred(): NewCredForm {
-  return { name: '', username: '', authMethod: 'PASSWORD', password: '', privateKeyPem: '', makeGlobal: false };
+  return {
+    name: '', username: '', authMethod: 'PASSWORD', password: '', privateKeyPem: '', passphrase: '',
+    sudoMode: 'NOPASSWD', sudoPassword: '', makeGlobal: false
+  };
 }
 
 function parseCidrList(text: string): string[] {
@@ -301,15 +325,23 @@ export function DiscoveryTab(props: {
       setCredError(c.authMethod === 'PASSWORD' ? 'Name, username and password are required.' : 'Name, username and private key are required.');
       return;
     }
+    if (c.sudoMode === 'SUDO_PASSWORD' && !c.sudoPassword) {
+      setCredError('Enter the sudo password, or choose another privilege escalation option.');
+      return;
+    }
     setSavingCred(true);
     try {
       // Non-global credentials are only used by discovery until a host is imported; the host then
       // gets its own HOST-scoped credential so deployments use the credential that worked.
       const scopeType = c.makeGlobal ? 'GLOBAL' : 'TAG';
+      const sudo = { sudoMode: c.sudoMode, ...(c.sudoMode === 'SUDO_PASSWORD' ? { sudoPassword: c.sudoPassword } : {}) };
       const res = await api.createSshCredential(
         c.authMethod === 'PASSWORD'
-          ? { name: c.name.trim(), username: c.username.trim(), authMethod: 'PASSWORD', password: c.password, scopeType }
-          : { name: c.name.trim(), username: c.username.trim(), authMethod: 'KEY', privateKeyPem: c.privateKeyPem.trim(), scopeType }
+          ? { name: c.name.trim(), username: c.username.trim(), authMethod: 'PASSWORD', password: c.password, scopeType, ...sudo }
+          : {
+              name: c.name.trim(), username: c.username.trim(), authMethod: 'KEY', privateKeyPem: c.privateKeyPem.trim(),
+              ...(c.passphrase ? { passphrase: c.passphrase } : {}), scopeType, ...sudo
+            }
       );
       await loadCredentials();
       updateTarget(targetKey, { sshCredentialId: res.sshCredential.id });
@@ -386,7 +418,7 @@ export function DiscoveryTab(props: {
           <div>
             <h3 style={{ margin: 0 }}>Inventory Discovery</h3>
             <p style={{ color: '#666', fontSize: '0.9em', margin: '4px 0 0' }}>
-              Scan networks for SSH servers, log in with your SSH credentials (read-only: hostname, OS, nft/iptables, sudo)
+              Scan networks for SSH servers, log in with your SSH credentials (read-only: hostname, OS, nft/iptables, sudo with the credential's privilege escalation setting)
               and import new hosts with a default tag. Existing hosts (same management IP) are never modified.
               IPv4 only; each network at most /{limits.minPrefix}, at most {limits.maxAddressesPerRun} addresses per run.
             </p>
@@ -461,7 +493,7 @@ export function DiscoveryTab(props: {
                       <option value="">Select a credential...</option>
                       {credentials.map(c => (
                         <option key={c.id} value={c.id}>
-                          {c.name} ({c.username}, {c.auth_method === 'PASSWORD' ? 'password' : 'key'}{c.scope_type === 'GLOBAL' ? ', global' : ''})
+                          {c.name} ({c.username}, {c.auth_method === 'PASSWORD' ? 'password' : c.has_passphrase ? 'key + passphrase' : 'key'}, {SUDO_MODE_SHORT[c.sudo_mode ?? 'NOPASSWD'] ?? c.sudo_mode}{c.scope_type === 'GLOBAL' ? ', global' : ''})
                         </option>
                       ))}
                     </select>
@@ -492,7 +524,17 @@ export function DiscoveryTab(props: {
                     </div>
                     <div className="form-group">
                       <label>Authentication</label>
-                      <select value={newCred.authMethod} onChange={e => setNewCred(c => ({ ...c, authMethod: e.target.value as 'PASSWORD' | 'KEY' }))}>
+                      <select
+                        value={newCred.authMethod}
+                        onChange={e => {
+                          const authMethod = e.target.value as 'PASSWORD' | 'KEY';
+                          setNewCred(c => ({
+                            ...c,
+                            authMethod,
+                            sudoMode: authMethod === 'KEY' && c.sudoMode === 'LOGIN_PASSWORD' ? 'SUDO_PASSWORD' : c.sudoMode
+                          }));
+                        }}
+                      >
                         <option value="PASSWORD">Password</option>
                         <option value="KEY">Private key</option>
                       </select>
@@ -504,12 +546,36 @@ export function DiscoveryTab(props: {
                       <input type="password" autoComplete="new-password" value={newCred.password} onChange={e => setNewCred(c => ({ ...c, password: e.target.value }))} />
                     </div>
                   ) : (
-                    <div className="form-group">
-                      <label>Private key (PEM) *</label>
-                      <textarea rows={5} value={newCred.privateKeyPem} onChange={e => setNewCred(c => ({ ...c, privateKeyPem: e.target.value }))}
-                        style={{ fontFamily: 'monospace', fontSize: '0.85em' }} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" />
-                    </div>
+                    <>
+                      <div className="form-group">
+                        <label>Private key (PEM) *</label>
+                        <textarea rows={5} value={newCred.privateKeyPem} onChange={e => setNewCred(c => ({ ...c, privateKeyPem: e.target.value }))}
+                          style={{ fontFamily: 'monospace', fontSize: '0.85em' }} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" />
+                      </div>
+                      <div className="form-group">
+                        <label>Key passphrase</label>
+                        <input type="password" autoComplete="new-password" value={newCred.passphrase}
+                          onChange={e => setNewCred(c => ({ ...c, passphrase: e.target.value }))} placeholder="Leave empty if the key has no passphrase" />
+                      </div>
+                    </>
                   )}
+                  <div className="form-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+                    <div className="form-group">
+                      <label>Privilege escalation</label>
+                      <select value={newCred.sudoMode} onChange={e => setNewCred(c => ({ ...c, sudoMode: e.target.value as SudoMode }))}>
+                        <option value="NOPASSWD">sudo without password</option>
+                        {newCred.authMethod === 'PASSWORD' && <option value="LOGIN_PASSWORD">sudo with the login password</option>}
+                        <option value="SUDO_PASSWORD">sudo with a separate password</option>
+                      </select>
+                    </div>
+                    {newCred.sudoMode === 'SUDO_PASSWORD' && (
+                      <div className="form-group">
+                        <label>Sudo password *</label>
+                        <input type="password" autoComplete="new-password" value={newCred.sudoPassword}
+                          onChange={e => setNewCred(c => ({ ...c, sudoPassword: e.target.value }))} />
+                      </div>
+                    )}
+                  </div>
                   <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.9em' }}>
                     <input type="checkbox" checked={newCred.makeGlobal} onChange={e => setNewCred(c => ({ ...c, makeGlobal: e.target.checked }))} />
                     Make this the global default credential (used for deployments to every host without a host-specific credential)
@@ -710,7 +776,7 @@ export function DiscoveryTab(props: {
                                     <td>{a.credentialName ?? '-'}</td>
                                     <td>{a.osPrettyName ?? '-'}</td>
                                     <td>{a.firewallBackend ?? '-'}</td>
-                                    <td>{a.sudo ?? '-'}</td>
+                                    <td>{a.sudo ? (DISCOVERY_SUDO_LABELS[a.sudo] ?? a.sudo) : '-'}</td>
                                     <td style={{ color: a.status === 'login_failed' || a.status === 'error' ? '#f44336' : '#666' }}>{a.reason ?? ''}</td>
                                   </tr>
                                 );

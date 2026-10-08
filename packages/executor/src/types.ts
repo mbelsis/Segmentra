@@ -10,5 +10,9 @@ export interface SshHostInfo {
   authMethod?: 'key' | 'password';
   privateKeyPath?: string;
   password?: string;
+  /** Passphrase of the private key (key auth); undefined for unencrypted keys. */
+  keyPassphrase?: string;
+  /** sudo password; undefined = passwordless sudo (sudo -n). */
+  sudoPassword?: string;
   backend?: 'nftables' | 'iptables' | 'auto';
 }

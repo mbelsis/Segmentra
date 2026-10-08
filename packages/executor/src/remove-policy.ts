@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import type { SshHostInfo } from './types.js';
-import { runSshCommand, shq, sudoSh, type SshConnectionOptions } from './ssh-options.js';
+import { runSshSudo, shq, type SshConnectionOptions } from './ssh-options.js';
 import {
   LEGACY_POLICY_FILE,
   LEGACY_POLICY_FILE6,
@@ -81,7 +81,7 @@ export async function removeSegmentraPolicy(host: SshHostInfo, opts: SshConnecti
   ].join('\n');
 
   try {
-    const r = await runSshCommand(host, sudoSh(script), opts);
+    const r = await runSshSudo(host, script, opts);
     const ok = r.exitCode === 0;
     return {
       success: ok,

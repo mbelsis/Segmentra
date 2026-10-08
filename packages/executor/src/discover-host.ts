@@ -47,7 +47,18 @@ export async function mapWithConcurrency<T, R>(items: T[], concurrency: number, 
   return results;
 }
 
-export type DiscoverySudo = 'nopasswd' | 'password' | 'none';
+/**
+ * sudo capability found by discovery, tested with the credential's configured method:
+ *  - nopasswd:          `sudo -n` works (no password needed);
+ *  - password:          sudo works with the credential's sudo password (login or separate);
+ *  - password_required: sudo asks for a password, but the credential is set to "sudo without password";
+ *  - password_rejected: sudo rejected the credential's sudo password;
+ *  - tty_required:      sudoers requires a terminal (Defaults requiretty);
+ *  - none:              no usable sudo (e.g. not in sudoers).
+ */
+export type DiscoverySudo = 'nopasswd' | 'password' | 'password_required' | 'password_rejected' | 'tty_required' | 'none';
+
+const DISCOVERY_SUDO_VALUES: DiscoverySudo[] = ['nopasswd', 'password', 'password_required', 'password_rejected', 'tty_required', 'none'];
 
 export interface DiscoveredHostFacts {
   hostname: string;
@@ -67,8 +78,8 @@ export type DiscoverHostResult =
 const MARKER = 'SEGMENTRA_DISCOVERY_V1';
 
 /**
- * Read-only fact collection script. When password auth is used, the password is
- * sent on stdin (never argv) and only used to test `sudo -S true`.
+ * Read-only fact collection script. When the credential has a sudo password, it is sent as
+ * the first line of stdin (never argv) and only used to test `sudo -k -S sh -c 'exit 0'`.
  */
 function discoveryScript(trySudoPassword: boolean): string {
   return [
@@ -81,9 +92,31 @@ function discoveryScript(trySudoPassword: boolean): string {
     'fi',
     'if command -v nft >/dev/null 2>&1; then echo NFT=1; else echo NFT=0; fi',
     'if command -v iptables-restore >/dev/null 2>&1; then echo IPTR=1; else echo IPTR=0; fi',
-    trySudoPassword
-      ? 'if sudo -n true >/dev/null 2>&1; then echo SUDO=nopasswd; elif IFS= read -r SEGPW && printf \'%s\\n\' "$SEGPW" | sudo -S -p \'\' true >/dev/null 2>&1; then echo SUDO=password; else echo SUDO=none; fi'
-      : 'if sudo -n true >/dev/null 2>&1; then echo SUDO=nopasswd; else echo SUDO=none; fi',
+    "seg_e=$(sudo -n sh -c 'exit 0' 2>&1 </dev/null) && seg_s=nopasswd || seg_s=",
+    'if [ -z "$seg_s" ]; then',
+    '  case "$seg_e" in *tty*) seg_s=tty_required ;; esac',
+    'fi',
+    ...(trySudoPassword
+      ? [
+          'if [ -z "$seg_s" ]; then',
+          "  IFS= read -r SEGPW || SEGPW=",
+          "  seg_e=$(printf '%s\\n' \"$SEGPW\" | sudo -k -S -p '' sh -c 'exit 0' 2>&1) && seg_s=password",
+          '  unset SEGPW',
+          '  if [ -z "$seg_s" ]; then',
+          '    case "$seg_e" in',
+          '      *tty*) seg_s=tty_required ;;',
+          '      *"incorrect password"*|*"try again"*|*"no password was provided"*) seg_s=password_rejected ;;',
+          '      *) seg_s=none ;;',
+          '    esac',
+          '  fi',
+          'fi'
+        ]
+      : [
+          'if [ -z "$seg_s" ]; then',
+          '  case "$seg_e" in *"password is required"*) seg_s=password_required ;; *) seg_s=none ;; esac',
+          'fi'
+        ]),
+    'echo "SUDO=$seg_s"',
     'exit 0'
   ].join('\n');
 }
@@ -102,15 +135,17 @@ function classifyFailure(exitCode: number, stderr: string, timedOut?: boolean): 
 
 /** Log in once over SSH and collect host facts with a single read-only command. */
 export async function discoverHostOverSsh(target: SshTarget, opts: SshConnectionOptions = {}): Promise<DiscoverHostResult> {
-  const usePassword = (target.authMethod ?? (target.privateKeyPath ? 'key' : 'password')) === 'password';
-  const r = await runSshCommand(target, discoveryScript(usePassword), {
+  const trySudoPassword = target.sudoPassword !== undefined && target.sudoPassword !== null;
+  const r = await runSshCommand(target, discoveryScript(trySudoPassword), {
     ...opts,
     timeoutMs: opts.timeoutMs ?? 30_000,
-    input: usePassword ? `${target.password ?? ''}\n` : undefined
+    input: trySudoPassword ? `${target.sudoPassword}\n` : undefined
   });
   if (r.exitCode !== 0 || !r.stdout.includes(MARKER)) {
     if (r.exitCode === 0) return { ok: false, failure: 'unexpected_output', message: 'unexpected output from discovery command' };
-    return { ok: false, ...classifyFailure(r.exitCode, r.stderr, r.timedOut) };
+    const f = classifyFailure(r.exitCode, r.stderr, r.timedOut);
+    if (f.failure === 'auth_failed' && target.keyPassphrase) f.message = 'auth failed (key rejected or wrong key passphrase)';
+    return { ok: false, ...f };
   }
   const kv = new Map<string, string>();
   for (const line of r.stdout.slice(r.stdout.indexOf(MARKER)).split('\n')) {
@@ -126,7 +161,7 @@ export async function discoverHostOverSsh(target: SshTarget, opts: SshConnection
       osPrettyName: kv.get('OS_PRETTY') || null,
       hasNft: kv.get('NFT') === '1',
       hasIptablesRestore: kv.get('IPTR') === '1',
-      sudo: sudo === 'nopasswd' || sudo === 'password' ? sudo : 'none'
+      sudo: DISCOVERY_SUDO_VALUES.includes(sudo as DiscoverySudo) ? (sudo as DiscoverySudo) : 'none'
     }
   };
 }

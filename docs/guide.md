@@ -43,12 +43,15 @@ This guide walks through every step of using Segmentra — from initial setup to
 
 ### On Target Linux Hosts
 
-- **SSH access** with a sudo-capable user (not root — most distros disable root SSH)
-- **Passwordless sudo** for firewall commands:
+- **SSH access** with a dedicated user (not root, since most distros disable root SSH), using a private key (optionally passphrase-protected) or a password. No agent is installed on the host.
+- **Full sudo rights**, with or without a password. Segmentra runs its scripts as `sudo sh -c '…'`, so a sudo rule limited to firewall commands is not enough:
   ```bash
-  # /etc/sudoers.d/segmentra
-  segmentra_user ALL=(ALL) NOPASSWD: /usr/sbin/nft, /usr/sbin/iptables, /usr/sbin/iptables-save, /usr/sbin/iptables-restore, /bin/mkdir, /bin/cp, /bin/mv, /bin/chmod, /bin/touch, /bin/rm, /usr/bin/tee, /usr/bin/systemctl
+  # /etc/sudoers.d/segmentra — sudo asks for a password (set "Privilege escalation" on the credential)
+  segmentra_user ALL=(ALL) ALL
+  # or passwordless (service account; choose "sudo without password")
+  segmentra_user ALL=(ALL) NOPASSWD: ALL
   ```
+  Do not enable `Defaults requiretty` for this account. Restrict where it can log in from (see [security.md](security.md#checklist)).
 - **nftables** (preferred) or **iptables** installed
 - **rsyslog** installed (required for firewall learning/audit features)
 
@@ -93,10 +96,11 @@ Under **Deployment Executor**, choose:
 In **Admin → SSH Credentials**, create a credential:
 - **Name:** e.g., "Global SSH Key"
 - **Username:** The sudo-capable user on target hosts (e.g., `segmentra`)
-- **Private Key:** Paste the PEM-encoded private key
+- **Private Key:** Paste the private key (OpenSSH or PEM format), plus its **passphrase** if it has one (checked when saving)
+- **Privilege escalation:** *sudo without password*, *sudo with the login password* (password credentials only) or *sudo with a separate password* (enter the sudo password)
 - **Scope:** `GLOBAL` (applies to all hosts)
 
-The private key is encrypted at rest using AES-256-GCM.
+Keys, passphrases and passwords are encrypted at rest using AES-256-GCM. The sudo password is sent to `sudo -S` on standard input, never on a command line (see [security.md](security.md#how-secrets-are-used-when-connecting-to-hosts)).
 
 ### Step 5: (Optional) Configure Management VLAN
 
@@ -148,7 +152,7 @@ Interface roles are used when policies target specific interface roles instead o
 
 Select hosts and click **Check Readiness** to verify:
 - nftables/iptables is installed and accessible
-- Passwordless sudo works for firewall commands
+- sudo works with the credential's privilege escalation setting (`sudo -n` or `sudo -S` with the sudo password) and runs `sh` as root; a wrong sudo password, a missing password, or `requiretty` are reported as specific errors
 - Kernel modules are loaded (for nftables)
 - Firewall backend is auto-detected if set to `auto`
 
@@ -427,7 +431,7 @@ Segmentra API Server                         Target Host
 
 - **Sequential execution**: Hosts are processed one at a time
 - **SSH host keys**: trust-on-first-use — `StrictHostKeyChecking=accept-new` with the known_hosts file from `SEGMENTRA_KNOWN_HOSTS` (default `~/.ssh/known_hosts`); a changed host key fails the connection
-- **All commands use `sudo`**: The SSH user doesn't need to be root
+- **All commands use `sudo`**: The SSH user doesn't need to be root. Each root step is one `sudo sh -c '…'` (`sudo -n` without a password, `sudo -k -S -p ''` with the password on stdin)
 - **Backend mismatch detection**: If the host has nftables but the policy was compiled for iptables (or vice versa), the deployment fails for that host before applying
 - **Automatic rollback**: If `nft -f` or `iptables-restore` fails, the latest backup is automatically restored
 - **Timeout**: Hosts that don't respond within 10 minutes are marked as FAILED by a background job

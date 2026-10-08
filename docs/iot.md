@@ -180,7 +180,7 @@ Also verified:
 
 - **IP forwarding** enabled (`net.ipv4.ip_forward=1`; `net.ipv6.conf.all.forwarding=1` for IPv6).
 - **Routing:** traffic between IT and OT must actually pass through the gateway. Devices use the gateway's OT address as their default route (or a route to the IT subnets), and IT clients or routers route the OT subnets via the gateway. Segmentra does not configure routes.
-- `nft` (nftables backend) or `iptables-restore` / `ip6tables-restore` (iptables backend), SSH access and passwordless `sudo` for the SSH user (key credentials) or the SSH password as sudo password (password credentials).
+- `nft` (nftables backend) or `iptables-restore` / `ip6tables-restore` (iptables backend), SSH access with a key (optionally passphrase-protected) or a password, and **full `sudo` rights** for the SSH user, with or without a sudo password (Segmentra runs `sudo sh -c '…'`; set *Privilege escalation* on the credential; see [security.md](security.md#checklist)).
 - No manual forward default deny for the protected networks. See [Gateway Setup Guide, step 4](gateway-setup-guide.md#step-4-leave-forwarding-to-segmentra).
 
 ---

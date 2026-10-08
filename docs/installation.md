@@ -404,9 +404,11 @@ For development without Ansible, either:
 
 Configure in: **Admin → SSH Credentials**
 
-- Use a **sudo-capable account** (not root)
-- The account needs passwordless sudo for: `nft`, `iptables`, `iptables-save`, `iptables-restore`
-- Private keys are encrypted at rest with AES-256-GCM
+- Use a **sudo-capable account** (not root). Nothing is installed on the hosts (agentless).
+- Authentication: a private key (optionally passphrase-protected; the passphrase is checked when you save) or a password
+- **Privilege escalation:** *sudo without password*, *sudo with the login password* (password credentials) or *sudo with a separate password*. The account needs **full sudo rights** (e.g. `segmentra ALL=(ALL) ALL`, or `NOPASSWD: ALL` for passwordless): Segmentra runs its scripts as `sudo sh -c '…'`, so a sudoers entry limited to `nft`/`iptables` makes deployments fail. `Defaults requiretty` must not apply to the account.
+- The SSH client in the API image must be OpenSSH 8.4 or newer for passphrase-protected keys (the bundled Debian bookworm image has 9.2)
+- Keys, passphrases and passwords are encrypted at rest with AES-256-GCM (see [security.md](security.md))
 
 ---
 

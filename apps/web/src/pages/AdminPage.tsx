@@ -2,6 +2,14 @@ import { useEffect, useState } from 'react';
 
 import { api, errorMessage } from '../lib/api';
 
+type SudoMode = 'NOPASSWD' | 'LOGIN_PASSWORD' | 'SUDO_PASSWORD';
+
+const SUDO_MODE_LABELS: Record<SudoMode, string> = {
+  NOPASSWD: 'sudo without password',
+  LOGIN_PASSWORD: 'sudo with the login password',
+  SUDO_PASSWORD: 'sudo with a separate password'
+};
+
 export function AdminPage() {
   const [ldap, setLdap] = useState<any>(null);
   const [loading, setLoading] = useState(false);
@@ -28,6 +36,9 @@ export function AdminPage() {
   const [sshKey, setSshKey] = useState('');
   const [sshAuthMethod, setSshAuthMethod] = useState<'KEY' | 'PASSWORD'>('KEY');
   const [sshPassword, setSshPassword] = useState('');
+  const [sshPassphrase, setSshPassphrase] = useState('');
+  const [sshSudoMode, setSshSudoMode] = useState<SudoMode>('NOPASSWD');
+  const [sshSudoPassword, setSshSudoPassword] = useState('');
   const [sshCreds, setSshCreds] = useState<any[]>([]);
   const [showSshForm, setShowSshForm] = useState(false);
 
@@ -293,10 +304,30 @@ export function AdminPage() {
     }
   }
 
+  function resetSshForm() {
+    setSshName('global');
+    setSshUser('root');
+    setSshKey('');
+    setSshPassword('');
+    setSshPassphrase('');
+    setSshSudoMode('NOPASSWD');
+    setSshSudoPassword('');
+    setSshAuthMethod('KEY');
+  }
+
+  const sshFormIncomplete =
+    !sshName.trim() ||
+    !sshUser.trim() ||
+    (sshAuthMethod === 'KEY' ? !sshKey.trim() : !sshPassword) ||
+    (sshSudoMode === 'SUDO_PASSWORD' && !sshSudoPassword);
+
   async function saveSshCredential() {
-    const secretMissing = sshAuthMethod === 'KEY' ? !sshKey.trim() : !sshPassword;
-    if (!sshName.trim() || !sshUser.trim() || secretMissing) {
-      setError(sshAuthMethod === 'KEY' ? 'Name, username, and private key are required' : 'Name, username, and password are required');
+    if (sshFormIncomplete) {
+      setError(
+        sshSudoMode === 'SUDO_PASSWORD' && !sshSudoPassword
+          ? 'Enter the sudo password, or choose another privilege escalation option'
+          : sshAuthMethod === 'KEY' ? 'Name, username, and private key are required' : 'Name, username, and password are required'
+      );
       return;
     }
     
@@ -305,17 +336,20 @@ export function AdminPage() {
     setSuccess('');
     
     try {
+      const sudo = {
+        sudoMode: sshSudoMode,
+        ...(sshSudoMode === 'SUDO_PASSWORD' ? { sudoPassword: sshSudoPassword } : {})
+      };
       await api.createSshCredential(
         sshAuthMethod === 'KEY'
-          ? { name: sshName.trim(), username: sshUser.trim(), authMethod: 'KEY', privateKeyPem: sshKey.trim(), scopeType: 'GLOBAL' }
-          : { name: sshName.trim(), username: sshUser.trim(), authMethod: 'PASSWORD', password: sshPassword, scopeType: 'GLOBAL' }
+          ? {
+              name: sshName.trim(), username: sshUser.trim(), authMethod: 'KEY', privateKeyPem: sshKey.trim(),
+              ...(sshPassphrase ? { passphrase: sshPassphrase } : {}), scopeType: 'GLOBAL', ...sudo
+            }
+          : { name: sshName.trim(), username: sshUser.trim(), authMethod: 'PASSWORD', password: sshPassword, scopeType: 'GLOBAL', ...sudo }
       );
       setSuccess('SSH credential saved successfully');
-      setSshName('global');
-      setSshUser('root');
-      setSshKey('');
-      setSshPassword('');
-      setSshAuthMethod('KEY');
+      resetSshForm();
       setShowSshForm(false);
       await loadData();
       setTimeout(() => setSuccess(''), 3000);
@@ -764,9 +798,11 @@ export function AdminPage() {
           <strong style={{ color: '#1976D2' }}>⚠️ Important: Sudo Requirements</strong>
           <ul style={{ marginTop: 8, marginBottom: 0, paddingLeft: 20, fontSize: '0.9em', color: '#1565C0' }}>
             <li>Most modern Linux distributions disable root SSH login for security</li>
-            <li>Use a <strong>sudo-capable account</strong> (not root) - the system will automatically use sudo when needed</li>
-            <li>The account must have passwordless sudo access to firewall commands (nft, iptables, iptables-restore)</li>
-            <li>Example: Use an account like <code>deploy</code> or <code>admin</code> with sudo privileges</li>
+            <li>Use a <strong>sudo-capable account</strong> (not root) - Segmentra runs its root steps as <code>sudo sh -c ...</code>; no agent is installed on the hosts</li>
+            <li>The account needs <strong>full sudo rights</strong> (<code>ALL</code>, i.e. it may run <code>sh</code> as root) - a sudo rule limited to nft/iptables is not enough. A password for sudo is fine: choose it under <em>Privilege escalation</em></li>
+            <li>Log in with a private key (optionally passphrase-protected) or a password</li>
+            <li>Sudoers must not require a terminal for this account (<code>Defaults requiretty</code>); readiness checks report it if it does</li>
+            <li>Example: an account like <code>deploy</code> or <code>admin</code> with normal sudo (password) rights, or a dedicated service account with <code>NOPASSWD: ALL</code></li>
           </ul>
         </div>
 
@@ -800,7 +836,14 @@ export function AdminPage() {
               </div>
               <div className="form-group">
                 <label>Authentication *</label>
-                <select value={sshAuthMethod} onChange={(e) => setSshAuthMethod(e.target.value as 'KEY' | 'PASSWORD')}>
+                <select
+                  value={sshAuthMethod}
+                  onChange={(e) => {
+                    const v = e.target.value as 'KEY' | 'PASSWORD';
+                    setSshAuthMethod(v);
+                    if (v === 'KEY' && sshSudoMode === 'LOGIN_PASSWORD') setSshSudoMode('SUDO_PASSWORD');
+                  }}
+                >
                   <option value="KEY">Private key</option>
                   <option value="PASSWORD">Password</option>
                 </select>
@@ -815,7 +858,7 @@ export function AdminPage() {
                   value={sshPassword}
                   onChange={(e) => setSshPassword(e.target.value)}
                 />
-                <small>Stored encrypted. Also used as the sudo password when Ansible deploys to this host.</small>
+                <small>Stored encrypted. Choose "sudo with the login password" below if sudo asks for this password.</small>
               </div>
             )}
             {sshAuthMethod === 'KEY' && (
@@ -828,30 +871,63 @@ export function AdminPage() {
                   placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----"
                   style={{ fontFamily: 'monospace', fontSize: '0.85em' }}
                 />
-                <small>Paste the full private key including BEGIN/END markers. Stored encrypted.</small>
-                <div style={{ marginTop: 8, padding: 8, background: '#fff3cd', borderRadius: 4, fontSize: '0.85em' }}>
-                  <strong>Note:</strong> The system will automatically use <code>sudo</code> when applying firewall rules. 
-                  Ensure the account has passwordless sudo access to: <code>nft</code>, <code>iptables</code>, <code>iptables-restore</code>, 
-                  and file operations in <code>/etc</code> and <code>/var/backups</code>.
+                <small>Paste the full private key (OpenSSH or PEM) including BEGIN/END markers. Stored encrypted.</small>
+                <div className="form-group" style={{ marginTop: 12 }}>
+                  <label>Key passphrase</label>
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    value={sshPassphrase}
+                    onChange={(e) => setSshPassphrase(e.target.value)}
+                    placeholder="Leave empty if the key has no passphrase"
+                  />
+                  <small>
+                    Checked against the key when you save. Stored encrypted; the key stays encrypted on disk while
+                    in use and the passphrase is handed to ssh in memory only.
+                  </small>
                 </div>
               </div>
             )}
+            <div className="form-grid">
+              <div className="form-group">
+                <label>Privilege escalation *</label>
+                <select value={sshSudoMode} onChange={(e) => setSshSudoMode(e.target.value as SudoMode)}>
+                  <option value="NOPASSWD">sudo without password</option>
+                  {sshAuthMethod === 'PASSWORD' && <option value="LOGIN_PASSWORD">sudo with the login password</option>}
+                  <option value="SUDO_PASSWORD">sudo with a separate password</option>
+                </select>
+                <small>
+                  {sshSudoMode === 'NOPASSWD' && <>The account has passwordless sudo (<code>NOPASSWD: ALL</code>).</>}
+                  {sshSudoMode === 'LOGIN_PASSWORD' && <>sudo asks for the account's login password (typical for a normal admin account).</>}
+                  {sshSudoMode === 'SUDO_PASSWORD' && <>sudo asks for a password different from the login (e.g. key login + sudo password).</>}
+                  {' '}The sudo password is sent to sudo on stdin, never on a command line.
+                </small>
+              </div>
+              {sshSudoMode === 'SUDO_PASSWORD' && (
+                <div className="form-group">
+                  <label>Sudo password *</label>
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    value={sshSudoPassword}
+                    onChange={(e) => setSshSudoPassword(e.target.value)}
+                  />
+                  <small>Stored encrypted.</small>
+                </div>
+              )}
+            </div>
             <div className="form-actions">
               <button
                 onClick={saveSshCredential}
                 className="btn-primary"
-                disabled={loading || !sshName.trim() || !sshUser.trim() || (sshAuthMethod === 'KEY' ? !sshKey.trim() : !sshPassword)}
+                disabled={loading || sshFormIncomplete}
               >
                 {loading ? 'Saving...' : 'Save SSH Credential'}
               </button>
               <button
                 onClick={() => {
                   setShowSshForm(false);
-                  setSshName('global');
-                  setSshUser('root');
-                  setSshKey('');
-                  setSshPassword('');
-                  setSshAuthMethod('KEY');
+                  resetSshForm();
                 }}
                 className="btn-secondary"
               >
@@ -867,6 +943,8 @@ export function AdminPage() {
               <tr>
                 <th>Name</th>
                 <th>Username</th>
+                <th>Authentication</th>
+                <th>Privilege escalation</th>
                 <th>Scope</th>
                 <th>Created</th>
               </tr>
@@ -876,6 +954,15 @@ export function AdminPage() {
                 <tr key={c.id}>
                   <td><strong>{c.name}</strong></td>
                   <td><code>{c.username}</code></td>
+                  <td>
+                    {c.auth_method === 'PASSWORD' ? 'Password' : 'Private key'}
+                    {c.has_passphrase && (
+                      <span style={{ marginLeft: 6, padding: '1px 6px', borderRadius: 8, background: '#e8eaf6', color: '#3949ab', fontSize: '0.8em' }}>
+                        passphrase
+                      </span>
+                    )}
+                  </td>
+                  <td style={{ fontSize: '0.9em' }}>{SUDO_MODE_LABELS[(c.sudo_mode as SudoMode) || 'NOPASSWD'] ?? c.sudo_mode}</td>
                   <td>{getRoleBadge(c.scope_type || 'GLOBAL')}</td>
                   <td style={{ fontSize: '0.9em', color: '#666' }}>
                     {c.created_at ? new Date(c.created_at).toLocaleString() : '-'}

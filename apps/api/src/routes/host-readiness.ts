@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { checkHostReadiness, type SshHostInfo } from '@segmentra/executor';
 import { pool } from '../db/pool.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
-import { getSshCredentialForHost, type MaterializedSshCredential } from '../services/ssh-credentials.js';
+import { getSshCredentialForHost, sshAuthFields, type MaterializedSshCredential } from '../services/ssh-credentials.js';
 
 const hostReadinessRouter = Router();
 hostReadinessRouter.use(requireAuth, requireRole('operator', 'admin'));
@@ -45,10 +45,7 @@ hostReadinessRouter.post('/hosts/:hostId/check', async (req, res) => {
       hostname: host.hostname,
       ip: String(host.mgmt_ip).split('/')[0],
       port: Number(host.ssh_port) || 22,
-      username: cred.username,
-      authMethod: cred.authMethod,
-      privateKeyPath: cred.privateKeyPath,
-      password: cred.password,
+      ...sshAuthFields(cred),
       backend: host.firewall_backend === 'iptables' || host.firewall_backend === 'nftables' ? host.firewall_backend : 'auto'
     };
 

@@ -23,7 +23,7 @@ import {
 
 import { pool } from '../db/pool.js';
 import { createAuditEvent } from './audit.js';
-import { loadSshCredential, materializeSshCredential, type MaterializedSshCredential } from './ssh-credentials.js';
+import { loadSshCredential, materializeSshCredential, sshAuthFields, type MaterializedSshCredential } from './ssh-credentials.js';
 import { evaluateHostAgainstRules } from './tag-rule-engine.js';
 import { triggerTemplateAutoApply } from './template-engine.js';
 
@@ -353,10 +353,7 @@ async function executeRun(runId: string, profileId: string, trigger: 'manual' | 
           {
             ip,
             port: t.sshPort,
-            username: mat.username,
-            authMethod: mat.authMethod,
-            privateKeyPath: mat.privateKeyPath,
-            password: mat.password
+            ...sshAuthFields(mat)
           },
           { timeoutMs: LOGIN_TIMEOUT_MS }
         );
@@ -425,8 +422,15 @@ async function importHost(params: {
 }): Promise<DiscoveryAddressResult> {
   const { ip, port, facts, credRow } = params;
   const warnings: string[] = [];
-  if (facts.sudo === 'none') warnings.push('no sudo (deployments to this host will fail until sudo is configured)');
-  if (facts.sudo === 'password') warnings.push('sudo requires a password (works for password credentials only)');
+  const sudoWarnings: Partial<Record<DiscoveredHostFacts['sudo'], string>> = {
+    none: 'no usable sudo for this account (deployments to this host will fail until sudo is configured)',
+    password_required:
+      'sudo requires a password, but the credential is set to "sudo without password" (set its privilege escalation to "sudo with the login password" or "sudo with a separate password")',
+    password_rejected: "sudo rejected the credential's sudo password",
+    tty_required: 'sudo requires a terminal (Defaults requiretty); disable requiretty for this account'
+  };
+  const sudoWarning = sudoWarnings[facts.sudo];
+  if (sudoWarning) warnings.push(sudoWarning);
   const backend = pickBackend(facts);
   if (backend === 'auto') warnings.push('neither nft nor iptables-restore found');
 
@@ -472,10 +476,12 @@ async function importHost(params: {
     if (String(credRow.id) !== String(params.globalCredId ?? '')) {
       await client.query(
         `INSERT INTO ssh_credentials
-           (name, username, auth_method, private_key_secret_id, passphrase_secret_id, password_secret_id, scope_type, scope_id)
-         VALUES ($1, $2, $3, $4, $5, $6, 'HOST', $7)`,
+           (name, username, auth_method, private_key_secret_id, passphrase_secret_id, password_secret_id,
+            sudo_mode, sudo_password_secret_id, scope_type, scope_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'HOST', $9)`,
         [`${credRow.name} (discovered: ${hostname})`, credRow.username, credRow.auth_method,
-          credRow.private_key_secret_id, credRow.passphrase_secret_id, credRow.password_secret_id, hostId]
+          credRow.private_key_secret_id, credRow.passphrase_secret_id, credRow.password_secret_id,
+          credRow.sudo_mode ?? 'NOPASSWD', credRow.sudo_password_secret_id ?? null, hostId]
       );
     }
     await client.query('COMMIT');

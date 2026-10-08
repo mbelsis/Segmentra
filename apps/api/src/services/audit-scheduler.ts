@@ -7,7 +7,7 @@ import { restoreAuditSession, retrieveAuditLogs, type AuditSshHost } from '@segm
 import { pool } from '../db/pool.js';
 import { groupCommunicationFlows, parseFirewallLogs } from './log-parser.js';
 import { sendNotification } from './notifications.js';
-import { getSshCredentialForHost, type MaterializedSshCredential } from './ssh-credentials.js';
+import { getSshCredentialForHost, sshAuthFields, type MaterializedSshCredential } from './ssh-credentials.js';
 
 /**
  * Firewall audit session lifecycle (firewall_audit_sessions.status has no CHECK constraint):
@@ -38,10 +38,7 @@ export function buildAuditHost(
     hostname: host.hostname,
     ip,
     port: Number(host.ssh_port) || 22,
-    username: cred.username,
-    authMethod: cred.authMethod,
-    privateKeyPath: cred.privateKeyPath,
-    password: cred.password,
+    ...sshAuthFields(cred),
     backend: host.firewall_backend === 'iptables' ? 'iptables' : 'nftables'
   };
 }

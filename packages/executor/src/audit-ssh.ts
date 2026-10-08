@@ -3,11 +3,10 @@ import fs from 'node:fs';
 import { promisify } from 'node:util';
 import {
   isSafeAbsolutePath,
-  runSshCommand,
+  runSshSudo,
   scpDownload,
   scpUpload,
   shq,
-  sudoSh,
   type ExecResult,
   type SshConnectionOptions
 } from './ssh-options.js';
@@ -25,6 +24,10 @@ export interface AuditSshHost {
   authMethod?: 'key' | 'password';
   privateKeyPath?: string;
   password?: string;
+  /** Passphrase of the private key (key auth); undefined for unencrypted keys. */
+  keyPassphrase?: string;
+  /** sudo password; undefined = passwordless sudo (sudo -n). */
+  sudoPassword?: string;
   backend: 'nftables' | 'iptables';
 }
 
@@ -74,7 +77,7 @@ export async function startAuditSession(
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
   const backupPath = `${BACKUP_DIR}/${host.backend === 'nftables' ? 'nft' : 'iptables'}.audit-backup.${timestamp}`;
   const c = collector(host);
-  const run = (cmd: string) => runSshCommand(host, cmd, opts);
+  const sudo = (script: string, o: { args?: string[] } = {}) => runSshSudo(host, script, { ...opts, args: o.args });
 
   try {
     if (!isSafeAbsolutePath(logFilePath)) {
@@ -96,7 +99,7 @@ export async function startAuditSession(
       scopedBackupSnippet(host.backend, backupPath),
       `test -s ${shq(backupPath)}`
     ].join('\n');
-    const backupResult = await run(sudoSh(backupScript));
+    const backupResult = await sudo(backupScript);
     c.add(backupResult);
     if (backupResult.exitCode !== 0) {
       c.err('\nError: failed to back up current firewall rules; audit not started (no changes made)\n');
@@ -142,7 +145,7 @@ async function configureLogging(host: AuditSshHost, logFilePath: string, opts: S
     `chmod 644 ${shq(RSYSLOG_CONF)}`,
     RSYSLOG_RESTART
   ].join('\n');
-  return runSshCommand(host, sudoSh(script), opts);
+  return runSshSudo(host, script, opts);
 }
 
 /**
@@ -158,7 +161,7 @@ export async function deployLogOnlyPolicy(
 ): Promise<AuditSessionResult> {
   const remoteUpload = `.segmentra-audit-${crypto.randomBytes(6).toString('hex')}.policy`; // in SSH user's home
   const c = collector(host);
-  const run = (cmd: string) => runSshCommand(host, cmd, opts);
+  const sudo = (script: string, o: { args?: string[] } = {}) => runSshSudo(host, script, { ...opts, args: o.args });
 
   try {
     // Step 1: Write policy to local temp file
@@ -183,7 +186,7 @@ export async function deployLogOnlyPolicy(
       `rm -f "$1/${remoteUpload}"`,
       applyCmd
     ].join('\n');
-    const applyResult = await run(`sudo -n sh -c ${shq(script)} segmentra "$HOME"`);
+    const applyResult = await sudo(script, { args: ['segmentra', '"$HOME"'] });
     c.add(applyResult);
     if (applyResult.exitCode !== 0) {
       c.err('\nFirewall apply failed\n');
@@ -214,7 +217,7 @@ export async function restoreAuditSession(
   opts: SshConnectionOptions = {}
 ): Promise<AuditSessionResult> {
   const c = collector(host);
-  const run = (cmd: string) => runSshCommand(host, cmd, opts);
+  const sudo = (script: string, o: { args?: string[] } = {}) => runSshSudo(host, script, { ...opts, args: o.args });
 
   try {
     if (!backupPath || !isSafeAbsolutePath(backupPath)) {
@@ -223,7 +226,7 @@ export async function restoreAuditSession(
     }
 
     const restoreScript = ['umask 077', scopedRestoreSnippet(host.backend, backupPath)].join('\n');
-    const restoreResult = await run(sudoSh(restoreScript));
+    const restoreResult = await sudo(restoreScript);
     c.add(restoreResult);
     if (restoreResult.exitCode !== 0) {
       c.err(
@@ -240,7 +243,7 @@ export async function restoreAuditSession(
       `rm -f ${shq(AUDIT_POLICY_PATH)} ${shq(RSYSLOG_CONF)}`,
       RSYSLOG_RESTART
     ].join('\n');
-    const cleanupResult = await run(sudoSh(cleanupScript));
+    const cleanupResult = await sudo(cleanupScript);
     c.add(cleanupResult);
     if (cleanupResult.exitCode !== 0) {
       c.err('\nWarning: cleanup of audit policy/rsyslog config failed\n');

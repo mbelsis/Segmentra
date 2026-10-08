@@ -1052,7 +1052,7 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                             Check Readiness
                           </button>
                           <div className="tooltip">
-                            Verify this host is ready for deployments. Checks for firewall tools (nft/iptables), passwordless sudo access, kernel support, and auto-detects firewall backend.
+                            Verify this host is ready for deployments. Checks for firewall tools (nft/iptables), sudo access with the credential's privilege escalation setting (passwordless or with a sudo password), kernel support, and auto-detects firewall backend.
                           </div>
                         </div>
                         </>)}
