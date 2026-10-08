@@ -7,6 +7,31 @@ import { hasRole, useAuth } from '../lib/auth-context';
 // Deployment statuses that may still change and therefore warrant polling.
 const ACTIVE_STATUSES = ['RUNNING', 'QUEUED', 'PAUSED', 'SCHEDULED'];
 
+/** "Survives reboot" cell: ✓ persisted, ⚠ not persisted (with the reason), - not reported. */
+function persistenceCell(host: any) {
+  const status = host.persistence_status as string | null;
+  if (!status) return '-';
+  const msg: string = host.persistence_message || '';
+  if (status === 'persisted') {
+    return (
+      <span title={msg} style={{ color: '#5a7a3a', fontWeight: 'bold' }}>
+        ✓ <span style={{ fontWeight: 'normal', fontSize: '0.85em' }}>{host.persistence_method}</span>
+      </span>
+    );
+  }
+  if (status === 'removed') {
+    return <span title={msg} style={{ color: '#666', fontSize: '0.9em' }}>Removed</span>;
+  }
+  // Drop the leading "Rules will NOT survive a reboot" part; show the reasons.
+  const reasons = msg.split(' | ').slice(1).map((r) => r.replace(/^[a-z_]+: /, '')).join(' · ');
+  return (
+    <span title={msg} style={{ color: '#a66a00', fontSize: '0.9em' }}>
+      ⚠ {status === 'unknown' ? 'Unknown' : 'No'}
+      {reasons && <div style={{ color: '#666', maxWidth: 360 }}>{reasons}</div>}
+    </span>
+  );
+}
+
 export function DeploymentDetailPage() {
   const { deploymentId } = useParams();
   const navigate = useNavigate();
@@ -431,6 +456,7 @@ export function DeploymentDetailPage() {
                 <th>Finished</th>
                 <th>Message</th>
                 <th>Rollback</th>
+                <th title="Reboot persistence with the host's own distribution service (nftables.service, netfilter-persistent, iptables-services)">Survives reboot</th>
                 {hasExpiryResults && <th>On Expiry</th>}
               </tr>
             </thead>
@@ -463,12 +489,13 @@ export function DeploymentDetailPage() {
                       <span style={{ color: '#FF9800', fontWeight: 'bold' }}>Yes</span>
                     ) : '-'}
                   </td>
+                  <td>{persistenceCell(host)}</td>
                   {hasExpiryResults && (
                     <td>
                       {host.expiry_status ? (
                         <span style={{ fontSize: '0.9em' }} title={host.expiry_message || ''}>
                           <strong style={{ color: host.expiry_status === 'FAILED' ? '#a63d2f' : host.expiry_status === 'SKIPPED' ? '#78644e' : '#5a7a3a' }}>
-                            {host.expiry_status === 'REVERT_QUEUED' ? 'Reverting' : host.expiry_status.charAt(0) + host.expiry_status.slice(1).toLowerCase()}
+                            {host.expiry_status === 'REVERT_QUEUED' ? 'Reverting' : host.expiry_status === 'REVERTED' ? 'Reverted' : host.expiry_status.charAt(0) + host.expiry_status.slice(1).toLowerCase()}
                           </strong>
                           {host.expiry_message && <div style={{ color: '#666' }}>{host.expiry_message}</div>}
                         </span>

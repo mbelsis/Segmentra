@@ -187,6 +187,41 @@
             if [ -f {{ segmentra_legacy_policy }} ]; then mv -f {{ segmentra_legacy_policy }} {{ segmentra_legacy_policy }}.migrated; fi
             if [ -f {{ segmentra_legacy_policy6 }} ]; then mv -f {{ segmentra_legacy_policy6 }} {{ segmentra_legacy_policy6 }}.migrated; fi
           changed_when: false
+
+        # Reboot persistence with the distribution's OWN service (no Segmentra code runs at boot):
+        # nftables: /etc/nftables.d/segmentra.nft (Debian/Ubuntu) or /etc/nftables/segmentra.nft
+        # (RHEL family) + one include line in the distro's nftables config, nftables.service
+        # enabled (never started). iptables: SEGMENTRA lines merged into /etc/iptables/rules.v4|v6
+        # (iptables-persistent) or /etc/sysconfig/iptables|ip6tables (iptables-services), the
+        # service enabled. Packages are never installed and firewalld is never disabled; missing
+        # pieces are reported as SEGMENTRA_PERSIST_WARN lines and never fail the play.
+        - name: Persist table inet segmentra for reboots (distribution nftables.service)
+          when: nft_will_apply
+          become: true
+          script: "files/segmentra-nft.sh persist"
+          register: nft_persist
+          failed_when: false
+          changed_when: true
+
+        - name: Persist iptables SEGMENTRA chains for reboots (iptables-persistent / iptables-services)
+          when: iptables_will_apply
+          become: true
+          script: "files/segmentra-iptables.sh persist iptables"
+          register: ipt_persist
+          failed_when: false
+          changed_when: true
+
+        - name: Persist ip6tables SEGMENTRA chains for reboots
+          when: iptables_will_apply and ip6_tools_detect.stdout == 'yes'
+          become: true
+          script: "files/segmentra-iptables.sh persist ip6tables"
+          register: ip6_persist
+          failed_when: false
+          changed_when: true
+
+        - name: Show reboot persistence result
+          debug:
+            msg: "{{ ([nft_persist, ipt_persist, ip6_persist] | selectattr('stdout_lines', 'defined') | map(attribute='stdout_lines') | flatten) | select('match', '^SEGMENTRA_PERSIST') | list }}"
       rescue:
         # Scoped rollback: only table inet segmentra / SEGMENTRA-IN/OUT(/FWD) + jumps are
         # restored (legacy full-table iptables hosts: the filter table). Failures are
@@ -212,6 +247,28 @@
           become: true
           script: "files/segmentra-iptables.sh restore ip6tables {{ segmentra_backup_dir }}/ip6tables.{{ segmentra_ts }}"
           register: ip6_rollback
+          failed_when: false
+          changed_when: true
+
+        # The boot configuration follows the restored state (persist syncs it to the live state).
+        - name: Re-sync reboot persistence after the rollback (nftables)
+          when: nft_will_apply
+          become: true
+          script: "files/segmentra-nft.sh persist"
+          failed_when: false
+          changed_when: true
+
+        - name: Re-sync reboot persistence after the rollback (iptables)
+          when: iptables_will_apply
+          become: true
+          script: "files/segmentra-iptables.sh persist iptables"
+          failed_when: false
+          changed_when: true
+
+        - name: Re-sync reboot persistence after the rollback (ip6tables)
+          when: iptables_will_apply and (ip6_tools_detect.stdout | default('no')) == 'yes'
+          become: true
+          script: "files/segmentra-iptables.sh persist ip6tables"
           failed_when: false
           changed_when: true
 

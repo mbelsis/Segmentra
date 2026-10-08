@@ -518,6 +518,10 @@ function compileNft(input: CompileInput, logOnly: boolean): string {
   inputRules.push(
     `icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert } accept comment "ipv6_nd"`
   );
+  // Log-only: replies to inbound connections (and later packets of outbound ones) are not new
+  // flows; without this they are logged by the output catch-all as outbound traffic to
+  // ephemeral ports and turned into bogus OUT recommendations.
+  if (logOnly) outputRules.push('ct state established,related accept');
   for (const cidr of mgmt.v4) {
     inputRules.push(`ip saddr ${cidr} tcp dport ${mgmt.port} ${logStmt('ALLOW: mgmt_ssh')}accept comment "mgmt_ssh"`);
   }
@@ -718,6 +722,8 @@ function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Famil
 
   baselineAccept('-i lo', 'loopback');
   baselineAccept('-m conntrack --ctstate ESTABLISHED,RELATED', 'established');
+  // Log-only: don't log reply traffic as new outbound flows (see compileNft).
+  if (logOnly) push(`-A ${OUT} -m conntrack --ctstate ESTABLISHED,RELATED ${iptComment('established')} -j RETURN`);
   if (fam === 6) {
     // IPv6 neighbor discovery must never be dropped or IPv6 connectivity breaks.
     for (const t of ['neighbour-solicitation', 'neighbour-advertisement', 'router-solicitation', 'router-advertisement']) {

@@ -28,7 +28,7 @@ A gateway is a Linux server with **two or more network interfaces**:
 
 - **Linux server** with 2+ NICs (Ubuntu 22.04+, RHEL 8+, or similar)
 - **nftables** or **iptables** installed
-- **SSH access** with a sudo-capable user
+- **SSH access** with a user that has full sudo rights (see [Step 5](#step-5-configure-ssh-access-for-segmentra))
 - **Two network connections**: one to IT, one to OT
 - Physical or virtual network segmentation between IT and OT
 
@@ -237,13 +237,11 @@ ip route 10.0.62.0/24 via 10.0.10.100
    - Firewall backend: `nftables`
    - Tag: `iot-gateway`
 
-2. **Inventory → Hosts → Interfaces**: Add both NICs
-   - `eth0` — role: `management`, IP: `10.0.10.100`
-   - `eth1` — role: `data`, IP: `10.0.60.1`
+2. Optional, API only: record both NICs with `POST /api/hosts/:id/interfaces` (`{ name, role, ipAddress, ... }`, e.g. `eth0` role `management`, `eth1` role `data`). Interfaces are used for interface-scoped IN/OUT rules; FORWARD rules ignore them. There is no UI for adding interfaces.
 
-3. **Admin → SSH Credentials**: Ensure a GLOBAL credential exists with the `segmentra` user
+3. **Admin → SSH Credentials**: make sure a credential for the `segmentra` user applies to the gateway: a global one, or one scoped to the tag `iot-gateway`, the gateway's VLAN or the host itself. The **SSH credential** column in Inventory → Hosts shows which credential the gateway uses.
 
-4. **Inventory → Check Readiness**: Verify the gateway is ready for deployments
+4. **Inventory → Hosts → Check Readiness**: Verify the gateway is ready for deployments
 
 ---
 
@@ -371,7 +369,7 @@ Add the gateway to your monitoring system (Prometheus node_exporter, Zabbix, etc
 1. Check if the gateway is forwarding: `cat /proc/sys/net/ipv4/ip_forward` (must be `1`)
 2. Check the deployed rules: `sudo nft list ruleset` or `sudo iptables -L -n`
 3. Check routing: `ip route` on the gateway, verify OT subnets are reachable
-4. Run the **Troubleshoot → Simulate** check (source IP, device IP, port): it evaluates the gateway's FORWARD rules and shows the rule that decides, or the protected-device default deny
+4. Run **Troubleshoot → Simulate Communication** (source IP, device IP, port): it evaluates the gateway's FORWARD rules and shows the rule that decides, or the protected-device default deny
 5. Run Firewall Learning on the gateway to see what traffic reaches the device (the gateway accepts and logs while learning)
 6. Check the OT device's gateway setting. It should point to the gateway's OT interface IP
 7. Check that the device is assigned to the gateway on the OT/IoT page and that the gateway was redeployed after the assignment
@@ -379,11 +377,11 @@ Add the gateway to your monitoring system (Prometheus node_exporter, Zabbix, etc
 ### Policy Deployment Fails
 
 1. Verify SSH access: `ssh segmentra@10.0.10.100 "sudo nft list ruleset"`
-2. Check the Segmentra deployment logs: **Deployments → (select deployment) → View Logs**
+2. Check the per-host status and message in **Deployments → (select deployment)**, and run **Check Readiness** on the gateway (it reports SSH, sudo and firewall-tool problems)
 3. Verify the host is tagged `iot-gateway` and has the correct firewall backend setting
 
 ### Traffic Flows But Shouldn't
 
-1. Check if there's a permissive rule: run **Security Audit** to find overly broad rules
+1. Check if there's a permissive rule: run a **Security Audit** scan to find overly broad rules
 2. Verify the device is protected: it must be assigned to the gateway (OT/IoT page), be enabled, have an IP address, and the gateway must have been redeployed since. Check `sudo nft list chain inet segmentra forward` (nftables) or `sudo iptables -S SEGMENTRA-FWD` and `sudo iptables -S FORWARD | head -2` (iptables) for the `protected_default_deny` rule and the jump
 3. Check for bypasses: ensure no direct routes exist between IT and OT that skip the gateway. Segmentra can only filter traffic that is actually routed through the gateway

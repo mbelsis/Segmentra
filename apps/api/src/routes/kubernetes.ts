@@ -125,22 +125,14 @@ kubernetesRouter.delete('/clusters/:id', requireRole('admin'), async (req, res) 
 
 // Sync cluster workloads (discovery)
 kubernetesRouter.post('/clusters/:id/sync', requireRole('operator', 'admin'), async (req, res) => {
-  const { rows } = await pool.query(`SELECT * FROM k8s_clusters WHERE id = $1`, [req.params.id]);
+  const { rows } = await pool.query(`SELECT id FROM k8s_clusters WHERE id = $1`, [req.params.id]);
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
-
-  // Placeholder sync — in production this would call k8s API
-  await pool.query(
-    `UPDATE k8s_clusters SET last_sync_at = now(), last_sync_status = 'synced' WHERE id = $1`,
-    [req.params.id]
-  );
-
-  await pool.query(
-    `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
-     VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), $2, $3, $4, $5)`,
-    [req.auth!.username, 'K8S_CLUSTER_SYNC', 'k8s_cluster', req.params.id, JSON.stringify({ clusterId: req.params.id })]
-  );
-
-  res.json({ success: true, message: 'Cluster sync initiated' });
+  // Segmentra does not connect to the Kubernetes API yet, so there is nothing to sync.
+  // Report that honestly instead of pretending the sync succeeded.
+  res.status(501).json({
+    error: 'not_implemented',
+    message: 'Kubernetes workload sync is not implemented yet: Segmentra does not connect to the cluster API. Generate NetworkPolicy manifests and apply them with kubectl.'
+  });
 });
 
 // List workloads

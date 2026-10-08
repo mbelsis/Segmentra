@@ -13,6 +13,7 @@
  *   node -e "import('./packages/executor/dist/iptables-scripts.js').then(m=>require('fs').writeFileSync('infra/ansible-runner/playbooks/files/segmentra-iptables.sh', m.SEGMENTRA_IPTABLES_SH))"
  */
 import { shq } from './ssh-options.js';
+import { PERSIST_COMMON_SH } from './persist-scripts.js';
 
 /** Root-owned copies of the last pre-chain-design ("legacy") policy files, used to identify legacy rules. */
 export const LEGACY_POLICY_FILE = '/etc/segmentra.legacy.policy';
@@ -25,6 +26,7 @@ export const LEGACY_POLICY_FILE6 = '/etc/segmentra.legacy.policy6';
  *   sh -c "$SCRIPT" segmentra-iptables remove      <iptables|ip6tables> [legacy-policy-file]
  *   sh -c "$SCRIPT" segmentra-iptables backup      <iptables|ip6tables> <backup-file>
  *   sh -c "$SCRIPT" segmentra-iptables restore     <iptables|ip6tables> <backup-file>
+ *   sh -c "$SCRIPT" segmentra-iptables persist|unpersist|check <iptables|ip6tables>
  *
  * apply:       one `iptables-restore --noflush` transaction fills SEGMENTRA-IN/OUT
  *              and inserts the INPUT/OUTPUT jumps at position 1 if missing; when the
@@ -48,6 +50,21 @@ export const LEGACY_POLICY_FILE6 = '/etc/segmentra.legacy.policy6';
  *              by replacing the complete filter table — see restore_backup below.
  *              Exit codes: 3 = backup missing, 4 = restore failed, 5 = chain removal failed.
  *
+ * persist:     reboot persistence with the distribution's own service (see persist-scripts.ts):
+ *              the LIVE SEGMENTRA-IN/OUT/FWD chains and INPUT/OUTPUT/FORWARD jumps are merged
+ *              into the distro's saved rules file — /etc/iptables/rules.v4|rules.v6
+ *              (iptables-persistent, Debian/Ubuntu) or /etc/sysconfig/iptables|ip6tables
+ *              (iptables-services, RHEL family). Only Segmentra's lines of the *filter section
+ *              are replaced (declarations, -A SEGMENTRA-* rules, the jumps, which go first in
+ *              their chains); every other line stays byte-identical. A missing file is created
+ *              with only *filter, ACCEPT policies and Segmentra's lines (only if the package is
+ *              installed). netfilter-persistent / iptables(+ip6tables).service is enabled, never
+ *              started; nothing is enabled while firewalld is active/enabled. Packages are never
+ *              installed. No live Segmentra state -> Segmentra's lines are removed. A live
+ *              log-only (learning/test) policy is never persisted.
+ * unpersist:   removes Segmentra's lines from the saved rules file.
+ * check:       reports what persist would do without changing anything.
+ *
  * Legacy cleanup (hosts deployed by the old full-table design, i.e. no jump existed
  * before this run): rules directly in INPUT/OUTPUT are deleted only when positively
  * identified as Segmentra's — a "segmentra"/"mgmt_ssh" comment, an "FW-AUDIT:" LOG
@@ -68,6 +85,7 @@ case "$mode" in
   remove) pol=; legacy=\${3:-} ;;
   backup|restore) pol=; legacy=; bfile=\${3:-}
     if [ -z "$bfile" ]; then echo "segmentra-iptables: $mode needs a backup file argument" >&2; exit 2; fi ;;
+  persist|unpersist|check) pol=; legacy= ;;
   *) echo "segmentra-iptables: invalid mode '$mode'" >&2; exit 2 ;;
 esac
 save="$ipt-save"
@@ -385,12 +403,143 @@ restore_backup() {
   restore_scoped
 }
 
+${PERSIST_COMMON_SH}
+ipt_paths() {
+  IFILE=; IUNIT=; IPLUG=; IMETH=none
+  case "$P_DISTRO" in
+    debian)
+      IUNIT=netfilter-persistent.service; IMETH=netfilter-persistent
+      if [ "$ipt" = iptables ]; then IFILE=/etc/iptables/rules.v4; IPLUG=/usr/share/netfilter-persistent/plugins.d/15-ip4tables
+      else IFILE=/etc/iptables/rules.v6; IPLUG=/usr/share/netfilter-persistent/plugins.d/25-ip6tables; fi ;;
+    rhel)
+      IUNIT=$ipt.service; IMETH=iptables-services
+      if [ "$ipt" = iptables ]; then IFILE=/etc/sysconfig/iptables; else IFILE=/etc/sysconfig/ip6tables; fi ;;
+  esac
+}
+
+# Segmentra's live lines -> $tmpd/pdecl (chain declarations) and $tmpd/prules (jumps first, then
+# the SEGMENTRA-* rules). Returns 1 = no Segmentra chains, 2 = log-only policy, 3 = read error.
+ipt_render() {
+  : > "$tmpd/pdecl"; : > "$tmpd/prules"
+  $save > "$tmpd/psave" 2>/dev/null || return 3
+  seg_fragment "$tmpd/psave" > "$tmpd/pfrag"
+  grep '^:' "$tmpd/pfrag" > "$tmpd/pdecl"
+  [ -s "$tmpd/pdecl" ] || return 1
+  if grep -q 'FW-AUDIT: ALLOW: catch-all' "$tmpd/pfrag"; then return 2; fi
+  {
+    if save_has_jump "$tmpd/psave" INPUT $IN; then echo "-A INPUT -j $IN"; fi
+    if save_has_jump "$tmpd/psave" OUTPUT $OUT; then echo "-A OUTPUT -j $OUT"; fi
+    if save_has_jump "$tmpd/psave" FORWARD $FWD; then echo "-A FORWARD -j $FWD"; fi
+    grep '^-A ' "$tmpd/pfrag"
+  } > "$tmpd/prules"
+  return 0
+}
+
+# ipt_merge <saved-file|/dev/null>: the saved file with Segmentra's lines of its *filter section
+# replaced by $tmpd/pdecl + $tmpd/prules (inserted after the chain declarations, so the jumps are
+# the first rules of INPUT/OUTPUT/FORWARD). All other lines are printed unchanged. Without a
+# *filter section (or file) and with something to add, a minimal *filter section is appended.
+ipt_merge() {
+  awk -v decl="$tmpd/pdecl" -v rules="$tmpd/prules" '
+    BEGIN {
+      while ((getline l < decl) > 0) d[++nd] = l
+      while ((getline l < rules) > 0) r[++nr] = l
+    }
+    function emit(  i) { if (!done) { for (i = 1; i <= nd; i++) print d[i]; for (i = 1; i <= nr; i++) print r[i]; done = 1 } }
+    function ours(s) {
+      if (s ~ /^:SEGMENTRA-(IN|OUT|FWD)[ \\t]/) return 1
+      if (s ~ /^-A SEGMENTRA-(IN|OUT|FWD)[ \\t]/) return 1
+      if (s ~ /^-A (INPUT|OUTPUT|FORWARD) -j SEGMENTRA-(IN|OUT|FWD)[ \\t]*$/) return 1
+      return 0
+    }
+    substr($0, 1, 1) == "*" { if (inf && !done) emit(); inf = ($0 == "*filter"); if (inf) seen = 1; print; next }
+    inf && ours($0) { next }
+    inf && !done && $0 !~ /^:/ && $0 !~ /^#/ && NF > 0 { emit() }
+    { print }
+    END {
+      if (!seen && nd + nr > 0) {
+        print "*filter"; print ":INPUT ACCEPT [0:0]"; print ":FORWARD ACCEPT [0:0]"; print ":OUTPUT ACCEPT [0:0]"
+        emit(); print "COMMIT"
+      }
+    }' "$1"
+}
+
+ipt_persist() {
+  pm=$1
+  P_FAMILY=$ipt
+  detect_distro
+  ipt_paths
+  if [ -z "$IFILE" ]; then
+    pwarn unsupported_distro "reboot persistence is supported on Debian, Ubuntu and RHEL-family hosts only; the $ipt SEGMENTRA chains will not survive a reboot"
+    presult not_persisted none unsupported; return 0
+  fi
+  if [ "$pm" = unpersist ]; then : > "$tmpd/pdecl"; : > "$tmpd/prules"; rr=1
+  else ipt_render; rr=$?; fi
+  if [ "$rr" = 3 ]; then pwarn read_failed "$save failed"; presult not_persisted none error; exit 4; fi
+  pkg=1
+  if [ "$P_DISTRO" = debian ]; then
+    if [ ! -e "$IPLUG" ] || ! unit_exists netfilter-persistent.service; then pkg=0; fi
+  elif ! unit_exists "$IUNIT"; then pkg=0; fi
+  havenew=0
+  if [ "$rr" != 2 ]; then
+    if [ -f "$IFILE" ]; then ipt_merge "$IFILE" > "$tmpd/pnew"; havenew=1
+    elif [ "$rr" = 0 ]; then ipt_merge /dev/null > "$tmpd/pnew"; havenew=1; fi
+  fi
+  if [ "$pm" != check ] && [ "$havenew" = 1 ] && { [ "$pkg" = 1 ] || [ -f "$IFILE" ]; }; then
+    if ! replace_file "$IFILE" "$tmpd/pnew" 600; then
+      pwarn write_failed "could not write $IFILE"; presult not_persisted none error; exit 4
+    fi
+    if [ "$rr" = 0 ]; then info "SEGMENTRA chains merged into $IFILE"; else info "SEGMENTRA lines removed from $IFILE"; fi
+  fi
+  if [ "$rr" = 2 ]; then
+    pnote log_only_active "a log-only Firewall Learning / policy test policy is active; it is not persisted, the boot configuration keeps the last enforced policy"
+    if [ -f "$IFILE" ] && grep -q "^:$IN " "$IFILE"; then state=learning; else state=missing; fi
+  elif [ "$havenew" = 0 ]; then state=none
+  elif same_file "$IFILE" "$tmpd/pnew"; then state=in_sync
+  elif [ -f "$IFILE" ]; then state=differs
+  else state=missing; fi
+  if [ "$rr" = 1 ] && [ "$pm" != check ]; then presult removed none none; return 0; fi
+  if [ "$rr" = 1 ] && [ "$state" = in_sync ]; then state=none; fi
+  if [ "$P_DISTRO" = debian ] && unit_enabled nftables.service && grep -q '^[[:space:]]*flush[[:space:]][[:space:]]*ruleset' /etc/nftables.conf 2>/dev/null; then
+    pnote nftables_flush_conflict "nftables.service is also enabled and /etc/nftables.conf contains flush ruleset; depending on boot order it can remove the restored iptables rules (disable nftables.service or remove flush ruleset)"
+  fi
+  if [ -f "$IFILE" ] && awk '
+      substr($0, 1, 1) == "*" { inf = ($0 == "*filter"); next }
+      inf && /^-A INPUT -j (REJECT|DROP)/ { f = 1 }
+      END { exit !f }' "$IFILE"; then
+    pnote saved_rules_final_reject "$IFILE ends INPUT with a catch-all REJECT/DROP of its own: after a reboot it also drops traffic Segmentra allows (Segmentra allows with RETURN, so later rules still apply)"
+  fi
+  st=not_persisted; meth=none
+  if [ "$pkg" = 0 ]; then
+    if [ "$P_DISTRO" = debian ]; then
+      pwarn iptables_persistent_missing "the iptables-persistent package (netfilter-persistent) is not installed and Segmentra does not install packages: install iptables-persistent to make the $ipt rules survive a reboot"
+    else
+      pwarn iptables_services_missing "the iptables-services package ($IUNIT) is not installed and Segmentra does not install packages: install iptables-services to make the $ipt rules survive a reboot"
+    fi
+  elif firewalld_on; then
+    pwarn firewalld_active "firewalld is active or enabled and conflicts with $IUNIT, which Segmentra therefore does not enable: the $ipt rules will not survive a reboot while firewalld manages the firewall (disable firewalld and enable $IUNIT to persist them)"
+  elif [ "$pm" = persist ] && ! enable_unit "$IUNIT"; then
+    :
+  elif unit_enabled "$IUNIT"; then
+    st=persisted; meth=$IMETH
+  else
+    meth=$IMETH
+    pwarn service_disabled "$IUNIT is not enabled; Segmentra enables it on the next deployment"
+  fi
+  if [ "$st" = persisted ]; then
+    case "$state" in in_sync|learning|none) ;; *) st=not_persisted ;; esac
+  fi
+  if [ "$state" = none ]; then st=removed; fi
+  presult "$st" "$meth" "$state"
+}
+
 case "$mode" in
   apply) apply_chains; legacy_cleanup ;;
   apply-audit) apply_chains ;;
   remove) remove_chains; legacy_cleanup ;;
   backup) backup_state ;;
   restore) restore_backup ;;
+  persist|unpersist|check) ipt_persist "$mode" ;;
 esac
 exit 0
 `;

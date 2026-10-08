@@ -1,5 +1,21 @@
 import type { SshHostInfo } from './types.js';
 import { runSshCommand, runSshSudo, usesSudoPassword, type SshConnectionOptions, type SudoErrorKind } from './ssh-options.js';
+import { checkHostPersistence, persistenceAvailable } from './persistence.js';
+import type { PersistenceMethod } from './persist-scripts.js';
+
+/** Reboot persistence capability of a host (distribution's own service; see persist-scripts.ts). */
+export interface HostPersistenceCapability {
+  /** debian (Debian/Ubuntu), rhel (RHEL/Rocky/Alma/CentOS/Fedora) or unsupported; null if not checked. */
+  distro: 'debian' | 'rhel' | 'unsupported' | null;
+  /** Method deployments will use (nftables.service, netfilter-persistent, iptables-services), null if none. */
+  method: PersistenceMethod | null;
+  /** True when deployed rules can be made to survive a reboot on this host. */
+  available: boolean;
+  /** Current state: persisted / not_persisted / removed / unknown. */
+  status: string;
+  warnings: string[];
+  notes: string[];
+}
 
 export interface HostReadinessResult {
   hostname: string;
@@ -15,6 +31,8 @@ export interface HostReadinessResult {
   kernelSupport: boolean;
   errors: string[];
   warnings: string[];
+  /** Reboot persistence capability (checked only when sudo works). */
+  persistence?: HostPersistenceCapability;
 }
 
 /**
@@ -141,6 +159,34 @@ export async function checkHostReadiness(host: SshHostInfo, opts: SshConnectionO
   const schedCheck = await run('command -v systemd-run >/dev/null 2>&1 || command -v nohup >/dev/null 2>&1');
   if (schedCheck.exitCode !== 0) {
     result.warnings.push('Neither systemd-run nor nohup found; automatic revert (lockout protection) may not work');
+  }
+
+  // The Ansible executor runs Python modules on the host (SSH Direct needs no Python).
+  const pyCheck = await run(
+    'command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1 || [ -x /usr/libexec/platform-python ]'
+  );
+  if (pyCheck.exitCode !== 0) {
+    result.warnings.push('Python is not installed; deployments with the Ansible executor will fail on this host (the SSH Direct executor does not need Python)');
+  }
+
+  // Reboot persistence with the distribution's own service (read-only check, nothing is changed).
+  if (result.sudoAccess) {
+    const p = await checkHostPersistence(host, useIptables ? 'iptables' : 'nftables', opts);
+    const available = persistenceAvailable(p);
+    result.persistence = {
+      distro: p.distro,
+      method: available ? p.method ?? (useIptables ? null : 'nftables.service') : null,
+      available,
+      status: p.status,
+      warnings: p.error ? [...p.warnings, `check_failed: ${p.error}`] : p.warnings,
+      notes: p.notes
+    };
+    if (!available) {
+      const why = p.warnings.filter((w) => !w.startsWith('service_disabled')).map((w) => w.replace(/^[a-z_]+: /, ''));
+      result.warnings.push(
+        `Rules will not survive a reboot on this host${why.length ? `: ${why.join('; ')}` : p.error ? ` (persistence check failed: ${p.error})` : ''}`
+      );
+    }
   }
 
   return result;

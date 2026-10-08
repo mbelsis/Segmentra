@@ -19,6 +19,7 @@ export function maskSecret(value: unknown): string {
   if (value === null || value === undefined) return '';
   const s = String(value);
   if (s.length === 0) return '';
+  if (s.startsWith(MASK_PREFIX)) return s; // already masked (idempotent)
   if (s.length <= 8) return MASK_PREFIX;
   return `${MASK_PREFIX}${s.slice(-4)}`;
 }
@@ -65,6 +66,10 @@ export function mergeConfigSecrets(
   return out;
 }
 
+function isTokenLikeSegment(segment: string): boolean {
+  return segment.length >= 16 && /^[A-Za-z0-9_\-.~%]+$/.test(segment) && /\d/.test(segment);
+}
+
 /** Mask credentials embedded in a URL: userinfo password and query values of token-like params. */
 export function maskUrlSecrets(rawUrl: unknown): string {
   if (typeof rawUrl !== 'string' || !rawUrl) return typeof rawUrl === 'string' ? rawUrl : '';
@@ -82,11 +87,15 @@ export function maskUrlSecrets(rawUrl: unknown): string {
       }
     }
     // Slack/Teams/Discord style webhooks carry the secret in the path; keep the host and
-    // the first path segment only.
+    // the first path segment only. Other hosts: mask any opaque, token-like path segment
+    // (16+ chars of letters/digits/-/_ containing a digit), e.g. /hooks/<token>.
     const segments = u.pathname.split('/').filter(Boolean);
     if (segments.length > 1 && /hooks\.slack\.com|webhook\.office\.com|discord(app)?\.com|outlook\.office/i.test(u.host)) {
       const last = segments[segments.length - 1];
       u.pathname = `/${segments[0]}/${MASK_PREFIX}${last.slice(-4)}`;
+      changed = true;
+    } else if (segments.some(isTokenLikeSegment)) {
+      u.pathname = '/' + segments.map((s) => (isTokenLikeSegment(s) ? `${MASK_PREFIX}${s.slice(-4)}` : s)).join('/');
       changed = true;
     }
     return changed ? decodeURI(u.toString()) : rawUrl;

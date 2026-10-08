@@ -3,24 +3,24 @@ import { z } from 'zod';
 
 import { pool } from '../db/pool.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
-import { maskConfigSecrets, mergeConfigSecrets } from '../services/secret-mask.js';
+import {
+  deleteConfigSecret,
+  loadFullConfig,
+  maskIntegrationConfig,
+  mergeIntegrationConfig,
+  storeFullConfig,
+} from '../services/config-secrets.js';
+import { invalidateSiemIntegrationCache } from '../services/siem-forwarder.js';
 
-function parseConfig(raw: unknown): Record<string, unknown> {
-  if (!raw) return {};
-  if (typeof raw === 'string') {
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return {};
-    }
-  }
-  return raw as Record<string, unknown>;
-}
-
-/** Never return API keys / tokens stored in integration config verbatim. */
-function redactIntegration<T extends { config?: unknown }>(row: T): T {
+/**
+ * Never return API keys / tokens. The full config lives encrypted in secret_store
+ * (config_secret_id); the `config` column only holds a masked display copy, masked again here
+ * for rows not yet migrated.
+ */
+function redactIntegration<T extends { config?: unknown; config_secret_id?: unknown }>(row: T): T {
   if (!row) return row;
-  return { ...row, config: maskConfigSecrets(parseConfig(row.config)) };
+  const { config_secret_id: _secretId, ...rest } = row;
+  return { ...rest, config: maskIntegrationConfig(row.config) } as unknown as T;
 }
 
 export const integrationsRouter = Router();
@@ -96,12 +96,20 @@ integrationsRouter.post('/', requireRole('admin'), async (req, res) => {
   const userRes = await pool.query(`SELECT id FROM users WHERE username=$1 LIMIT 1`, [req.auth!.username]);
   const userId = userRes.rows[0]?.id ?? null;
 
-  const { rows } = await pool.query(
-    `INSERT INTO integrations (type, provider, name, description, enabled, config, credentials_secret_id, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-    [b.type, b.provider, b.name, b.description ?? null, b.enabled,
-     JSON.stringify(b.config), b.credentialsSecretId ?? null, userId]
-  );
+  // Full config encrypted in secret_store; only a masked copy goes to the plain column.
+  const stored = await storeFullConfig('integration', b.name, b.config, null);
+  let rows;
+  try {
+    ({ rows } = await pool.query(
+      `INSERT INTO integrations (type, provider, name, description, enabled, config, config_secret_id, credentials_secret_id, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [b.type, b.provider, b.name, b.description ?? null, b.enabled,
+       JSON.stringify(stored.displayConfig), stored.secretId, b.credentialsSecretId ?? null, userId]
+    ));
+  } catch (e) {
+    await deleteConfigSecret(stored.secretId);
+    throw e;
+  }
 
   await pool.query(
     `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
@@ -109,6 +117,7 @@ integrationsRouter.post('/', requireRole('admin'), async (req, res) => {
     [userId, rows[0].id, JSON.stringify({ type: b.type, provider: b.provider, name: b.name })]
   );
 
+  invalidateSiemIntegrationCache();
   res.status(201).json({ integration: redactIntegration(rows[0]) });
 });
 
@@ -119,11 +128,15 @@ integrationsRouter.put('/:id', requireRole('admin'), async (req, res) => {
   const b = parsed.data;
 
   // Masked secrets ("••••1234") or omitted secret keys keep the stored value.
-  let mergedConfig: Record<string, unknown> | null = null;
+  let displayConfig: Record<string, unknown> | null = null;
+  let configSecretId: string | null = null;
   if (b.config) {
-    const existing = await pool.query(`SELECT config FROM integrations WHERE id = $1`, [req.params.id]);
+    const existing = await pool.query(`SELECT name, config, config_secret_id FROM integrations WHERE id = $1`, [req.params.id]);
     if (!existing.rows[0]) return res.status(404).json({ error: 'not_found' });
-    mergedConfig = mergeConfigSecrets(parseConfig(existing.rows[0].config), b.config);
+    const merged = mergeIntegrationConfig(await loadFullConfig(existing.rows[0]), b.config);
+    const stored = await storeFullConfig('integration', b.name ?? existing.rows[0].name, merged, existing.rows[0].config_secret_id);
+    displayConfig = stored.displayConfig;
+    configSecretId = stored.secretId;
   }
 
   const { rows } = await pool.query(
@@ -135,11 +148,12 @@ integrationsRouter.put('/:id', requireRole('admin'), async (req, res) => {
          enabled = COALESCE($6, enabled),
          config = COALESCE($7, config),
          credentials_secret_id = COALESCE($8, credentials_secret_id),
+         config_secret_id = COALESCE($9, config_secret_id),
          updated_at = now()
      WHERE id = $1 RETURNING *`,
     [req.params.id, b.type ?? null, b.provider ?? null, b.name ?? null,
-     b.description ?? null, b.enabled ?? null, mergedConfig ? JSON.stringify(mergedConfig) : null,
-     b.credentialsSecretId ?? null]
+     b.description ?? null, b.enabled ?? null, displayConfig ? JSON.stringify(displayConfig) : null,
+     b.credentialsSecretId ?? null, configSecretId]
   );
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
 
@@ -149,13 +163,16 @@ integrationsRouter.put('/:id', requireRole('admin'), async (req, res) => {
     [req.auth!.username, 'INTEGRATION_UPDATE', 'integration', req.params.id, JSON.stringify({ name: rows[0].name })]
   );
 
+  invalidateSiemIntegrationCache();
   res.json({ integration: redactIntegration(rows[0]) });
 });
 
 // Delete integration
 integrationsRouter.delete('/:id', requireRole('admin'), async (req, res) => {
-  const { rowCount } = await pool.query(`DELETE FROM integrations WHERE id = $1`, [req.params.id]);
-  if (!rowCount) return res.status(404).json({ error: 'not_found' });
+  const { rows: deleted } = await pool.query(`DELETE FROM integrations WHERE id = $1 RETURNING config_secret_id`, [req.params.id]);
+  if (!deleted[0]) return res.status(404).json({ error: 'not_found' });
+  await deleteConfigSecret(deleted[0].config_secret_id);
+  invalidateSiemIntegrationCache();
 
   await pool.query(
     `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
@@ -192,7 +209,7 @@ integrationsRouter.post('/:id/test', requireRole('admin'), async (req, res) => {
         `UPDATE integrations SET last_sync_at = now(), last_sync_status = 'connected' WHERE id = $1`,
         [req.params.id]
       );
-      const siemConfig = parseConfig(rows[0].config);
+      const siemConfig = await loadFullConfig(rows[0]);
       const viaUdp = (siemConfig.protocol ?? 'udp') === 'udp';
       res.json({
         success: true,
@@ -203,7 +220,7 @@ integrationsRouter.post('/:id/test', requireRole('admin'), async (req, res) => {
 
     } else if (rows[0].type === 'threat_intel') {
       // Real test: verify API key by checking a known safe IP
-      const config = typeof rows[0].config === 'string' ? JSON.parse(rows[0].config) : rows[0].config;
+      const config = await loadFullConfig(rows[0]);
       if (!config.apiKey) {
         return res.status(400).json({ error: 'missing_api_key', message: 'Set apiKey in the integration config: {"apiKey": "your-abuseipdb-key"}' });
       }

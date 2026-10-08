@@ -20,14 +20,14 @@ The platform enables:
 - **Topology building**
 - **Default access rules for each policy**
 
-**Future plans** include integrations with Syslog, Threat Intelligence feeds and SOAR, and automatic rollback when a policy expires (today, expiry only marks the deployment expired and sends a notification).
+**Future plans** include more integration adapters (SOAR, vulnerability databases), live Kubernetes workload sync and direct NetworkPolicy apply, and a real email notification channel. See [Future Work](#future-work).
 
 ---
 
 ## Features & Capabilities
 
 ### Authentication & Authorization
-- **LDAP/Active Directory Integration** with AD group-to-role mapping
+- **LDAP/Active Directory Integration** with AD group-to-role mapping (group DNs are matched case- and whitespace-insensitively; LDAP users' passwords can't be reset in Segmentra)
 - **Local User Management** — create, edit, disable, and reset passwords for local users directly in the Admin UI (no LDAP required for small teams)
 - **Role-Based Access Control (RBAC)** enforced at both API and UI level:
   - **Viewer** — read-only access to all dashboards, inventory, policies, and deployments
@@ -39,7 +39,7 @@ The platform enables:
 
 ### Inventory Management
 - **Host Management** — add Linux servers with management IPs, SSH ports, firewall backend selection (nftables/iptables/auto)
-- **Tags & VLANs** — organize hosts by custom tags and VLAN membership; VLANs also serve as OT/IoT zones
+- **Tags & VLANs** — organize hosts by custom tags and VLAN membership; VLANs also serve as OT/IoT zones. A tag or VLAN that policy or template rules still reference can't be deleted
 - **Auto-Tagging Rule Engine** — define criteria (hostname regex, CIDR ranges, OS family, VLAN, existing tags) with AND/OR logic to automatically classify hosts; evaluates every 5 minutes and on-demand
 - **Automated Discovery** — discovery profiles scan IPv4 networks (CIDRs and/or VLAN subnets, max /20 per network and 8192 addresses per run) for SSH, log in with existing or new SSH credentials (read-only fact collection: hostname, OS, nft/iptables, sudo) and import new hosts with a default tag (`new-server`); manual **Run Now** or on a schedule, with per-address run history
 - **System Tags** — `iot-gateway` and `bastion` are protected tags that cannot be deleted
@@ -56,21 +56,22 @@ The platform enables:
 ### Policy Management
 - **Policy Sets** — organize rules by scope (TAG, VLAN, or HOST_LIST)
 - **Version Control** — every change creates a new version with the lifecycle DRAFT → PENDING_APPROVAL → APPROVED / REJECTED → DEPLOYED; approved, deployed and pending versions can be ARCHIVED
-- **Policy Templates** — reusable blueprints (e.g., "Web Server") with one-click instantiation; optional auto-apply when hosts gain a matching tag
+- **Policy Templates** — reusable blueprints (e.g., "Web Server") with one-click instantiation; optional auto-apply creates a DRAFT policy when a matching tag is first assigned to hosts
 - **Visual Topology Design** — draw network flows between groups, auto-discover from existing infrastructure, and generate policies automatically
 - **Policy Recommendations** — after firewall learning, auto-generate rules from observed traffic with confidence scoring and IP-to-tag resolution
 - **Policy Impact Analysis** — semantic diff showing new/removed allows and denies per host before approval
 - **High-Risk Detection** — audit policies to flag broad rules, wide scopes, and sensitive port exposure
-- **Policy Expiry** — optional time-limited deployments with 24-hour warnings. On expiry the deployment is marked `EXPIRED` and a notification is sent. The `REMOVE` and `REVERT` expiry actions currently only send a "manual rollback required" / "redeploy previous version" notification — rules on the hosts are **not** changed automatically
+- **Policy Expiry** — optional time-limited deployments with 24-hour warnings. On expiry the deployment is marked `EXPIRED`, a notification is sent and the expiry action runs: `NOTIFY_ONLY` does nothing else, `REMOVE` removes Segmentra's rules (`table inet segmentra` or the `SEGMENTRA-*` chains) from the hosts, and `REVERT` redeploys the previous successfully deployed version of the same policy set
 - **Policy Archive & Delete** — archive deployed/approved versions (read-only), delete DRAFT/REJECTED versions
 
 ### Deployment Management
-- **Deployment Modes** — Full, Canary, and Progressive (canary/progressive modes currently process all hosts in a single batch)
+- **Deployment Modes** — Full, Canary, and Progressive. With the SSH Direct executor hosts are deployed one at a time in hostname order: Canary stops if one of the first *N* canary hosts (default 1) fails, Progressive stops at the end of a batch (default 5 hosts) that had a failure; halted hosts are marked skipped and can be resumed with **Retry Failed Hosts**. The Ansible executor deploys all target hosts in one playbook run
 - **Scheduled Deployments** — schedule for future execution (e.g., maintenance windows); auto-starts via background job
 - **Two Executors** — Ansible (parallel, recommended) or SSH Direct (lightweight, no Ansible dependency)
 - **Safety Guardrails** — pre-deployment validation ensures SSH access from management VLAN is preserved
 - **Automatic Rollback** — failed deployments restore previous state from host-local backups
-- **Real-time Tracking** — per-host deployment status with 10-minute timeout for unresponsive hosts
+- **Real-time Tracking** — per-host deployment status with 10-minute timeout for unresponsive hosts; **Retry Failed Hosts**, pause/resume/stop, and a deployment-level approval for high-risk deployments
+- **Lockout protection** — after applying rules Segmentra checks that it can still reach the host over SSH; if not, the previous rules are restored automatically after 120 seconds
 
 <div align="center">
   <img src="docs/images/deployments.png" alt="Deployments" style="max-width: 100%; height: auto;" />
@@ -94,18 +95,16 @@ The platform enables:
 - **Deployment Warning** — deploying to IoT gateways triggers a warning about impact on protected devices
 
 ### Kubernetes Microsegmentation
-- **Agentless K8s Management** — connect to Kubernetes API servers to discover workloads and generate NetworkPolicy manifests
-- **Workload Discovery** — sync namespaces, pods, deployments, services, and labels
-- **Label-to-Tag Mapping** — map K8s labels to Segmentra tags for unified policy management
-- **NetworkPolicy Generation** — translate Segmentra rules into K8s NetworkPolicy JSON manifests for export; apply to clusters via `kubectl` or CI/CD pipelines
-- **Multi-Cluster Support** — manage multiple clusters from a single instance
+- **Cluster Registry** — register multiple clusters (API server URL, auth details) from a single instance
+- **Workloads and Label-to-Tag Mapping** — view workloads stored for a cluster and map them to Segmentra tags. **Workload sync is not implemented**: the sync endpoint returns 501 and Segmentra does not contact the Kubernetes API, so workloads are not discovered automatically (the demo data seeds some)
+- **NetworkPolicy Generation** — **Generate NetworkPolicy** translates the ALLOW rules of an approved or deployed policy version into an Ingress-only `networking.k8s.io/v1` NetworkPolicy manifest (DENY, FORWARD and other rules that cannot be expressed exactly are skipped with a warning). Segmentra does not apply it: copy the `kubectl apply` command or download the JSON
 
 ### Security & Compliance
-- **Security Posture Audit** — on-demand scan of all deployed policies for excessive permissions (8 categories: sensitive ports open to any, broad CIDRs, any-protocol rules, ALL_INTERFACES exposure, duplicate rules, unmanaged hosts, stale policies)
-- **Comprehensive Audit Trail** — every action logged with actor, timestamp, entity, and rich metadata
-- **Notification System** — Slack webhooks, generic HTTP webhooks, email (stub); subscribe channels to 10 event types (policy approvals, deployment failures, compliance drift, expiry warnings, security findings)
-- **Encrypted Secret Storage** — SSH keys/passwords and LDAP passwords encrypted with AES-256-GCM (key: `SEGMENTRA_KEK_B64`)
-- **Integrations** — administrative registry for SIEM, SOAR, vulnerability scanners, and threat intelligence feeds. Track integration configuration, credentials, and sync status. Actual data exchange with external systems requires custom adapter implementation.
+- **Security Posture Audit** — on-demand scan of all deployed policies for excessive permissions (8 categories: sensitive port open to any, all ports open to any, very broad source CIDRs, any-protocol / any-port rules, `ALL_INTERFACES` with a broad source, duplicate rules, unmanaged hosts, stale policies)
+- **Comprehensive Audit Trail** — changes logged with actor, timestamp, entity, and rich metadata
+- **Notification System** — Slack webhooks and generic HTTP webhooks (email channels are not implemented: there is no SMTP support and sends are logged as failed); subscribe channels to 11 event types (policy submitted/approved/rejected, deployment started/completed/failed, policy expiring soon/expired, excessive rules detected, firewall-learning restore failed, compliance drift). The compliance-drift event can be selected but is not emitted yet, and the optional per-rule `filter` is stored but not applied
+- **Encrypted Secret Storage** — SSH keys, key passphrases, SSH and sudo passwords and LDAP passwords encrypted with AES-256-GCM (key: `SEGMENTRA_KEK_B64`); see [docs/security.md](docs/security.md)
+- **Integrations** — registry for SIEM, SOAR, vulnerability databases and threat intelligence feeds. Working adapters: **SIEM** (syslog over UDP/TCP; every Audit Log entry is forwarded once, see [docs/security.md](docs/security.md)) and **AbuseIPDB** threat intelligence (sync, optional auto-block into a DRAFT version of a policy set; repeated syncs reuse the open auto-block draft and skip IPs already blocked). SOAR and vulnerability-database entries only store configuration and sync status.
 
 ### Dashboard
 - **Real-time Overview** — deployment status, success rates, activity charts
@@ -159,7 +158,7 @@ This is the typical path from an empty installation to enforced firewall rules. 
 ### 1. One-time setup (Admin, `admin` role)
 
 - **Deployment executor:** choose **SSH Direct** (lightweight) or **Ansible** (needs the runner container).
-- **SSH credentials:** add the account Segmentra uses to reach your hosts, with a private key (optionally passphrase-protected) or a password, and choose how it becomes root: **sudo without password**, **sudo with the login password**, or **sudo with a separate password**. The account needs full sudo rights (it runs `sh` as root); nothing is installed on the hosts. Credentials are stored encrypted. A global credential applies to all hosts unless a host has its own.
+- **SSH credentials:** add the account Segmentra uses to reach your hosts, with a private key (optionally passphrase-protected) or a password, and choose how it becomes root: **sudo without password**, **sudo with the login password**, or **sudo with a separate password**. The account needs full sudo rights (it runs `sh` as root); nothing is installed on the hosts. Credentials are stored encrypted. Each credential **applies to** all hosts (global), hosts with a tag, hosts in a VLAN, one host, or no host automatically (*not assigned*, for discovery or explicit assignment). Each host uses its explicitly assigned credential, else a host-, tag-, VLAN- and finally the global credential; the Inventory host list shows which one each host uses.
 - **Management VLAN:** pick the VLAN whose subnet may always reach SSH on every host. Without one, SSH is allowed from any source so hosts can't be locked out.
 - **Users and roles:** create accounts and give them roles (`viewer`, `operator`, `approver`, `admin`). You need at least two people who can approve, because nobody can approve their own changes (see step 5).
 
@@ -169,7 +168,7 @@ This is the typical path from an empty installation to enforced firewall rules. 
 - **Check Readiness:** confirms Segmentra can log in over SSH, use `sudo`, and find the firewall tool.
 - **Tags and VLANs:** group hosts (e.g. `web`, `db`) and network zones (VLANs with subnets). Rules can target whole groups instead of single IPs.
 - **Auto-Tagging:** tag hosts automatically by hostname, IP, OS and so on. Use **Preview Matches** before saving.
-- **Discovery:** instead of typing hosts in, create a discovery profile (admin): pick SSH credentials (or add one inline), the networks or VLANs to scan, a schedule (manual or every N minutes/hours) and a tag for new hosts (default `new-server`). **Run Now** (operator/admin) scans for open SSH ports, logs in read-only and imports hosts that are not yet in inventory; hosts that already exist are left untouched. Each run shows per-address results (imported, already present, login failed and why).
+- **Discovery:** instead of typing hosts in, create a discovery profile (admin): pick SSH credentials (or add one inline), the networks or VLANs to scan, a schedule (manual or every N minutes/hours) and a tag for new hosts (default `new-server`). **Run Now** (operator/admin) scans for open SSH ports, logs in read-only and imports hosts that are not yet in inventory; hosts that already exist are left untouched. Each run shows per-address results (imported, already present, login failed and why). Credentials added inline in a profile are stored as *not assigned* (unless you make them global), so they never change the credential of other hosts; each imported host is assigned the credential that logged in.
 - **Optional:** use **Topology** to draw flows between groups and generate draft policies from them, or **Templates** to start from a reusable rule set.
 
 ### 3. Policy Sets: decide where a policy applies (`operator` or `admin`)
@@ -179,7 +178,7 @@ A **policy set** is a named policy with a **scope**: the hosts it applies to, ch
 ### 4. Versions and rules: describe the access (`operator` or `admin`)
 
 - Open the policy set and click **+ New Version** (or **Clone** an existing version to change it). A new version starts as `DRAFT`.
-- Add **rules**: direction (in / out / both), allow or deny, protocol, ports, and source (CIDR, tag, VLAN or host). Rules are evaluated in order. Anything not allowed inbound is dropped; outbound is allowed by default.
+- Add **rules**: direction (in / out / both, or FORWARD on gateways), allow or deny, protocol, ports, and source (CIDR, tag, VLAN or host). Rules are evaluated in order. Anything not allowed inbound is dropped; outbound is allowed by default.
 - You never need rules for loopback, established connections or management SSH. Segmentra adds those automatically.
 - On IoT/OT gateways (hosts tagged `iot-gateway`), use direction **FORWARD (through gateway)** for traffic routed *through* the gateway. A FORWARD rule has a source and a **destination** (CIDR, tag, VLAN, host or IoT device). Traffic to the IoT devices assigned to that gateway is denied unless a FORWARD rule allows it. Other forwarded traffic is not affected. See [docs/iot.md](docs/iot.md).
 - When the version is ready, go back to the policy set and click **Submit for Approval**. The version becomes `PENDING_APPROVAL` and can no longer be edited.
@@ -203,7 +202,7 @@ A **policy set** is a named policy with a **scope**: the hosts it applies to, ch
 - **Inventory → Check Compliance:** detects drift when someone changes Segmentra's rules on a host by hand.
 - **Troubleshoot:** simulate whether traffic between two IPs would be allowed, search which policies affect an IP or host, or run **Firewall Learning** (log-only mode) to discover real traffic.
 - **Policy Impact Analysis:** run a version in log-only mode on a host before enforcing it, then analyze which observed traffic it would allow or block.
-- **Security Audit, Audit Log, Notifications and Integrations:** scan for risky rules, review who did what, get alerts (Slack or webhook), and forward audit events to a SIEM.
+- **Security Audit, Audit Log, Notifications and Integrations:** scan for risky rules, review who did what, get alerts (Slack or webhook), and forward the audit log to a SIEM.
 
 Typical lifecycle of a version: `DRAFT` → `PENDING_APPROVAL` → `APPROVED` (or `REJECTED` → fix → resubmit) → `DEPLOYED`; old versions can be `ARCHIVED`.
 
@@ -262,7 +261,7 @@ Segmentra can change the firewall of every managed host and stores SSH credentia
 - **Network:** serve the UI over TLS (reverse proxy) and make it reachable only from a management network or VPN.
 - **Managed hosts:** use a dedicated SSH user with keys, restricted to logins from the Segmentra host, and set a management VLAN.
 - **Secrets:** `chmod 600 .env` and back it up separately from database backups.
-- **People:** use LDAP with MFA at your identity provider, keep few admins, and forward the audit log to a SIEM.
+- **People:** use LDAP with MFA at your identity provider, keep few admins, and monitor the audit log (forward it to your SIEM).
 
 The full guide, including what is already hardened and the remaining gaps, is in [docs/security.md](docs/security.md#hardening-a-production-install).
 
@@ -294,9 +293,9 @@ TypeScript monorepo:
 | **Executor** | `packages/executor` | SSH Direct + Ansible deployment |
 | **DB** | `packages/db` | PostgreSQL migrations + seed scripts |
 
-Production runs 4 Docker containers: `segmentra-web` (nginx, port 80), `segmentra-app` (API, published on 127.0.0.1:8080 only), `segmentra-db` (PostgreSQL, 127.0.0.1:15432 only), `segmentra-ansible-runner` (Ansible executor).
+Production runs 4 Docker containers: `segmentra-web` (nginx, port 80), `segmentra-app` (API, published on 127.0.0.1:8080 only), `segmentra-db` (PostgreSQL, 127.0.0.1:15432 only), `segmentra-ansible-runner` (Ansible executor). With the hardened override (`docker-compose.hardened.yml`) the Ansible runner is not started (only with `--profile ansible`) and only nginx is published.
 
-> **Security note — Docker socket:** `segmentra-app` mounts `/var/run/docker.sock` so the Ansible executor can run `docker exec segmentra-ansible-runner ansible-playbook ...`. Access to the Docker socket is equivalent to root on the Docker host. If you only use the SSH executor, remove that mount (and `group_add`) from `docker-compose.yml`.
+> **Security note — Docker socket:** `segmentra-app` mounts `/var/run/docker.sock` so the Ansible executor can run `docker exec segmentra-ansible-runner ansible-playbook ...`. Access to the Docker socket is equivalent to root on the Docker host. If you only use the SSH executor, remove that mount (and `group_add`) from `docker-compose.yml`, or use the hardened override, which does this.
 
 For detailed technical documentation, see [Architecture.md](docs/Architecture.md).
 
@@ -320,8 +319,10 @@ For detailed technical documentation, see [Architecture.md](docs/Architecture.md
 | `SEGMENTRA_BOOTSTRAP_TOKEN` | No | — | Enables the one-time `POST /api/admin/bootstrap` endpoint (only while no users exist) |
 | `SEGMENTRA_ADMIN_PASSWORD` | Prod: yes | `admin123` in dev | Password for the initial `admin` user created by `npm run db:seed` (min. 12 chars in production) |
 | `SEGMENTRA_SSH_COMMAND_TIMEOUT_MS` | No | `300000` | Per-command SSH timeout |
+| `SEGMENTRA_ASKPASS_DIR` | No | OS temp dir | Directory for the `SSH_ASKPASS` helper script used for passphrase-protected keys (the script contains no secret) |
+| `SEGMENTRA_SKIP_MIGRATIONS` | No | `0` | API Docker image only: `1` skips the migrations and seed the entrypoint runs on start |
 
-docker-compose additionally reads `POSTGRES_PASSWORD` (or legacy `DB_PASSWORD`), `DB_USER`, `DB_NAME`, `DB_PORT`, `API_PORT`, `API_BIND`, `WEB_PORT` and `DOCKER_GID` (group owning `/var/run/docker.sock`).
+docker-compose additionally reads `POSTGRES_PASSWORD` (or legacy `DB_PASSWORD`), `DB_USER`, `DB_NAME`, `DB_PORT`, `API_PORT`, `API_BIND`, `WEB_PORT` and `DOCKER_GID` (group owning `/var/run/docker.sock`). The local launchers (`start.sh`, `run.sh`) also accept `SEGMENTRA_DATABASE_URL` (custom database URL), and `start.sh` accepts `SEGMENTRA_RESET_DB=1` (wipes the Docker volumes first, data loss).
 
 ---
 
@@ -336,36 +337,132 @@ Segmentra only manages its own firewall objects and leaves rules created by othe
 
 - **Forwarded traffic (IoT/OT gateways):** forwarding is filtered only on hosts whose policy has FORWARD rules or that protect IoT devices (assets assigned to the host on the OT/IoT page). With nftables this is a `chain forward` inside `table inet segmentra` (policy `accept`). With iptables it is a `SEGMENTRA-FWD` chain reached from a single jump at the top of `FORWARD`. Only traffic *to protected devices* is dropped unless a FORWARD rule allows it. Other forwarded traffic, including Docker's, passes as before. Allowed traffic leaves `SEGMENTRA-FWD` with `RETURN`, so `DOCKER-USER` and other `FORWARD` rules after the jump still apply. Deploying a version without forwarding, or removing the policy, deletes the forward chain and its jump. On other hosts nothing changes.
 
+- **Reboot persistence** uses the distribution's own service and touches only Segmentra's part of its files: one `include` line plus `segmentra.nft` for nftables, or only the `SEGMENTRA-*` lines of the `*filter` section in `rules.v4`/`rules.v6` or `/etc/sysconfig/iptables`/`ip6tables`. Docker and Kubernetes chains are never written into these files (they recreate their own rules when they start). See [Persistence across reboots](#persistence-across-reboots).
+
 Drift detection only fingerprints Segmentra's own table/chains (including `SEGMENTRA-FWD` and its jump), so rule changes made by Docker, Kubernetes or fail2ban are not reported as drift.
+
+### Persistence across reboots
+
+Deployments load the rules into the running kernel. To make them survive a reboot, Segmentra writes them into the files the **distribution's own firewall service** loads at boot. Segmentra stays agentless: no Segmentra service, timer, cron job or script runs at boot.
+
+| | Debian, Ubuntu | RHEL, Rocky, AlmaLinux (Fedora, CentOS Stream) |
+|---|---|---|
+| **nftables** | `/etc/nftables.d/segmentra.nft` + one `include` line at the end of `/etc/nftables.conf`; `nftables.service` enabled | `/etc/nftables/segmentra.nft` + one `include` line at the end of `/etc/sysconfig/nftables.conf`; `nftables.service` enabled |
+| **iptables** | Segmentra's chains and jumps merged into `/etc/iptables/rules.v4` / `rules.v6`; needs `iptables-persistent` (`netfilter-persistent.service` enabled) | merged into `/etc/sysconfig/iptables` / `ip6tables`; needs `iptables-services` (`iptables` / `ip6tables.service` enabled) |
+
+- **What is written:** the nft file holds `table inet segmentra` behind `add table` + `delete table`, so it is safe to load at boot. The include line is added once, below a `# managed by Segmentra` marker; the rest of `nftables.conf` is not changed (if the file is missing it is created without `flush ruleset`). For iptables only Segmentra's lines are replaced; every other line of the saved file stays byte-identical. A missing rules file is created with only Segmentra's chains (and only if the package is installed). The previous version of each file is kept in `/var/backups/segmentra/persist/`.
+- **Services are only enabled, never started or restarted** (a restart would reload the whole saved configuration and, with `flush ruleset`, remove Docker's rules at runtime). Debian/Ubuntu's stock `nftables.conf` starts with `flush ruleset`; at boot that runs before Docker or Kubernetes start, so it is harmless, and it is reported as a note.
+- **Never done:** installing packages or disabling firewalld. What is missing is reported per host as a warning in the deployment ("Survives reboot" column: ✓ or ⚠ with the reason) and in the readiness check: `firewalld_active`, `iptables_persistent_missing`, `iptables_services_missing`, `no_nftables_service`, `unsupported_distro`.
+- **Always the final, enforced state:** SSH Direct persists only after the reachability check passed and the lockout auto-revert was cancelled. The auto-revert, the rollback after a failed apply, Firewall Learning / policy-test restores and `scripts/restore-previous-policy.sh` re-sync the boot configuration to the restored state. A log-only Firewall Learning or policy-test policy is never persisted: a reboot during a session brings back the last enforced policy. Removing the policy (expiry REMOVE) removes Segmentra's include line, file and merged lines; the distribution service stays enabled. The Ansible executor runs the same steps.
+- **Drift:** the compliance check also reports whether the boot configuration matches the running Segmentra rules (`persistence.state`: `in_sync`, `differs`, `missing`).
 
 ## Known Limitations
 
 - **Restores on legacy iptables hosts.** Backups and restores (lockout auto-revert, failure rollback, firewall-learning / policy-test restores, `scripts/restore-previous-policy.sh`) only cover Segmentra's own `table inet segmentra` or `SEGMENTRA-IN` / `SEGMENTRA-OUT` chains, so other tools' rules are never replaced. The exception is a host still running a policy deployed by an older version that replaced the whole iptables filter table: restoring that backup replaces the `filter` table, so filter rules other tools added after the backup are lost. Redeploying once moves the host to the chain-based design.
+- **SSH credential scope.** Credentials apply to all hosts, a tag, a VLAN or a single host, or are assigned to hosts explicitly; there is no per-environment scope or credential set with automatic fallback (if the chosen credential fails, Segmentra does not try the next one). Tag/VLAN/host scopes have no foreign key: deleting the tag, VLAN or host leaves the credential in place, matching nothing. Hosts imported by discovery before credential scoping kept their host-scoped copies named `… (discovered: <host>)`; they still work and can be deleted once the host is assigned a credential.
 - **Drift baselines from older versions.** Hosts last deployed before drift fingerprints were scoped to Segmentra's own rules show compliance status `unknown` until they are redeployed once.
 - **Policy expiry actions.** If a REMOVE or REVERT action fails, the error is recorded and a notification is sent, but it is not retried automatically. REVERT redeploys the previous version only to hosts that actually ran it; other hosts keep the expired policy and are listed in the notification.
 - **sudo on target hosts.** Segmentra is agentless and runs every root step as `sudo sh -c '…'`, so the account needs **full sudo rights** (`ALL`): a sudoers rule limited to `nft` / `iptables` is not enough. sudo may ask for a password (the login password or a separate sudo password, set per credential), or be passwordless. Not supported: sudoers with `Defaults requiretty` for the account (readiness checks and deployments report it with a clear error; disable it for that account), privilege escalation other than sudo (`su`, `doas`, `pbrun`), and sudo configured to ask for the root or target user's password via `rootpw` / `targetpw` unless you enter that password as the separate sudo password.
 - **SIEM forwarding.** Notification webhooks connect only to the exact address that was validated, so DNS rebinding doesn't work against them. Syslog/SIEM destinations configured by admins don't get the same connect-time address check.
+- **Sessions after a password change.** Changing or resetting a password does not end existing sessions: JWTs stay valid until they expire (up to 12 hours). Deactivating the user blocks them immediately (roles are also re-read on every request), but reactivating the account within those 12 hours makes its unexpired tokens valid again.
+- **Reboot persistence on RHEL-family hosts with firewalld.** firewalld conflicts with `nftables.service` and `iptables-services`, and Segmentra neither disables it nor translates policies into firewalld zones/policies. While firewalld is active or enabled, Segmentra's rules work at runtime (next to firewalld's own table, whose rejects still apply) but are gone after a reboot until the next deployment; deployments and the readiness check warn (`firewalld_active`). Disable firewalld and let Segmentra enable `nftables.service` (or install `iptables-services`) to persist them.
+- **Reboot persistence on other distributions.** Only Debian, Ubuntu and RHEL-family distributions (detected from `/etc/os-release`) are supported. On Alpine, SUSE, Arch and others the rules are applied but not persisted (`unsupported_distro` warning). Missing packages (`nftables` with its systemd unit, `iptables-persistent`, `iptables-services`) are reported, never installed. If the saved iptables file of the distribution ends `INPUT` with its own catch-all `REJECT`/`DROP` (RHEL's stock `/etc/sysconfig/iptables` does), that rule also applies after a reboot to traffic Segmentra allows; this is reported as a note.
 - **Docker socket.** The Ansible executor runs `docker exec` and therefore needs `/var/run/docker.sock`, which is root-equivalent on the Docker host. SSH-executor-only installations can remove the mount.
+- **Ansible executor:**
+  - It needs **Python on the target hosts** (readiness warns if it's missing).
+  - It deploys all hosts in one run: canary and progressive modes have no effect.
+  - It has no lockout auto-revert. A policy that cuts off SSH is detected and reported as FAILED ("possible lockout"), but not undone automatically.
+  - Use SSH Direct for these protections.
+- **`scripts/restore-previous-policy.sh`** needs SSH key or agent login and passwordless sudo on the hosts (it reports clearly when sudo asks for a password).
 
 ---
 
 ## Not Yet Tested
 
-The core workflow was tested end to end through the web UI against Docker containers running iptables and nftables. That covers inventory, policy sets, versions, approvals, deployments, drift, expiry REMOVE/REVERT, simulator, topology, templates, OT/IoT, security audit, SIEM syslog, webhooks and role-based access. The automated Docker SSH integration test also passes. These parts have **not** been verified yet:
+### What has been tested
 
-- **Traffic capture in Firewall Learning and Policy Impact Analysis.** Deploying log-only rules, restoring and analyzing all work, but the test containers can't log kernel firewall messages, so no real flows were captured or analyzed. This needs a real host with rsyslog or journald.
-- **Threat Intelligence (AbuseIPDB) sync and auto-block.** Needs internet access and an API key.
-- **LDAP / Active Directory login and group-to-role mapping.** Saving settings was tested; logging in against a real directory was not.
-- **Kubernetes workload sync.** Registering a cluster and generating NetworkPolicy manifests was tested; there was no real cluster to sync from or apply to.
-- **High-risk deployment approval, deployment pause/resume and password change** were not exercised in the UI tests. (Auto-tagging and template auto-apply were tested: rules on hostname, IP, OS, backend, VLAN and tags; AND/OR; disable, retarget and delete removing only rule-assigned tags; priority between rules; the 5-minute job adding and removing tags; discovery imports; and auto-apply creating a DRAFT policy when a tag is first assigned.)
-- **Canary and progressive deployment modes** across larger fleets (only `FULL` deployments to two hosts were tested).
-- **Automatic revert under systemd** (`systemd-run`). The containers have no systemd; the equivalent `nohup` path was tested.
-- **Real Linux distributions:** Debian 12 and Ubuntu 24.04 were tested end to end (see the privilege escalation entry below). RHEL/Rocky/Alma, SUSE and older releases were not; testing otherwise used Alpine containers.
-- **Windows scripts** (`start.bat`, `run.ps1`, `install.ps1`, `scripts/check-db-status.ps1`).
-- **Slack and email notification channels** (only the generic webhook was tested).
-- **IoT gateway forwarding:** tested live with one gateway and one PLC on nftables and iptables (allow/deny, edit, expiry REMOVE, drift, simulator). Not tested: IPv6 forwarding, the Ansible executor with FORWARD rules, expiry REVERT on a gateway, several gateways protecting the same device, and real OT protocols beyond a TCP test listener. See the [OT/IoT guide](docs/iot.md#8-limitations-and-what-is-not-tested).
-- **Inventory discovery:** tested with password credentials on a /24 (import, skip of existing hosts, failed logins, scheduled runs) and with the privilege-escalation credentials below. Not tested: large subnets close to the /20 limit, and real networks with firewalls that drop rather than reject SSH probes.
-- **Privilege escalation and key passphrases:** tested live (SSH executor) against Alpine containers (sudo 1.9.15, OpenSSH 9.2 client in the API image): a passphrase-protected ed25519 key with passwordless sudo, password login with sudo asking for the login password, key login with sudo asking for a separate password, a wrong sudo password and a host with `requiretty` — readiness, nftables and iptables deployments, drift checks, expiry REMOVE, lockout auto-revert, Firewall Learning start/cancel and discovery. The Ansible path (ssh-agent for passphrase keys, `ansible_become_password`) was tested by running the playbook in a standalone runner container, not through a full Ansible deployment from the UI. Also tested on real distributions (Docker containers with the stock packages): **Debian 12** with key-only SSH login using a passphrase-protected ed25519 key and sudo asking for a separate password, and **Ubuntu 24.04** with password login and sudo asking for the login password (PAM-based sudo, no NOPASSWD). Both were imported by discovery with their credentials pinned, passed readiness, received an nftables deployment through the UI, enforced it on real traffic and passed the drift check; no password or passphrase appeared in API logs, the database or deployment bundles. Not tested: RHEL-family hosts, passphrase-protected PEM/PKCS#8 RSA or ECDSA keys on a live host (they pass validation), and OpenSSH clients older than 8.4.
+Everything below was exercised against Docker containers. The core workflow went through the web UI; the rest went through the same REST calls the UI makes.
+
+- **Core workflow (web UI), on Alpine containers with iptables and nftables:** inventory, policy sets and versions, approvals, deployments, drift, expiry REMOVE and REVERT, simulator, topology, templates, OT/IoT, security audit, SIEM syslog, webhooks and role-based access. The automated Docker SSH integration test also passes.
+- **Real distributions:** Debian 12, Ubuntu 24.04 and Rocky Linux 9.3, each running its stock packages and PAM-based sudo with a password:
+  - discovery, readiness, nftables and iptables deployments, drift and expiry REMOVE;
+  - **reboot persistence** through each OS's own service. Restarting a systemd container wipes the firewall like a reboot; the rules came back, saved admin rules stayed byte-identical, and removal cleaned up. Rocky with firewalld running is correctly reported as not persisted.
+- **Credentials:**
+  - private keys (ed25519, and RSA in PEM format) with and without a passphrase, and password login;
+  - sudo with no password, with the login password, or with a separate password;
+  - a wrong sudo password and `requiretty` (both give a clear error);
+  - credential scoping: global, tag, VLAN, host, not assigned, and explicit host assignment, including the Admin and Inventory UI.
+- **Executors:**
+  - SSH Direct, including lockout auto-revert through both `nohup` and `systemd-run` (Debian with systemd);
+  - Ansible end to end through the API with all three credential types, including rescue rollback, FORWARD/IPv6 rules, per-host results from the play recap, lockout detection and an unresponsive host.
+- **Rollout modes:** canary and progressive with 6–8 hosts, plus pause, resume and stop.
+- **Approvals:** high-risk deployment approval, including the creator not being allowed to approve.
+- **Firewall Learning and Policy Impact Analysis with real captured traffic** on Debian 12 (rsyslog, kernel logging enabled for the test): flows, recommendations and impact-analysis coverage.
+- **IoT gateways:**
+  - FORWARD rules on nftables and iptables, including IPv6 devices and rules;
+  - two gateways protecting one device;
+  - expiry REVERT on a gateway, and unassigning a device;
+  - the Ansible executor with FORWARD rules.
+- **Discovery:**
+  - a /24, and a /20 (4,094 addresses in about 100 s);
+  - hosts that drop or reject SSH probes are counted as closed without hanging;
+  - scheduled runs, and credentials that need a sudo password.
+- **Auto-tagging and template auto-apply:**
+  - all condition fields, including `environment`, with AND/OR;
+  - disable, retarget and delete, and priority between rules;
+  - the 5-minute job adding and removing tags;
+  - auto-apply creating a DRAFT policy.
+- **LDAP** against OpenLDAP:
+  - group-to-role mapping, both via memberOf and via a group-filter lookup;
+  - injection attempts;
+  - disabled LDAP, and deactivated users.
+- **Notifications:**
+  - webhook delivery, and Slack against a mock webhook;
+  - event subscriptions;
+  - SSRF checks.
+- **Threat intelligence:** AbuseIPDB against a mock of its API (error handling, auto-block drafts, deduplication).
+- **SIEM forwarding:** every audit event forwarded exactly once (including a second API replica and a reconnect), with no secrets in messages. Integration and notification secrets are encrypted at rest; a database dump showed none of them.
+- **Kubernetes:** generated NetworkPolicy manifests were applied to k3s v1.30 and enforced.
+- **Other:** `scripts/restore-previous-policy.sh` (`--latest` / `--timestamp`); password change and reset; and the PowerShell scripts parse under PowerShell 7 and as Windows PowerShell 5.1 would read them.
+
+### Not yet tested or not implemented
+
+- **Email notifications are not implemented.** There is no SMTP sending; email channels report FAILED.
+- **Kubernetes workload sync is not implemented.** The sync endpoint returns `501`, so workload-to-tag mapping can't be used. Generated manifests use `podSelector: {}` (all pods in the namespace).
+- **Microsoft Active Directory itself, and LDAPS with a real certificate.** Only OpenLDAP was tested.
+- **The real AbuseIPDB service**, as opposed to the mock, and real Slack workspaces.
+- **Hosts that log only to journald (no rsyslog).** Firewall Learning reads the rsyslog file, so such hosts capture no flows. FORWARD traffic on gateways is not analyzed by Learning or Policy Impact Analysis, by design.
+- **RHEL with SELinux enforcing and firewalld running**, and SUSE, Arch, older releases and Alpine. Persistence reports `unsupported_distro` on the last group.
+- **ECDSA and PKCS#8-encrypted keys** on a live host (they pass validation), and OpenSSH clients older than 8.4.
+- **The Windows scripts were not run on Windows.** `start.bat` was only reviewed.
+- **Real OT protocols** beyond a TCP test listener on gateways.
+- **A full deployment through a browser with the Ansible executor.** Ansible was tested through the API.
+
+See also [Known Limitations](#known-limitations) and the [OT/IoT guide](docs/iot.md#8-limitations-and-what-is-not-tested).
+
+---
+
+## Future Work
+
+### Features not implemented yet
+
+- **Email notifications.** Email channels can be configured but there is no SMTP sending yet; they report FAILED with "Email delivery is not implemented yet". Plan: add an SMTP client (e.g. nodemailer) with TLS, authentication stored encrypted like other secrets, and a test-send button.
+- **Kubernetes workload sync and direct apply.** The sync endpoint returns `501 not_implemented`; Segmentra does not connect to the Kubernetes API. Plan:
+  - read namespaces, workloads and labels from the cluster;
+  - map labels to tags;
+  - generate NetworkPolicies that select the right pods (today they use `podSelector: {}`, i.e. all pods in the namespace);
+  - optionally apply them directly instead of `kubectl apply`.
+- **UI for API-only features.** These work through the API but have no screens yet: policy recommendations, enforcement points (network device ACLs), IoT baselines and observed flows, host interfaces, the per-host compiled-policy preview (`render`) and Kubernetes workload-to-tag mapping.
+- **More integrations.** SOAR and vulnerability-database integrations can be configured but don't do anything yet.
+
+### Testing still to do
+
+- **Microsoft Active Directory** (only OpenLDAP was tested), and LDAPS with a real certificate.
+- **The real AbuseIPDB service and real Slack workspaces.** Both were tested against mocks.
+- **Hosts that log only to journald** (no rsyslog) for Firewall Learning and Policy Impact Analysis.
+- **RHEL with SELinux enforcing and firewalld running.** Today, persistence is reported as not possible while firewalld manages the firewall.
+- **ECDSA and PKCS#8-encrypted SSH keys** on live hosts, and OpenSSH clients older than 8.4.
+- **Running the Windows scripts on Windows** (`start.bat`, `run.ps1`, `install.ps1`, `scripts/check-db-status.ps1`). They were only parsed and reviewed.
 
 ---
 
@@ -381,7 +478,7 @@ The core workflow was tested end to end through the web UI against Docker contai
 | [Gateway Setup](docs/gateway-setup-guide.md) | Linux gateway firewall configuration |
 | [Kubernetes Guide](docs/kubernetes.md) | K8s NetworkPolicy management |
 | [Ansible Playbook](docs/playbook-ansible.md) | Deployment playbook documentation |
-| [Full Specification](docs/segmentra_fleet_microsegmentation_firewall_manager_full_specification.md) | Complete technical specification |
+| [Original Specification](docs/segmentra_fleet_microsegmentation_firewall_manager_full_specification.md) | The original product specification (historical; the implementation differs in places) |
 
 ---
 

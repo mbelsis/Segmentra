@@ -126,12 +126,15 @@ authRouter.post('/login', async (req, res) => {
     return fail();
   }
 
-  // Map AD groups -> Segmentra roles
+  // Map AD groups -> Segmentra roles. DNs are case-insensitive and may differ in spacing
+  // around ',' / '=' (e.g. "CN=Admins, OU=Groups" vs "cn=admins,ou=groups"), so normalize both sides.
     const { rows: roleRows } = await pool.query(
-      `SELECT r.name
+      `SELECT DISTINCT r.name
        FROM ad_group_role_map m
        JOIN roles r ON r.id = m.role_id
-       WHERE m.ad_group_dn = ANY($1::text[])`,
+       WHERE lower(regexp_replace(trim(m.ad_group_dn), '\\s*([,=])\\s*', '\\1', 'g')) IN (
+         SELECT lower(regexp_replace(trim(g), '\\s*([,=])\\s*', '\\1', 'g')) FROM unnest($1::text[]) AS g
+       )`,
       [ldap.groups]
     );
     const roles = roleRows.map((r) => r.name);

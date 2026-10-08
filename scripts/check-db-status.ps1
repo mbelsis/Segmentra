@@ -11,9 +11,9 @@ Write-Host ""
 Write-Host "1. Checking Docker container..." -ForegroundColor Yellow
 $container = docker compose ps -q segmentra-db 2>$null
 if ($container) {
-    Write-Host "   ✓ Container running: $container" -ForegroundColor Green
+    Write-Host "   [OK] Container running: $container" -ForegroundColor Green
 } else {
-    Write-Host "   ✗ Container not running!" -ForegroundColor Red
+    Write-Host "   [FAIL] Container not running!" -ForegroundColor Red
     exit 1
 }
 
@@ -22,9 +22,9 @@ Write-Host ""
 Write-Host "2. Checking database connection..." -ForegroundColor Yellow
 $dbCheck = docker compose exec -T segmentra-db psql -U segmentra -d segmentra -c "SELECT current_database(), version();" 2>&1
 if ($LASTEXITCODE -eq 0) {
-    Write-Host "   ✓ Database connection successful" -ForegroundColor Green
+    Write-Host "   [OK] Database connection successful" -ForegroundColor Green
 } else {
-    Write-Host "   ✗ Database connection failed!" -ForegroundColor Red
+    Write-Host "   [FAIL] Database connection failed!" -ForegroundColor Red
     Write-Host "   Error: $dbCheck" -ForegroundColor Red
     exit 1
 }
@@ -63,10 +63,10 @@ Write-Host "5. Checking for duplicate migrations..." -ForegroundColor Yellow
 $duplicates = docker compose exec -T segmentra-db psql -U segmentra -d segmentra -t -A -c "SELECT name || ' (' || COUNT(*) || ' runs)' FROM pgmigrations GROUP BY name HAVING COUNT(*) > 1 ORDER BY name;" 2>&1
 $duplicates = @($duplicates | Where-Object { "$_".Trim() -ne "" })
 if ($duplicates.Count -gt 0) {
-    Write-Host "   ⚠ Found duplicate migrations (run 'npm run db:migrate' to clean up):" -ForegroundColor Yellow
+    Write-Host "   [WARN] Found duplicate migrations (run 'npm run db:migrate' to clean up):" -ForegroundColor Yellow
     $duplicates | ForEach-Object { Write-Host "     $_" }
 } else {
-    Write-Host "   ✓ No duplicate migrations" -ForegroundColor Green
+    Write-Host "   [OK] No duplicate migrations" -ForegroundColor Green
 }
 
 # Check volume info

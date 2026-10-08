@@ -151,7 +151,7 @@ Also verified:
 ## 5. Step by step in the UI
 
 1. **Prepare the gateway** (Linux): IP forwarding, routing, firewall tool, SSH user with sudo. See the [Gateway Setup Guide](gateway-setup-guide.md).
-2. **Store credentials:** **Admin → SSH Credentials**, a key or password for the gateway's SSH user. Credentials are encrypted at rest; see [security.md](security.md).
+2. **Store credentials:** **Admin → SSH Credentials**, a key or password for the gateway's SSH user. Use a global credential, or scope one to the gateway (tag `iot-gateway`, its VLAN or the host itself). Credentials are encrypted at rest; see [security.md](security.md).
 3. **Inventory → Hosts:** add the gateway (management IP, SSH port, firewall backend `nftables` or `iptables`) and give it the tag **`iot-gateway`**. Optionally create VLANs for your OT zones (**Inventory → VLANs**). Run **Check Readiness**.
 4. **OT/IoT → Assets:** register each device with its **IP address** and assign it to the gateway(s) under "Protecting Gateway(s)". The **Gateways** tab lists, per gateway, the protected devices and the number of FORWARD rules in the currently deployed version.
 5. **Policy Sets → + New Policy Set:** scope it to TAG `iot-gateway` (all gateways) or to a host list (one gateway).
@@ -159,8 +159,8 @@ Also verified:
 7. **Submit for Approval.** A different user with the `approver` or `admin` role approves it. **Analyze Impact** counts the added and removed allows and denies (the API response `POST /api/policy-versions/:id/impact-diff` lists each rule with its destination). A FORWARD allow from a very broad source (for example `0.0.0.0/0`) marks the version and its deployments high-risk, so the deployment then needs a second approval.
 8. **Deployments → + Create Deployment:** target the gateway(s) and start. The usual protections apply: scoped backup, automatic revert if SSH to the gateway is lost, and rollback on failure.
 9. **Verify:**
-   - **Troubleshoot → Simulate** with source IP, device IP and port. If the destination is a protected device, the result shows the gateway, the deciding FORWARD rule or "protected-device default deny".
-   - **Compliance:** the drift check covers the forward chain / `SEGMENTRA-FWD`.
+   - **Troubleshoot → Simulate Communication** with source IP, device IP and port. If the destination is a protected device, the result shows the gateway, the deciding FORWARD rule or "protected-device default deny".
+   - **Compliance** (Inventory → Hosts → **Check Compliance**): the drift check covers the forward chain / `SEGMENTRA-FWD`.
    - **Firewall Learning on the gateway** (Troubleshoot) to discover device traffic. While learning, the gateway's ruleset is replaced by a log-only one: forwarded traffic to protected devices is **accepted and logged** (log prefix `FW-AUDIT: DENY: protected-default` with nftables, `FW-AUDIT: DENY: protected` with iptables, meaning "would be denied") instead of dropped. Verified live on iptables: the log rule counted the forwarded packets, traffic passed, and cancelling the session restored the previous rules. The previous ruleset is restored when the session ends. Learning results currently aggregate only inbound/outbound flows of the gateway itself. Forwarded flows are logged on the gateway (`/var/log/segmentra-audit-*.log`) but not turned into rule suggestions.
 
 ---
@@ -192,7 +192,7 @@ Also verified:
 - FORWARD rules ignore interface scopes, and there is no "ingress interface" match.
 - The **simulator** assumes traffic to a protected device is routed through the gateways it is assigned to. It evaluates only that gateway's FORWARD rules. Interface scopes, routing and multiple hops are not modelled. The **search by IP** in Troubleshoot matches rule *sources* only.
 - **Firewall Learning** logs forwarded traffic but does not generate FORWARD rule suggestions. The policy-test analyzer does not evaluate FORWARD rules.
-- **Policy templates:** the API accepts FORWARD rules with destinations in templates, but the template editor UI does not offer FORWARD yet.
+- **Policy templates:** FORWARD rules with destinations can be added to templates (API and template editor).
 - Kubernetes NetworkPolicy export skips FORWARD rules with a warning.
 - Switching a host's backend (nftables ↔ iptables) does not remove the rules of the previous backend. Remove the policy first (expiry REMOVE), as with any host.
 - **Not tested live:** IPv6 protected devices and IPv6 FORWARD rules (covered by compiler output only), the Ansible executor path with FORWARD rules (it uses the same host script as SSH Direct), REVERT expiry on a gateway, multiple gateways protecting the same device, and real OT protocols beyond a TCP listener on port 502.
@@ -247,4 +247,4 @@ Also verified:
 - `iot_asset_gateways`: asset ↔ gateway host (many-to-many)
 - `iot_asset_tags`: tag assignments
 - `policy_rules.destination_type` / `destination_value` (and the same columns on `policy_template_rules`)
-- `iot_observed_flows`: historical flow data (from the deprecated flow collectors)
+- `iot_observed_flows`: observed flow data per asset (read by `GET /api/iot-assets/:id/flows`; nothing in Segmentra currently writes to it: flow collectors exist only as API records, with no ingestion)

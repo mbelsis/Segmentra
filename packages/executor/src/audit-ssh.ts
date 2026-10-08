@@ -11,7 +11,8 @@ import {
   type SshConnectionOptions
 } from './ssh-options.js';
 import { segmentraIptablesCommand } from './iptables-scripts.js';
-import { SEGMENTRA_BACKUP_DIR, scopedBackupSnippet, scopedRestoreSnippet } from './firewall-backup.js';
+import { SEGMENTRA_BACKUP_DIR, persistSnippet, scopedBackupSnippet, scopedRestoreSnippet } from './firewall-backup.js';
+import { parsePersistenceOutput, type PersistenceResult } from './persist-scripts.js';
 
 const writeFile = promisify(fs.writeFile);
 const readFile = promisify(fs.readFile);
@@ -39,6 +40,8 @@ export interface AuditSessionResult {
   stderr: string;
   backupPath?: string;
   logFilePath?: string;
+  /** Reboot persistence after the restore (the boot configuration follows the restored state). */
+  persistence?: PersistenceResult;
 }
 
 const BACKUP_DIR = SEGMENTRA_BACKUP_DIR;
@@ -97,7 +100,11 @@ export async function startAuditSession(
         ? [`if [ -f /etc/nftables.conf ]; then cp /etc/nftables.conf ${shq(`${backupPath}.conf`)} || true; fi`]
         : []),
       scopedBackupSnippet(host.backend, backupPath),
-      `test -s ${shq(backupPath)}`
+      `test -s ${shq(backupPath)}`,
+      // Persist the current (enforced) policy before the log-only one replaces it, so a reboot
+      // during the session comes back with the enforced policy. The log-only policy itself is
+      // never persisted (the host scripts refuse to persist it).
+      persistSnippet(host.backend, 'persist')
     ].join('\n');
     const backupResult = await sudo(backupScript);
     c.add(backupResult);
@@ -225,7 +232,16 @@ export async function restoreAuditSession(
       return c.result(false, 1);
     }
 
-    const restoreScript = ['umask 077', scopedRestoreSnippet(host.backend, backupPath)].join('\n');
+    const restoreScript = [
+      'umask 077',
+      scopedRestoreSnippet(host.backend, backupPath),
+      'seg_restore_rc=$?',
+      // Boot configuration follows the restored state (only after a successful restore).
+      'if [ "$seg_restore_rc" = 0 ]; then',
+      persistSnippet(host.backend, 'persist'),
+      'fi',
+      'exit $seg_restore_rc'
+    ].join('\n');
     const restoreResult = await sudo(restoreScript);
     c.add(restoreResult);
     if (restoreResult.exitCode !== 0) {
@@ -237,6 +253,7 @@ export async function restoreAuditSession(
       return c.result(false, restoreResult.exitCode);
     }
     c.out(`Restored firewall rules from ${backupPath}\n`);
+    const persistence = parsePersistenceOutput(restoreResult.stdout);
 
     // Clean up audit policy file and rsyslog config
     const cleanupScript = [
@@ -249,7 +266,7 @@ export async function restoreAuditSession(
       c.err('\nWarning: cleanup of audit policy/rsyslog config failed\n');
     }
 
-    return c.result(true, 0);
+    return c.result(true, 0, persistence.status !== 'unknown' ? { persistence } : {});
   } catch (error: any) {
     c.err(`\nException: ${error.message}\n`);
     return c.result(false, 1);

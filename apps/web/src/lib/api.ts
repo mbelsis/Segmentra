@@ -260,6 +260,8 @@ export const api = {
   ldapSettings: () => request<{ ldapSettings: any }>('/admin/ldap-settings'),
   putLdapSettings: (b: any) => request<{ ldapSettings: any }>('/admin/ldap-settings', { method: 'PUT', body: JSON.stringify(b) }),
   addGroupMap: (b: any) => request<{ map: any }>('/admin/ad-group-role-map', { method: 'POST', body: JSON.stringify(b) }),
+  groupMaps: () => request<{ maps: Array<{ id: string; ad_group_dn: string; role_name: string }> }>('/admin/ad-group-role-map'),
+  deleteGroupMap: (id: string) => request<{ ok: boolean }>(`/admin/ad-group-role-map/${id}`, { method: 'DELETE' }),
   executorSetting: () => request<{ executor: string }>('/admin/executor-setting'),
   putExecutorSetting: (b: any) => request<{ executor: string }>('/admin/executor-setting', { method: 'PUT', body: JSON.stringify(b) }),
   managementVlanSetting: () => request<{ managementVlan: any }>('/admin/management-vlan-setting'),
@@ -267,6 +269,8 @@ export const api = {
 
   sshCredentials: () => request<{ sshCredentials: any[] }>('/ssh-credentials'),
   createSshCredential: (b: any) => request<{ sshCredential: any }>('/ssh-credentials', { method: 'POST', body: JSON.stringify(b) }),
+  updateSshCredential: (id: string, b: any) => request<{ sshCredential: any }>(`/ssh-credentials/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
+  deleteSshCredential: (id: string) => request<{ ok: boolean }>(`/ssh-credentials/${id}`, { method: 'DELETE' }),
 
   dashboardStats: () => request<{
     totalDeployments: number;
@@ -411,6 +415,15 @@ export const api = {
     kernelSupport: boolean;
     errors: string[];
     warnings: string[];
+    /** Reboot persistence with the distribution's own service (only when sudo works). */
+    persistence?: {
+      distro: 'debian' | 'rhel' | 'unsupported' | null;
+      method: 'nftables.service' | 'netfilter-persistent' | 'iptables-services' | null;
+      available: boolean;
+      status: string;
+      warnings: string[];
+      notes: string[];
+    };
   }>(`/host-readiness/hosts/${hostId}/check`, { method: 'POST' }),
 
   // Policy Diff
@@ -595,7 +608,6 @@ export const api = {
     createCluster: (b: any) => request<{ cluster: any }>('/k8s/clusters', { method: 'POST', body: JSON.stringify(b) }),
     updateCluster: (id: string, b: any) => request<{ cluster: any }>(`/k8s/clusters/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
     deleteCluster: (id: string) => request<{ ok: boolean }>(`/k8s/clusters/${id}`, { method: 'DELETE' }),
-    syncCluster: (id: string) => request<{ success: boolean }>(`/k8s/clusters/${id}/sync`, { method: 'POST' }),
     workloads: (clusterId: string, params?: { namespace?: string; kind?: string }) => {
       const q = new URLSearchParams();
       if (params?.namespace) q.append('namespace', params.namespace);

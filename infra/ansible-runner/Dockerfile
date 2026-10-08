@@ -10,10 +10,12 @@ RUN pip install --no-cache-dir ansible-core==2.16.4
 
 # Host key handling: keep host key checking ON, but trust-on-first-use (accept-new):
 # unknown hosts are added to the known_hosts file on first connect, while a CHANGED
-# key for a known host fails the connection. known_hosts lives on a volume
+# key for a known host fails the connection. ServerAlive*: a host that stops answering mid-run
+# (its multiplexed master connection would otherwise hang until the playbook timeout) is
+# reported unreachable after ~60 s. known_hosts lives on a volume
 # (see docker-compose.yml) so it survives container rebuilds.
 ENV ANSIBLE_HOST_KEY_CHECKING=True \
-    ANSIBLE_SSH_ARGS="-C -o ControlMaster=auto -o ControlPersist=60s -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/runner/ssh/known_hosts" \
+    ANSIBLE_SSH_ARGS="-C -o ControlMaster=auto -o ControlPersist=60s -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/runner/ssh/known_hosts" \
     ANSIBLE_RETRY_FILES_ENABLED=False
 
 WORKDIR /runner

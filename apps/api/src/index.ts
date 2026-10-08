@@ -141,7 +141,29 @@ process.on('uncaughtException', (error: Error) => {
 app.listen(env.PORT, () => {
   // eslint-disable-next-line no-console
   console.log(`Segmentra API listening on :${env.PORT}`);
-  
+
+  // One-time (idempotent) encryption of integration / notification channel configs stored in
+  // plaintext by versions before migration 031. Then start forwarding audit events to SIEM:
+  // a trigger on audit_events NOTIFYs this process for every row (see siem-audit-listener.ts).
+  void import('./services/config-secrets.js')
+    .then(({ migratePlaintextConfigs }) => migratePlaintextConfigs())
+    .then(({ integrations, channels }) => {
+      if (integrations > 0 || channels > 0) {
+        // eslint-disable-next-line no-console
+        console.log(`[Secrets] Encrypted plaintext config of ${integrations} integration(s) and ${channels} notification channel(s)`);
+      }
+    })
+    .catch((e) => {
+      // eslint-disable-next-line no-console
+      console.error('[Secrets] Error encrypting plaintext integration/notification configs:', e);
+    });
+  void import('./services/siem-audit-listener.js')
+    .then(({ startSiemAuditListener }) => startSiemAuditListener())
+    .catch((e) => {
+      // eslint-disable-next-line no-console
+      console.error('[SIEM] Error starting audit forwarder:', e);
+    });
+
   // Start periodic timeout check for stale host deployments (every 2 minutes)
   setInterval(async () => {
     try {

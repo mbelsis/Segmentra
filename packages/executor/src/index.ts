@@ -10,3 +10,5 @@ export * from './iptables-scripts.js';
 export * from './nft-scripts.js';
 export * from './firewall-backup.js';
 export * from './discover-host.js';
+export * from './persist-scripts.js';
+export * from './persistence.js';

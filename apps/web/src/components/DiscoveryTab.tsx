@@ -181,7 +181,7 @@ export function DiscoveryTab(props: {
   async function loadCredentials() {
     try {
       const res = await api.sshCredentials();
-      // Host-scoped copies created by discovery are not useful choices here.
+      // Host-scoped credentials (incl. legacy "(discovered: …)" copies) are not useful choices here.
       setCredentials((res.sshCredentials || []).filter((c: any) => c.scope_type !== 'HOST'));
     } catch {
       setCredentials([]);
@@ -331,9 +331,9 @@ export function DiscoveryTab(props: {
     }
     setSavingCred(true);
     try {
-      // Non-global credentials are only used by discovery until a host is imported; the host then
-      // gets its own HOST-scoped credential so deployments use the credential that worked.
-      const scopeType = c.makeGlobal ? 'GLOBAL' : 'TAG';
+      // "Not assigned" (NONE) credentials are never chosen automatically; imported hosts are
+      // explicitly assigned the credential that worked (hosts.ssh_credential_id).
+      const scopeType = c.makeGlobal ? 'GLOBAL' : 'NONE';
       const sudo = { sudoMode: c.sudoMode, ...(c.sudoMode === 'SUDO_PASSWORD' ? { sudoPassword: c.sudoPassword } : {}) };
       const res = await api.createSshCredential(
         c.authMethod === 'PASSWORD'
@@ -493,7 +493,7 @@ export function DiscoveryTab(props: {
                       <option value="">Select a credential...</option>
                       {credentials.map(c => (
                         <option key={c.id} value={c.id}>
-                          {c.name} ({c.username}, {c.auth_method === 'PASSWORD' ? 'password' : c.has_passphrase ? 'key + passphrase' : 'key'}, {SUDO_MODE_SHORT[c.sudo_mode ?? 'NOPASSWD'] ?? c.sudo_mode}{c.scope_type === 'GLOBAL' ? ', global' : ''})
+                          {c.name} ({c.username}, {c.auth_method === 'PASSWORD' ? 'password' : c.has_passphrase ? 'key + passphrase' : 'key'}, {SUDO_MODE_SHORT[c.sudo_mode ?? 'NOPASSWD'] ?? c.sudo_mode}{c.scope_type === 'GLOBAL' ? ', global' : c.scope_type === 'TAG' ? ', tag-scoped' : c.scope_type === 'VLAN' ? ', VLAN-scoped' : ''})
                         </option>
                       ))}
                     </select>
@@ -578,10 +578,11 @@ export function DiscoveryTab(props: {
                   </div>
                   <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.9em' }}>
                     <input type="checkbox" checked={newCred.makeGlobal} onChange={e => setNewCred(c => ({ ...c, makeGlobal: e.target.checked }))} />
-                    Make this the global default credential (used for deployments to every host without a host-specific credential)
+                    Make this the global default credential (used for every host without an assigned, host-, tag- or VLAN-scoped credential)
                   </label>
                   <small style={{ display: 'block', color: '#666', marginTop: 4 }}>
-                    Stored encrypted (Admin → SSH Credentials). Hosts imported with a non-global credential get their own host-scoped copy, so deployments use the credential that worked.
+                    Stored encrypted (Admin → SSH Credentials) as "Not assigned (manual use)" unless made global: it is never picked
+                    automatically for other hosts. Each imported host is assigned the credential that logged in, so deployments use it.
                   </small>
                   {credError && <div className="error" style={{ marginTop: 8, color: '#f44336' }}>{credError}</div>}
                   <div className="form-actions" style={{ marginTop: 8 }}>

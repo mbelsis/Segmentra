@@ -1,4 +1,5 @@
 import { pool } from '../db/pool.js';
+import { loadFullConfig } from './config-secrets.js';
 import {
   DEFAULT_OUTBOUND_TIMEOUT_MS,
   normalizeHost,
@@ -70,7 +71,8 @@ export async function sendNotification(payload: NotificationPayload): Promise<vo
   try {
     // Find all enabled rules matching this event type
     const { rows: rules } = await pool.query(
-      `SELECT nr.*, nc.name as channel_name, nc.type as channel_type, nc.config as channel_config
+      `SELECT nr.*, nc.name as channel_name, nc.type as channel_type, nc.config as channel_config,
+              nc.config_secret_id as channel_config_secret_id
        FROM notification_rules nr
        JOIN notification_channels nc ON nc.id = nr.channel_id
        WHERE nr.event_type = $1 AND nr.enabled = true AND nc.enabled = true`,
@@ -81,12 +83,17 @@ export async function sendNotification(payload: NotificationPayload): Promise<vo
       const logId = await createLogEntry(rule.channel_id, payload);
 
       try {
+        // Full config (webhook URL, auth headers) is decrypted from secret_store.
+        const channelConfig = await loadFullConfig({
+          config: rule.channel_config,
+          config_secret_id: rule.channel_config_secret_id,
+        });
         if (rule.channel_type === 'slack') {
-          await sendSlack(rule.channel_config, payload);
+          await sendSlack(channelConfig, payload);
         } else if (rule.channel_type === 'email') {
-          await sendEmail(rule.channel_config, payload);
+          await sendEmail(channelConfig, payload);
         } else if (rule.channel_type === 'webhook') {
-          await sendWebhook(rule.channel_config, payload);
+          await sendWebhook(channelConfig, payload);
         }
 
         await pool.query(
@@ -148,9 +155,9 @@ async function sendEmail(config: any, payload: NotificationPayload): Promise<voi
   const to = config.to || config.email;
   if (!to) throw new Error('Email recipient not configured');
 
-  // eslint-disable-next-line no-console
-  console.log(`[Notifications] Email to ${to}: ${payload.subject}`);
-  // In production: use nodemailer with config.smtpHost, config.smtpPort, etc.
+  // No SMTP client is bundled yet. Fail loudly instead of recording the notification as SENT
+  // when nothing was delivered.
+  throw new Error(`Email delivery is not implemented yet (no SMTP support); nothing was sent to ${to}. Use a Slack or webhook channel.`);
 }
 
 async function sendWebhook(config: any, payload: NotificationPayload): Promise<void> {
@@ -223,4 +230,78 @@ function formatBody(body: Record<string, any>): string {
     .filter(([, v]) => v !== null && v !== undefined)
     .map(([k, v]) => `*${k}*: ${typeof v === 'object' ? JSON.stringify(v) : v}`)
     .join('\n');
+}
+
+/**
+ * Fire-and-forget notification about a policy version (submitted / approved / rejected).
+ * Never throws and never delays the caller.
+ */
+export function notifyPolicyVersionEvent(
+  eventType: 'POLICY_SUBMITTED' | 'POLICY_APPROVED' | 'POLICY_REJECTED',
+  versionId: string,
+  extra: Record<string, any> = {}
+): void {
+  void (async () => {
+    const { rows } = await pool.query(
+      `SELECT ps.name AS policy_set_name, pv.version_number, pv.is_high_risk
+       FROM policy_versions pv JOIN policy_sets ps ON ps.id = pv.policy_set_id WHERE pv.id = $1`,
+      [versionId]
+    );
+    const v = rows[0];
+    if (!v) return;
+    const verb = eventType === 'POLICY_SUBMITTED' ? 'submitted for approval' : eventType === 'POLICY_APPROVED' ? 'approved' : 'rejected';
+    await sendNotification({
+      eventType,
+      subject: `Policy ${v.policy_set_name} v${v.version_number} ${verb}`,
+      body: { policySet: v.policy_set_name, version: v.version_number, versionId, highRisk: v.is_high_risk === true, ...extra },
+    });
+  })().catch((e) => {
+    // eslint-disable-next-line no-console
+    console.error('[Notifications] policy event failed:', e?.message ?? e);
+  });
+}
+
+/**
+ * Fire-and-forget notification about a deployment (started / completed / failed).
+ * Never throws and never delays the caller.
+ */
+export function notifyDeploymentEvent(
+  eventType: 'DEPLOYMENT_STARTED' | 'DEPLOYMENT_COMPLETED' | 'DEPLOYMENT_FAILED',
+  deploymentId: string,
+  extra: Record<string, any> = {}
+): void {
+  void (async () => {
+    const { rows } = await pool.query(
+      `SELECT d.status, d.mode, d.target_count, ps.name AS policy_set_name, pv.version_number,
+              (SELECT COUNT(*)::int FROM deployment_hosts dh WHERE dh.deployment_id = d.id AND dh.status = 'SUCCEEDED') AS succeeded,
+              (SELECT COUNT(*)::int FROM deployment_hosts dh WHERE dh.deployment_id = d.id AND dh.status = 'FAILED') AS failed,
+              (SELECT COUNT(*)::int FROM deployment_hosts dh WHERE dh.deployment_id = d.id AND dh.status = 'SKIPPED') AS skipped
+       FROM deployments d
+       LEFT JOIN policy_versions pv ON pv.id = d.policy_version_id
+       LEFT JOIN policy_sets ps ON ps.id = pv.policy_set_id
+       WHERE d.id = $1`,
+      [deploymentId]
+    );
+    const d = rows[0];
+    if (!d) return;
+    const what = eventType === 'DEPLOYMENT_STARTED' ? 'started' : eventType === 'DEPLOYMENT_COMPLETED' ? 'completed' : `finished with status ${d.status}`;
+    const body: Record<string, any> = {
+      deploymentId,
+      policySet: d.policy_set_name,
+      version: d.version_number,
+      mode: d.mode,
+      status: d.status,
+      targets: d.target_count,
+      ...extra,
+    };
+    if (eventType !== 'DEPLOYMENT_STARTED') Object.assign(body, { succeeded: d.succeeded, failed: d.failed, skipped: d.skipped });
+    await sendNotification({
+      eventType,
+      subject: `Deployment of ${d.policy_set_name ?? 'policy'} v${d.version_number ?? '?'} ${what}`,
+      body,
+    });
+  })().catch((e) => {
+    // eslint-disable-next-line no-console
+    console.error('[Notifications] deployment event failed:', e?.message ?? e);
+  });
 }

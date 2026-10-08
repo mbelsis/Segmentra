@@ -5,6 +5,7 @@ import { hashLiveRuleset, liveRulesReadScript } from './read-rules.js';
 import {
   SEGMENTRA_BACKUP_DIR,
   installHostScriptsSnippet,
+  persistSnippet,
   scopedBackupSnippet,
   scopedRestoreSnippet
 } from './firewall-backup.js';
@@ -15,6 +16,7 @@ import {
   retireLegacyPolicyScript,
   segmentraIptablesCommand
 } from './iptables-scripts.js';
+import { parsePersistenceOutput, persistenceSummary, type PersistenceResult } from './persist-scripts.js';
 import {
   runSshCommand,
   runSshSudo,
@@ -61,6 +63,11 @@ export interface SshExecutionResult {
    * (see hashLiveRuleset).
    */
   liveRulesHash?: string;
+  /**
+   * Reboot persistence with the distribution's own service, synced after the final state is
+   * known (successful apply, or rollback). See persist-scripts.ts.
+   */
+  persistence?: PersistenceResult;
 }
 
 export const BACKUP_DIR = SEGMENTRA_BACKUP_DIR;
@@ -136,9 +143,18 @@ type DeployOpts = SshConnectionOptions & { rollbackTimeoutSec: number };
  * host in step 3, so it also works unattended (auto-revert via systemd-run / nohup).
  */
 function buildRestoreScript(backend: 'nft' | 'iptables', paths: BackupPaths): string {
-  return backend === 'nft'
-    ? scopedRestoreSnippet('nftables', paths.backupFile, undefined, 'installed')
-    : scopedRestoreSnippet('iptables', paths.backupFile, paths.backupFile6, 'installed');
+  const restore =
+    backend === 'nft'
+      ? scopedRestoreSnippet('nftables', paths.backupFile, undefined, 'installed')
+      : scopedRestoreSnippet('iptables', paths.backupFile, paths.backupFile6, 'installed');
+  // The boot configuration follows the restored state (persist syncs it to the live state;
+  // it never changes the exit status of the restore).
+  return [
+    restore,
+    'seg_restore_rc=$?',
+    persistSnippet(backend === 'nft' ? 'nftables' : 'iptables', 'persist', 'installed'),
+    '(exit $seg_restore_rc)'
+  ].join('\n');
 }
 
 type BackupPaths = { backupFile: string; backupFile6: string };
@@ -332,7 +348,12 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
       } else {
         stderr += `Immediate rollback failed; automatic revert will retry within ${delay}s\n`;
       }
-      return fail(applyResult.exitCode, 'Firewall apply failed; rollback attempted', { backupPath, rolledBack: true });
+      const rbPersist = parsePersistenceOutput(rb.stdout);
+      return fail(applyResult.exitCode, 'Firewall apply failed; rollback attempted', {
+        backupPath,
+        rolledBack: true,
+        ...(rbPersist.status !== 'unknown' ? { persistence: rbPersist } : {})
+      });
     }
 
     // Step 8: Verify reachability over a NEW SSH connection, finishing well
@@ -383,6 +404,16 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
       if (retire.exitCode !== 0) stderr += `Warning: could not retire legacy policy files: ${retire.stderr.trim()}\n`;
     }
 
+    // Step 9b: Reboot persistence with the distribution's own service (nftables.service /
+    // netfilter-persistent / iptables-services). Done only now, when the new state is final:
+    // a revert or rollback before this point leaves the previous boot configuration in place.
+    // Never fails the deployment; missing pieces (firewalld, package not installed, unsupported
+    // distro) are reported as warnings.
+    const persistRes = await sudo(persistSnippet(ext === 'nft' ? 'nftables' : 'iptables', 'persist', 'installed'));
+    add(persistRes);
+    const persistence = parsePersistenceOutput(persistRes.stdout);
+    stdout += `Reboot persistence: ${persistenceSummary(persistence)}\n`;
+
     // Step 10: Read back live ruleset for drift detection (same read + normalization as readHostFirewallRules)
     let liveRulesHash: string | undefined;
     const live = await sudo(liveRulesReadScript(ext === 'nft' ? 'nftables' : 'iptables'));
@@ -392,7 +423,7 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
       stderr += `Warning: could not read back live ruleset: ${live.stdout.trim()} ${live.stderr.trim()}\n`;
     }
 
-    return { hostname: host.hostname, success: true, exitCode: 0, stdout, stderr, backupPath, liveRulesHash };
+    return { hostname: host.hostname, success: true, exitCode: 0, stdout, stderr, backupPath, liveRulesHash, persistence };
   } catch (error: any) {
     return fail(1, `Exception: ${error.message}`);
   }

@@ -1,6 +1,8 @@
 import dgram from 'node:dgram';
 import net from 'node:net';
 import { pool } from '../db/pool.js';
+import { loadFullConfig } from './config-secrets.js';
+import { maskConfigSecrets } from './secret-mask.js';
 
 interface SyslogConfig {
   host: string;
@@ -41,9 +43,11 @@ export function buildSyslogMessage(event: SiemAuditEvent, config: Partial<Syslog
     sdParam('entityType', event.entityType),
     sdParam('entityId', event.entityId),
   ];
-  if (event.metadata) {
-    // Add top-level metadata fields (limit to prevent oversized messages)
-    const metaEntries = Object.entries(event.metadata).slice(0, 10);
+  if (event.metadata && typeof event.metadata === 'object') {
+    // Add top-level metadata fields (limit to prevent oversized messages). Values under
+    // secret-like keys (password, token, apiKey, ...) are masked as defense in depth: audit
+    // metadata must never carry secrets, but it is written by many call sites.
+    const metaEntries = Object.entries(maskConfigSecrets(event.metadata)).slice(0, 10);
     for (const [k, v] of metaEntries) {
       const val = typeof v === 'object' ? JSON.stringify(v) : String(v);
       sdParams.push(sdParam(k, val));
@@ -85,26 +89,59 @@ export async function sendEventToSiem(rawConfig: unknown, event: SiemAuditEvent)
  * can report failure (UDP can only detect local/DNS errors; TCP detects connection failures).
  */
 export async function testSiemIntegration(integrationId: string, event: SiemAuditEvent): Promise<void> {
-  const { rows } = await pool.query(`SELECT config FROM integrations WHERE id = $1 AND type = 'siem'`, [integrationId]);
+  const { rows } = await pool.query(
+    `SELECT config, config_secret_id FROM integrations WHERE id = $1 AND type = 'siem'`,
+    [integrationId]
+  );
   if (!rows[0]) throw new Error('SIEM integration not found');
-  await sendEventToSiem(rows[0].config, event);
+  await sendEventToSiem(await loadFullConfig(rows[0]), event);
+}
+
+const ENABLED_CACHE_MS = 10_000;
+let enabledCache: { at: number; configs: Partial<SyslogConfig>[] } | null = null;
+
+/** Drop the cached list of enabled SIEM integrations (call after integrations change). */
+export function invalidateSiemIntegrationCache(): void {
+  enabledCache = null;
+}
+
+/** Enabled SIEM integration configs (decrypted), cached for 10 seconds. */
+export async function getEnabledSiemConfigs(): Promise<Partial<SyslogConfig>[]> {
+  if (enabledCache && Date.now() - enabledCache.at < ENABLED_CACHE_MS) return enabledCache.configs;
+  const { rows } = await pool.query(
+    `SELECT id, config, config_secret_id FROM integrations WHERE type = 'siem' AND enabled = true`
+  );
+  const configs: Partial<SyslogConfig>[] = [];
+  for (const row of rows) {
+    try {
+      const config = parseConfig(await loadFullConfig(row));
+      if (config.host && config.port) configs.push(config);
+    } catch (e: any) {
+      // eslint-disable-next-line no-console
+      console.error(`[SIEM] Cannot load config of integration ${row.id}: ${e.message}`);
+    }
+  }
+  enabledCache = { at: Date.now(), configs };
+  return configs;
 }
 
 /**
  * Send a syslog message (RFC 5424 format) to every enabled SIEM collector.
- * Fire-and-forget — errors are logged but never block the caller.
+ * Never throws; returns how many collectors accepted the message and how many there were.
+ *
+ * Do not call this for audit events: every audit_events row is forwarded exactly once by
+ * siem-audit-listener.ts (DB trigger + LISTEN). Calling it as well would send duplicates.
  */
-export async function forwardAuditToSiem(event: SiemAuditEvent): Promise<void> {
+export async function forwardAuditToSiem(event: SiemAuditEvent): Promise<{ sent: number; targets: number }> {
+  let sent = 0;
+  let targets = 0;
   try {
-    // Find enabled SIEM integrations
-    const { rows } = await pool.query(
-      `SELECT config FROM integrations WHERE type = 'siem' AND enabled = true`
-    );
-    for (const row of rows) {
-      const config = parseConfig(row.config);
-      if (!config.host || !config.port) continue;
+    const configs = await getEnabledSiemConfigs();
+    targets = configs.length;
+    for (const config of configs) {
       try {
         await sendEventToSiem(config, event);
+        sent++;
       } catch (e: any) {
         // eslint-disable-next-line no-console
         console.error(`[SIEM] Failed to send syslog to ${config.host}:${config.port}: ${e.message}`);
@@ -114,6 +151,7 @@ export async function forwardAuditToSiem(event: SiemAuditEvent): Promise<void> {
     // eslint-disable-next-line no-console
     console.error('[SIEM] Error in forwardAuditToSiem:', e);
   }
+  return { sent, targets };
 }
 
 function sendUdp(host: string, port: number, message: string): Promise<void> {

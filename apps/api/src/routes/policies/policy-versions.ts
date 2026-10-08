@@ -6,6 +6,7 @@ import { requireAuth, requireRole } from '../../middleware/auth.js';
 import { comparePolicyVersions } from '../../services/policy-diff.js';
 import { isPolicyVersionHighRisk } from '../../services/high-risk.js';
 import { recordPolicyVersionEditor } from '../../lib/policy-editors.js';
+import { notifyPolicyVersionEvent } from '../../services/notifications.js';
 import { interfaceNamesSchema, interfaceRolesSchema, interfaceScopeTypeSchema } from '../../lib/rule-validation.js';
 
 export const policyVersionsRouter = Router();
@@ -196,6 +197,7 @@ policyVersionsRouter.post('/policy-versions/:versionId/submit-approval', require
      VALUES ($1,'POLICY_SUBMIT','policy_version',$2,$3)`,
     [userId, req.params.versionId, { by: req.auth!.username, resubmitted, isHighRisk }]
   );
+  notifyPolicyVersionEvent('POLICY_SUBMITTED', req.params.versionId, { submittedBy: req.auth!.username, resubmitted });
   res.json({ version: rows[0] });
 });
 
@@ -242,6 +244,7 @@ policyVersionsRouter.post(
        VALUES ($1,'POLICY_APPROVE','policy_version',$2,$3)`,
       [approverId, req.params.versionId, { by: req.auth!.username, isHighRisk }]
     );
+    notifyPolicyVersionEvent('POLICY_APPROVED', req.params.versionId, { approvedBy: req.auth!.username });
     res.json({ version: rows[0] });
   }
 );
@@ -268,6 +271,7 @@ policyVersionsRouter.post(
        VALUES ($1,'POLICY_REJECT','policy_version',$2,$3)`,
       [approverId, req.params.versionId, { by: req.auth!.username, reason: body.data.reason }]
     );
+    notifyPolicyVersionEvent('POLICY_REJECTED', req.params.versionId, { rejectedBy: req.auth!.username, reason: body.data.reason });
     res.json({ version: rows[0] });
   }
 );

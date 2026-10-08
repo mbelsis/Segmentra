@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import { pool } from '../../db/pool.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
+import { countRuleReferences } from '../../lib/rule-references.js';
 
 export const tagsRouter = Router();
 tagsRouter.use(requireAuth);
@@ -69,6 +70,15 @@ tagsRouter.delete('/:id', requireRole('operator', 'admin'), async (req, res) => 
   const { rows: existing } = await pool.query(`SELECT is_system, name FROM tags WHERE id=$1`, [req.params.id]);
   if (existing[0]?.is_system) {
     return res.status(400).json({ error: 'cannot_delete_system_tag', message: `The tag "${existing[0].name}" is a system tag required for platform operation and cannot be deleted.` });
+  }
+
+  const refs = await countRuleReferences('TAG', req.params.id);
+  if (refs.total > 0) {
+    return res.status(409).json({
+      error: 'tag_in_use',
+      message: `Tag is used as a source or destination by ${refs.policyRules} policy rule(s) and ${refs.templateRules} template rule(s). Change those rules first.`,
+      usage: refs
+    });
   }
 
   let rowCount: number | null;

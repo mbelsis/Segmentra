@@ -23,7 +23,7 @@ import {
 
 import { pool } from '../db/pool.js';
 import { createAuditEvent } from './audit.js';
-import { loadSshCredential, materializeSshCredential, sshAuthFields, type MaterializedSshCredential } from './ssh-credentials.js';
+import { EFFECTIVE_CREDENTIAL_LATERAL, materializeSshCredential, sshAuthFields, type MaterializedSshCredential } from './ssh-credentials.js';
 import { evaluateHostAgainstRules } from './tag-rule-engine.js';
 import { triggerTemplateAutoApply } from './template-engine.js';
 
@@ -272,7 +272,6 @@ async function executeRun(runId: string, profileId: string, trigger: 'manual' | 
       [[...new Set(targets.map((t) => t.sshCredentialId))]]
     );
     const credById = new Map<string, any>(credRows.map((c: any) => [String(c.id), c]));
-    const globalCred = await loadSshCredential(null);
 
     // ip -> ordered candidate (target set) list
     const candidatesByIp = new Map<string, ResolvedTarget[]>();
@@ -363,7 +362,7 @@ async function executeRun(runId: string, profileId: string, trigger: 'manual' | 
         }
         counts.loginOk++;
         try {
-          return await importHost({ ip, port: t.sshPort, facts: r.facts, credRow, globalCredId: globalCred?.id ?? null, tagId: await getTagId(), profileName: profile.name });
+          return await importHost({ ip, port: t.sshPort, facts: r.facts, credRow, tagId: await getTagId(), profileName: profile.name });
         } catch (e: any) {
           return { ip, port: t.sshPort, status: 'error', credentialName: credRow.name, reason: `import failed: ${e?.message ?? e}` };
         }
@@ -416,7 +415,6 @@ async function importHost(params: {
   port: number;
   facts: DiscoveredHostFacts;
   credRow: any;
-  globalCredId: string | null;
   tagId: string;
   profileName: string;
 }): Promise<DiscoveryAddressResult> {
@@ -471,18 +469,14 @@ async function importHost(params: {
       `INSERT INTO host_tags (host_id, tag_id, source) VALUES ($1, $2, 'manual') ON CONFLICT DO NOTHING`,
       [hostId, params.tagId]
     );
-    // Deployments prefer a HOST-scoped credential over the newest GLOBAL one; pin the credential
-    // that actually worked unless it already is the global default. Secrets are shared, not copied.
-    if (String(credRow.id) !== String(params.globalCredId ?? '')) {
-      await client.query(
-        `INSERT INTO ssh_credentials
-           (name, username, auth_method, private_key_secret_id, passphrase_secret_id, password_secret_id,
-            sudo_mode, sudo_password_secret_id, scope_type, scope_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'HOST', $9)`,
-        [`${credRow.name} (discovered: ${hostname})`, credRow.username, credRow.auth_method,
-          credRow.private_key_secret_id, credRow.passphrase_secret_id, credRow.password_secret_id,
-          credRow.sudo_mode ?? 'NOPASSWD', credRow.sudo_password_secret_id ?? null, hostId]
-      );
+    // Make deployments use the credential that worked: unless automatic scope resolution already
+    // picks it for the new host, assign it explicitly (hosts.ssh_credential_id; no secret copies).
+    const { rows: auto } = await client.query(
+      `SELECT ec.cred_id FROM hosts h CROSS JOIN LATERAL (${EFFECTIVE_CREDENTIAL_LATERAL}) ec WHERE h.id = $1`,
+      [hostId]
+    );
+    if (String(auto[0]?.cred_id ?? '') !== String(credRow.id)) {
+      await client.query(`UPDATE hosts SET ssh_credential_id = $2 WHERE id = $1`, [hostId, credRow.id]);
     }
     await client.query('COMMIT');
     triggerTemplateAutoApply([params.tagId]);

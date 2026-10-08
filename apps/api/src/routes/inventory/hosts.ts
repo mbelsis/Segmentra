@@ -4,8 +4,10 @@ import { z } from 'zod';
 import { pool } from '../../db/pool.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 import { isValidIp } from '../../services/ip-utils.js';
+import { effectiveCredentialsForHosts } from '../../services/ssh-credentials.js';
 import { evaluateHostAgainstRules } from '../../services/tag-rule-engine.js';
 import { triggerTemplateAutoApply } from '../../services/template-engine.js';
+import { countRuleReferences } from '../../lib/rule-references.js';
 
 /** Re-run tag rules for a host after attributes changed; never fails the request. */
 function reevaluateHostTags(hostId: string) {
@@ -23,6 +25,28 @@ async function hostsWithDeploymentHistory(hostIds: string[]): Promise<Array<{ id
     [hostIds]
   );
   return rows;
+}
+
+/** Attach `effective_credential` (non-secret summary, or null) to host objects, in one query. */
+async function withEffectiveCredentials<T extends { id: string }>(hosts: T[]): Promise<Array<T & { effective_credential: any }>> {
+  const map = await effectiveCredentialsForHosts(hosts.map((h) => String(h.id)));
+  return hosts.map((h) => ({ ...h, effective_credential: map.get(String(h.id)) ?? null }));
+}
+
+/**
+ * Validate an explicit SSH credential assignment (hosts.ssh_credential_id). Only admins may
+ * change it (credentials are admin-managed); null clears it. Returns an error response or null.
+ */
+async function credentialAssignmentProblem(req: any, body: any, value: string | null | undefined): Promise<{ status: number; body: any } | null> {
+  if (!Object.prototype.hasOwnProperty.call(body ?? {}, 'sshCredentialId')) return null;
+  if (!req.auth?.roles?.includes('admin')) {
+    return { status: 403, body: { error: 'forbidden', message: 'Only admins can change the SSH credential assigned to a host.' } };
+  }
+  if (value) {
+    const { rows } = await pool.query(`SELECT 1 FROM ssh_credentials WHERE id = $1`, [value]);
+    if (!rows[0]) return { status: 400, body: { error: 'ssh_credential_not_found', message: 'The selected SSH credential does not exist.' } };
+  }
+  return null;
 }
 
 export const hostsRouter = Router();
@@ -136,7 +160,7 @@ hostsRouter.get('/', requireRole('viewer', 'operator', 'approver', 'admin'), asy
   }
   
   res.json({ 
-    hosts: Array.from(hostMap.values()),
+    hosts: await withEffectiveCredentials(Array.from(hostMap.values())),
     pagination: {
       page,
       limit,
@@ -159,7 +183,9 @@ const createHostSchema = z.object({
   firewallBackend: z.enum(['nftables', 'iptables', 'auto']).optional(),
   vlanId: z.string().uuid().nullable().optional(),
   tagIds: z.array(z.string().uuid()).optional().default([]),
-  enabled: z.boolean().optional()
+  enabled: z.boolean().optional(),
+  /** Explicit SSH credential (admin only); null/omitted = automatic (by credential scope). */
+  sshCredentialId: z.string().uuid().nullable().optional()
 });
 
 // Write operations require operator/admin
@@ -167,14 +193,16 @@ hostsRouter.post('/', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = createHostSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
   const b = parsed.data;
+  const credProblem = await credentialAssignmentProblem(req, req.body, b.sshCredentialId);
+  if (credProblem) return res.status(credProblem.status).json(credProblem.body);
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     
     const { rows } = await client.query(
-      `INSERT INTO hosts (hostname, mgmt_ip, ssh_port, environment, os_family, firewall_backend, vlan_id, enabled)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+      `INSERT INTO hosts (hostname, mgmt_ip, ssh_port, environment, os_family, firewall_backend, vlan_id, enabled, ssh_credential_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        RETURNING *`,
       [
         b.hostname,
@@ -184,7 +212,8 @@ hostsRouter.post('/', requireRole('operator', 'admin'), async (req, res) => {
         b.osFamily ?? null,
         b.firewallBackend ?? 'auto',
         b.vlanId ?? null,
-        b.enabled ?? true
+        b.enabled ?? true,
+        b.sshCredentialId ?? null
       ]
     );
     const host = rows[0];
@@ -222,12 +251,8 @@ hostsRouter.post('/', requireRole('operator', 'admin'), async (req, res) => {
       [req.auth!.username, 'HOST_CREATE', 'host', host.id, JSON.stringify({ hostname: b.hostname })]
     );
 
-    res.status(201).json({
-      host: {
-        ...hostWithTags.rows[0],
-        tags: tagRows.rows
-      }
-    });
+    const [hostOut] = await withEffectiveCredentials([{ ...hostWithTags.rows[0], tags: tagRows.rows }]);
+    res.status(201).json({ host: hostOut });
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;
@@ -252,12 +277,8 @@ hostsRouter.get('/:id', requireRole('viewer', 'operator', 'approver', 'admin'), 
     [req.params.id]
   );
   
-  res.json({ 
-    host: {
-      ...rows[0],
-      tags: tagRows.rows
-    }
-  });
+  const [hostOut] = await withEffectiveCredentials([{ ...rows[0], tags: tagRows.rows }]);
+  res.json({ host: hostOut });
 });
 
 const updateHostSchema = createHostSchema.partial();
@@ -268,6 +289,10 @@ hostsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
   const b = parsed.data;
   // vlanId: null explicitly clears the VLAN; omitting it keeps the current value.
   const clearVlan = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'vlanId') && b.vlanId === null;
+  // sshCredentialId: present (uuid or null) = set/clear the explicit assignment (admin only).
+  const setCredential = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'sshCredentialId');
+  const credProblem = await credentialAssignmentProblem(req, req.body, b.sshCredentialId);
+  if (credProblem) return res.status(credProblem.status).json(credProblem.body);
 
   const client = await pool.connect();
   try {
@@ -283,6 +308,7 @@ hostsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
            firewall_backend = COALESCE($7, firewall_backend),
            vlan_id = CASE WHEN $10::boolean THEN NULL ELSE COALESCE($8, vlan_id) END,
            enabled = COALESCE($9, enabled),
+           ssh_credential_id = CASE WHEN $11::boolean THEN $12::uuid ELSE ssh_credential_id END,
            updated_at = now()
        WHERE id=$1
        RETURNING *`,
@@ -296,7 +322,9 @@ hostsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
         b.firewallBackend ?? null,
         b.vlanId ?? null,
         typeof b.enabled === 'boolean' ? b.enabled : null,
-        clearVlan
+        clearVlan,
+        setCredential,
+        b.sshCredentialId ?? null
       ]
     );
     if (!rows[0]) {
@@ -343,12 +371,8 @@ hostsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
       [req.auth!.username, 'HOST_UPDATE', 'host', req.params.id, JSON.stringify({ hostname: rows[0].hostname, changes: b })]
     );
 
-    res.json({
-      host: {
-        ...hostWithTags.rows[0],
-        tags: tagRows.rows
-      }
-    });
+    const [hostOut] = await withEffectiveCredentials([{ ...hostWithTags.rows[0], tags: tagRows.rows }]);
+    res.json({ host: hostOut });
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;
@@ -363,6 +387,16 @@ hostsRouter.delete('/:id', requireRole('operator', 'admin'), async (req, res) =>
     return res.status(409).json({
       error: 'host_has_deployment_history',
       message: 'This host has deployment history and cannot be deleted. Disable it instead.'
+    });
+  }
+  // Rules reference hosts by id without a foreign key: deleting a referenced host would turn
+  // those rules into rules matching nothing (an ALLOW stops allowing, a DENY stops denying).
+  const refs = await countRuleReferences('HOST', req.params.id);
+  if (refs.total > 0) {
+    return res.status(409).json({
+      error: 'host_in_use',
+      message: `This host is used as a source or destination by ${refs.policyRules} policy rule(s) and ${refs.templateRules} template rule(s). Change those rules first, or disable the host.`,
+      usage: refs
     });
   }
   let rowCount: number | null;
@@ -400,6 +434,17 @@ hostsRouter.post('/bulk/delete', requireRole('operator', 'admin'), async (req, r
       error: 'host_has_deployment_history',
       message: `${referenced.length} host(s) have deployment history and cannot be deleted. Disable them instead.`,
       hosts: referenced
+    });
+  }
+  const inRules: string[] = [];
+  for (const id of parsed.data.hostIds) {
+    if ((await countRuleReferences('HOST', id)).total > 0) inRules.push(id);
+  }
+  if (inRules.length > 0) {
+    return res.status(409).json({
+      error: 'host_in_use',
+      message: `${inRules.length} host(s) are used as a source or destination in policy or template rules and cannot be deleted. Change those rules first, or disable the hosts.`,
+      hostIds: inRules
     });
   }
 

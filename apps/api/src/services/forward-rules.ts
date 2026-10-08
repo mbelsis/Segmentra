@@ -51,7 +51,8 @@ export async function resolveDestinationAddresses(destinationType: string, desti
   }
   if (type === 'TAG') {
     const { rows } = await pool.query(
-      `SELECT h.mgmt_ip AS ip FROM hosts h JOIN host_tags ht ON ht.host_id = h.id
+      // hosts.mgmt_ip is inet, iot_assets.ip_address is text: UNION needs one type.
+      `SELECT host(h.mgmt_ip) AS ip FROM hosts h JOIN host_tags ht ON ht.host_id = h.id
         WHERE ht.tag_id = $1 AND h.mgmt_ip IS NOT NULL AND h.enabled = true
        UNION ALL
        SELECT ia.ip_address AS ip FROM iot_assets ia JOIN iot_asset_tags iat ON iat.asset_id = ia.id
@@ -65,7 +66,7 @@ export async function resolveDestinationAddresses(destinationType: string, desti
     const subnet = v[0]?.subnet ? String(v[0].subnet) : null;
     if (subnet && isValidCidr(subnet)) return [subnet];
     const { rows } = await pool.query(
-      `SELECT mgmt_ip AS ip FROM hosts WHERE vlan_id = $1 AND mgmt_ip IS NOT NULL AND enabled = true
+      `SELECT host(mgmt_ip) AS ip FROM hosts WHERE vlan_id = $1 AND mgmt_ip IS NOT NULL AND enabled = true
        UNION ALL
        SELECT ip_address AS ip FROM iot_assets WHERE vlan_id = $1 AND ip_address IS NOT NULL AND enabled = true`,
       [value]

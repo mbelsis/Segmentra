@@ -408,18 +408,18 @@ export function DeploymentsPage() {
                   Deployment Modes:
                 </div>
                 <div style={{ marginBottom: '8px' }}>
-                  <strong>CANARY:</strong> Deploys to a small subset of hosts first (specified by Canary Size). 
-                  Use this to test the policy on a few hosts before rolling out to all targets. 
-                  Ideal for validating changes before full deployment.
+                  <strong>CANARY:</strong> Deploys to a canary group first: the first hosts by hostname (Canary Size). 
+                  If a canary host fails, the remaining hosts are not deployed (they are marked skipped and 
+                  can be deployed later with Retry failed). SSH executor only; the Ansible executor deploys all hosts in one run.
                 </div>
                 <div style={{ marginBottom: '8px' }}>
-                  <strong>PROGRESSIVE:</strong> Deploys in batches (specified by Batch Size). 
-                  Each batch is deployed sequentially, allowing you to monitor progress and stop if issues arise. 
-                  Best for gradual rollouts across large fleets.
+                  <strong>PROGRESSIVE:</strong> Deploys in batches (specified by Batch Size), one batch after another. 
+                  If a host fails, the rollout stops after that batch; you can also pause or stop it at any time. 
+                  SSH executor only; the Ansible executor deploys all hosts in one run.
                 </div>
                 <div>
-                  <strong>FULL:</strong> Deploys to all target hosts simultaneously. 
-                  Fastest deployment method but provides less control. 
+                  <strong>FULL:</strong> Deploys to all target hosts without stopping on failures. 
+                  Provides the least control. 
                   Use when you're confident the policy is safe and tested.
                 </div>
               </div>

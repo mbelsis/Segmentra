@@ -54,6 +54,14 @@ This guide walks through every step of using Segmentra — from initial setup to
   Do not enable `Defaults requiretty` for this account. Restrict where it can log in from (see [security.md](security.md#checklist)).
 - **nftables** (preferred) or **iptables** installed
 - **rsyslog** installed (required for firewall learning/audit features)
+- **For rules that survive a reboot** (Segmentra never installs packages or disables firewalld; see [Persistence across reboots](../README.md#persistence-across-reboots)):
+
+  | Distribution | nftables backend | iptables backend |
+  |---|---|---|
+  | Debian, Ubuntu | `nftables` package (`nftables.service`; Segmentra enables it) | `iptables-persistent` package (`netfilter-persistent.service`) |
+  | RHEL, Rocky, AlmaLinux (Fedora, CentOS Stream) | `nftables` package (`nftables.service`) and **firewalld disabled** | `iptables-services` package (`iptables` / `ip6tables.service`) and **firewalld disabled** |
+
+  With firewalld active or enabled the rules work at runtime but are gone after a reboot until the next deployment; the deployment and the readiness check show a warning. Other distributions (Alpine, SUSE, Arch, ...) are not supported for persistence.
 
 ---
 
@@ -91,6 +99,8 @@ Under **Deployment Executor**, choose:
 - **Ansible** (recommended) — requires the `segmentra-ansible-runner` Docker container
 - **SSH Direct** — lightweight, no Ansible dependency
 
+The hardened Docker override (`docker-compose.hardened.yml`) does not start the Ansible runner, so choose **SSH Direct** there (see [installation.md](installation.md)).
+
 ### Step 4: Add SSH Credentials
 
 In **Admin → SSH Credentials**, create a credential:
@@ -98,15 +108,25 @@ In **Admin → SSH Credentials**, create a credential:
 - **Username:** The sudo-capable user on target hosts (e.g., `segmentra`)
 - **Private Key:** Paste the private key (OpenSSH or PEM format), plus its **passphrase** if it has one (checked when saving)
 - **Privilege escalation:** *sudo without password*, *sudo with the login password* (password credentials only) or *sudo with a separate password* (enter the sudo password)
-- **Scope:** `GLOBAL` (applies to all hosts)
+- **Applies to:** which hosts use the credential automatically:
+  - *All hosts (global)*: the default for every host without a more specific credential (the newest global one wins);
+  - *Hosts with tag* / *Hosts in VLAN* / *A specific host*: pick the tag, VLAN or host;
+  - *Not assigned (manual use)*: never chosen automatically; use it in a discovery profile or assign it to hosts explicitly.
+- **Priority** (optional): breaks ties when several credentials match at the same level, e.g. a host with two tags that each have a credential. Higher wins.
+
+For each host Segmentra uses: the credential assigned to the host (Inventory → edit host → *SSH credential*, admins only) → a credential for that host → for one of its tags → for its VLAN → the global one. The **SSH credential** column in Inventory → Hosts shows the result for every host, e.g. `demo-boxes (global)` or `web-creds (tag web)`. Use **Edit** in the credential list to change a credential's name, scope or priority (and, for password credentials, the password) without re-entering the key; **Delete** is refused while a discovery profile uses the credential or hosts are assigned to it.
+
+Example: keep one global credential for most servers, and add a credential for the tag `web` for the web servers that use a different account. Only hosts tagged `web` switch to it.
 
 Keys, passphrases and passwords are encrypted at rest using AES-256-GCM. The sudo password is sent to `sudo -S` on standard input, never on a command line (see [security.md](security.md#how-secrets-are-used-when-connecting-to-hosts)).
 
 ### Step 5: (Optional) Configure Management VLAN
 
-In **Admin → Management VLAN Setting**, select the VLAN used for SSH management access. This enables:
-- Automatic SSH baseline rules in compiled policies (management SSH is always allowed)
+In **Admin → Management VLAN (Baseline SSH Access)**, select the VLAN used for SSH management access. This enables:
+- Automatic SSH baseline rules in compiled policies (SSH from the management VLAN subnet is always allowed)
 - Safety guardrails that prevent deployments from locking out administrators
+
+Without a management VLAN, SSH is allowed from any source so hosts cannot be locked out.
 
 ---
 
@@ -117,7 +137,7 @@ In **Admin → Management VLAN Setting**, select the VLAN used for SSH managemen
 Go to **Inventory → Tags** tab and create tags that describe your server roles:
 - `web-server`, `db-server`, `app-server`, `monitoring`, `dmz`, etc.
 
-Tags are the primary way to group hosts for policy targeting.
+Tags are the primary way to group hosts for policy targeting. A tag (or VLAN) cannot be deleted while policy or template rules reference it (`409`).
 
 ### Step 2: Create VLANs
 
@@ -135,26 +155,40 @@ Go to **Inventory → Hosts** tab:
 - Enter hostname, management IP, SSH port (default 22)
 - Select firewall backend (`auto` for automatic detection, or `nftables`/`iptables`)
 - Assign VLAN and tags
+- *SSH credential* (admins only): leave *Automatic (by credential scope)* or assign a credential explicitly
 
 **Bulk import via CSV:**
-- Click **Import CSV** with format: `hostname,mgmt_ip,ssh_port,environment,os_family,firewall_backend,vlan_tag`
+- Click **Bulk Import** and upload a CSV file with the header `hostname,mgmt_ip,ssh_port,vlan,tags,firewall_backend,enabled` (`vlan` = VLAN name or tag number, `tags` = comma-separated tag names; only `hostname` is required)
 
 ### Step 4: Add Network Interfaces
 
-For each host that has multiple NICs, go to the host detail and add interfaces:
-- **Name:** e.g., `eth0`, `ens192`, `bond0`
-- **Role:** e.g., `management`, `data`, `backup`, `storage`, `dmz`
-- **IP Address:** (optional)
+For hosts with multiple NICs, add interfaces through the API (there is no UI for this yet): `POST /api/hosts/:id/interfaces` with
+- **name:** e.g., `eth0`, `ens192`, `bond0`
+- **role:** e.g., `management`, `data`, `backup`, `storage`, `dmz`
+- **ip address:** (optional)
 
 Interface roles are used when policies target specific interface roles instead of all interfaces.
 
 ### Step 5: Verify Host Readiness
 
-Select hosts and click **Check Readiness** to verify:
+Click **Check Readiness** on a host row to verify:
 - nftables/iptables is installed and accessible
-- sudo works with the credential's privilege escalation setting (`sudo -n` or `sudo -S` with the sudo password) and runs `sh` as root; a wrong sudo password, a missing password, or `requiretty` are reported as specific errors
-- Kernel modules are loaded (for nftables)
+- sudo works with the credential's privilege escalation setting (`sudo -n` or `sudo -S` with the sudo password) and runs `sh` as root; a wrong sudo password, a missing password, `requiretty` or an account not allowed to run `sh` as root are reported as specific errors
+- The `nf_tables` kernel module is loaded (for nftables; a warning only)
 - Firewall backend is auto-detected if set to `auto`
+
+### Step 6: (Optional) Discover Hosts Automatically
+
+Instead of adding hosts by hand, use **Inventory → Discovery**:
+
+1. Click **+ New Discovery Profile** (admin).
+2. Add one or more **target sets**: an SSH credential (existing, or a new one added inline), the networks to scan (IPv4 CIDRs and/or VLAN subnets) and the SSH port.
+3. Choose a schedule (manual only, or every N minutes/hours) and the tag for new hosts (default `new-server`).
+4. Click **Run Now** (operator/admin) or wait for the schedule.
+
+A run TCP-probes the SSH port on every address, logs in read-only with the target set's credential, and imports hosts that are not in inventory yet; existing hosts are left untouched. Each imported host is assigned the credential that logged in. Credentials added inline are stored as *Not assigned* unless you make them global, so they never change the credential of other hosts. The run history shows per-address results (imported, already present, login failed and why).
+
+Limits: IPv4 only, at most a /20 (4096 addresses) per network and 8192 addresses per run; one run per profile at a time. Runs left running when the API restarts are marked FAILED.
 
 ---
 
@@ -164,9 +198,9 @@ Instead of manually tagging every host, create rules that automatically assign t
 
 ### Step 1: Create a Tag Rule
 
-Go to **Inventory → Tag Rules** tab (or the Tag Rules section):
+Go to the **Inventory → Auto-Tagging** tab:
 
-1. Click **+ New Rule**
+1. Click **+ Create Tag Rule**
 2. **Name:** e.g., "Tag web servers by hostname"
 3. **Target Tag:** Select the tag to assign (e.g., `web-server`)
 4. **Criteria:**
@@ -175,17 +209,19 @@ Go to **Inventory → Tag Rules** tab (or the Tag Rules section):
    - Value: `^web-.*`
    - Logic: `AND` or `OR` for multiple conditions
 
+Use **Preview Matches** to see which hosts the criteria match before saving. When you save, the rule is applied right away.
+
 ### Step 2: Evaluate the Rule
 
-Click **Evaluate** to run the rule against all hosts immediately. The result shows how many hosts matched.
+Click **Evaluate** on a rule to run it against all hosts again. The result shows how many hosts matched.
 
 ### Step 3: Review Matches
 
-Click the rule to see which hosts matched and received the tag. Tags assigned by rules are marked with `source: rule` and won't conflict with manually assigned tags.
+Click the rule to see which hosts matched and received the tag. Tags assigned by rules are stored with `source: rule`; manually assigned tags are never overwritten or removed by rules.
 
 ### Automatic Evaluation
 
-A background job evaluates all enabled rules every 5 minutes. You can also trigger **Evaluate All** to run all rules immediately.
+A background job evaluates all enabled rules every 5 minutes. **Run All Rules Now** runs all rules immediately.
 
 ### Example Rules
 
@@ -203,7 +239,7 @@ A background job evaluates all enabled rules every 5 minutes. You can also trigg
 
 ### Step 1: Create a Policy Set
 
-Go to **Policy Sets** in the sidebar and click **+ New Policy Set**:
+Go to **Policy Sets** in the sidebar and click **+ Create Policy Set**:
 
 - **Name:** e.g., "Web Server Firewall"
 - **Scope Type:**
@@ -214,11 +250,12 @@ Go to **Policy Sets** in the sidebar and click **+ New Policy Set**:
 
 ### Step 2: Create a Policy Version
 
-Inside the policy set, click **+ New Version**:
-- **Interface Scope:** Choose which interfaces the rules apply to:
+Inside the policy set, click **+ New Version**. The new version starts as DRAFT. On the version page, set the **Interface Scope (Policy Level)** and click **Update Interface Scope**:
   - `INTERFACE_ROLE` (recommended) — e.g., apply only to `data` interfaces
   - `ALL_INTERFACES` — apply to every interface on the host
   - `INTERFACE_NAME` — apply to specific named interfaces (e.g., `eth0`)
+
+Individual rules can override the interface scope.
 
 ### Step 3: Add Rules
 
@@ -226,28 +263,35 @@ Add firewall rules to the version. Each rule specifies:
 
 | Field | Options | Example |
 |-------|---------|---------|
-| **Direction** | IN, OUT, BOTH | `IN` |
+| **Direction** | IN, OUT, BOTH, FORWARD (through a gateway) | `IN` |
 | **Action** | ALLOW, DENY | `ALLOW` |
 | **Protocol** | tcp, udp, icmp, any | `tcp` |
 | **Ports** | Single, comma-separated, or range | `80,443` or `8000-9000` |
 | **Source Type** | CIDR, TAG, VLAN, HOST | `TAG` |
 | **Source Value** | IP/CIDR or entity ID | Select "app-server" tag |
+| **Destination Type / Value** | FORWARD rules only: IoT device, CIDR, VLAN, TAG, HOST | an IoT device |
 | **Log Mode** | NONE, LOG, LOG_RATE_LIMITED | `NONE` |
 | **Comment** | Free text | "Allow HTTPS from app tier" |
 
+FORWARD rules filter traffic routed *through* a host, such as an IoT/OT gateway; see [iot.md](iot.md).
+
 ### Step 4: Preview Compiled Output
 
-Click **Render** on a specific host to see the actual nftables/iptables rules that would be generated. This shows:
+There is no render button in the UI. Operators and admins can call `GET /api/policy-versions/:versionId/render/host/:hostId` to see the nftables/iptables rules that would be generated for one host. It returns:
 - The compiled ruleset text
 - SHA-256 hash of the output
 - Which firewall backend will be used
+
+In **Inventory → Hosts**, **View Visualization** shows a diagram of the policies that apply to a host.
 
 ### Rule Evaluation Order
 
 Rules are evaluated in `order_index` order. The compiled output follows:
 1. Baseline rules (loopback, established/related, management SSH)
 2. User-defined rules (in order_index order)
-3. Default deny (drop all unmatched traffic)
+3. Default deny for **inbound** traffic. Outbound traffic is allowed unless an OUT rule denies it, and forwarded traffic is only filtered for devices protected by a gateway.
+
+Segmentra only manages its own rules: on nftables the table `inet segmentra`, on iptables the chains `SEGMENTRA-IN`, `SEGMENTRA-OUT` (and `SEGMENTRA-FWD` for forwarding), reached by jumps from `INPUT` / `OUTPUT` / `FORWARD`. In those chains an ALLOW returns to the built-in chain (`RETURN`) instead of accepting, so other tools' rules (Docker, fail2ban, Kubernetes) are left alone and still apply.
 
 ---
 
@@ -267,7 +311,7 @@ Go to **Templates** in the sidebar:
 
 ### Step 2: Add Template Rules
 
-Click the template and add rules (same interface as policy rules):
+Click the template and add rules (same fields as policy rules, including FORWARD rules with a destination):
 - Allow TCP 80,443 IN from 0.0.0.0/0
 - Allow TCP 53 OUT to DNS servers
 - Allow TCP 443 OUT for package updates
@@ -278,7 +322,7 @@ Click **Instantiate** to create a real policy set + version + rules from the tem
 
 ### Auto-Apply
 
-If auto-apply is enabled and a host gains the template's target tag (via manual assignment or auto-tagging rules), Segmentra automatically creates a DRAFT policy set from the template. This connects the auto-tagging pipeline to policy creation.
+If auto-apply is enabled and a host gains the template's target tag (manual tagging, CSV import, auto-tagging rules or discovery), Segmentra automatically creates a policy set scoped to that tag with a DRAFT version from the template (once per template and tag). This connects the auto-tagging pipeline to policy creation; the version still needs approval before it can be deployed.
 
 ---
 
@@ -293,7 +337,7 @@ Go to **Topology** in the sidebar:
 
 ### Step 2: Auto-Discover (Optional)
 
-Click **Auto-Discover Topology** to automatically populate:
+Click **Auto-Discover from Inventory** to automatically populate:
 - Nodes from tags with hosts and VLANs with hosts
 - Edges from currently deployed policy rules
 
@@ -310,11 +354,11 @@ This represents "web servers are allowed to connect to database servers on port 
 
 ### Step 4: Generate Policies
 
-Click **Generate Policies** to create policy sets from the visual design. Each flow is decomposed bidirectionally:
-- An OUT rule on the source side (web-server → db-server:5432)
-- An IN rule on the target side (db-server ← web-server:5432)
+Click **Generate Policies** to create a policy set from the visual design. Flows drawn in the UI are bidirectional, so each becomes:
+- An OUT rule enforced on the source side (web-server → db-server:5432)
+- An IN rule enforced on the target side (db-server ← web-server:5432)
 
-All generated policy versions start in DRAFT status.
+All rules go into one `HOST_LIST` policy set with a DRAFT version, and every host that takes part receives every rule. Split the design into several views if you need per-group isolation.
 
 ---
 
@@ -322,7 +366,7 @@ All generated policy versions start in DRAFT status.
 
 ### Step 1: Submit for Approval
 
-In the policy version editor, click **Submit for Approval**. The system automatically:
+On the policy set page, click **Submit for Approval** next to the DRAFT version (or **Resubmit for Approval** for a REJECTED one). The system automatically:
 - Evaluates high-risk patterns (broad source ranges, ALL_INTERFACES scope, sensitive ports)
 - Flags the version as high-risk if applicable
 - Changes status from DRAFT to PENDING_APPROVAL
@@ -358,9 +402,9 @@ Expanding a row shows two panels:
 
 ### Approval Constraints
 
-- The approver must be a different user than the creator (separation of duties)
-- High-risk policies require a different approver even if the creator is an admin
-- Only users with `approver` or `admin` roles can approve
+- Nobody can approve their own changes: the approver must not be the creator, the submitter or anyone who edited the version (separation of duties). This applies to admins too.
+- Only users with `approver` or `admin` roles can approve or reject
+- Only DRAFT and REJECTED versions can be edited; APPROVED, DEPLOYED and PENDING_APPROVAL versions can be archived
 
 ---
 
@@ -368,27 +412,34 @@ Expanding a row shows two panels:
 
 ### Step 1: Create a Deployment
 
-Go to **Deployments** and click **+ New Deployment**:
+Go to **Deployments** and click **+ Create Deployment**:
 
-1. **Policy Version:** Select an APPROVED version
+1. **Policy Version:** pick an APPROVED or DEPLOYED version from the list (shown as `<policy set> v<n> (<status>)`)
 2. **Deployment Mode:**
-   - `FULL` — all target hosts at once
-   - `CANARY` — small subset first (mode stored; currently processes all hosts)
-   - `PROGRESSIVE` — deploy in batches (mode stored; currently processes all hosts)
-3. **Target Selection:** The hosts are determined by the policy set's scope (tag/VLAN/host list)
-4. **Scheduled At:** (optional) Schedule for a future time (e.g., maintenance window)
+   - `FULL` — all target hosts
+   - `CANARY` — the first hosts by hostname (**Canary Size**, default 1) are deployed first; if one of them fails, the remaining hosts are not deployed
+   - `PROGRESSIVE` — hosts are deployed in batches (**Batch Size**, default 5); if a host fails, the rollout stops at the end of that batch
+
+   `FULL` deploys every host even if some fail. Canary and progressive gates apply to the SSH Direct executor only; the Ansible executor deploys all hosts in one run. Hosts that were not deployed because the rollout halted are marked SKIPPED and can be deployed later with **Retry Failed Hosts**.
+3. **Target Type:** Tag, VLAN or specific hosts (only enabled hosts are included)
+4. **Schedule Deployment:** (optional) start at a future time (e.g., maintenance window); a background job starts it automatically when it is due
+5. **Policy Expires At / On Expiry:** (optional) see [Policy Expiry](#20-policy-expiry-time-limited-deployments)
+
+If the policy version is high-risk (for example broad sources or many targets), the deployment needs a second person: an approver or admin clicks **Approve** on the deployment before it can be started.
+
+On the policy set page, each version shows where it is in use: **Active on N hosts**, or *Not active (superseded or removed)*.
 
 ### Step 2: Safety Check
 
-Before deployment starts, Segmentra automatically:
+When the deployment is created, Segmentra automatically:
 - Compiles the policy for each target host
 - Checks that SSH access from the management VLAN is preserved in the compiled ruleset
-- In **FULL mode**: blocks deployment if SSH access would be lost
-- In **CANARY/PROGRESSIVE**: warns but allows deployment
+- In **FULL mode**: refuses to create the deployment if SSH access would be lost
+- In **CANARY/PROGRESSIVE**: warns but allows it
 
 ### Step 3: Start the Deployment
 
-Click **Start**. Depending on your configured executor, one of two paths executes:
+Click **Start**. Depending on your configured executor, one of two paths executes (see below). Running deployments can be paused, resumed and stopped. If hosts failed, open the deployment and click **Retry Failed Hosts**: only failed hosts (and hosts skipped by a halted canary/progressive rollout) are redeployed; hosts that succeeded are left alone.
 
 ---
 
@@ -398,43 +449,52 @@ When the executor is set to **SSH Direct**, Segmentra connects to each host indi
 
 ### What Happens on Each Host (Step by Step)
 
+Every root step runs as one `sudo sh -c '…'` with the credential's privilege escalation setting.
+
 ```
-Segmentra API Server                         Target Host
-─────────────────────                         ───────────
+Segmentra API Server                              Target Host
+─────────────────────                             ───────────
 
-1. ssh → sudo mkdir -p /var/backups/segmentra ────────► Create backup dir (mode 0700)
+1. mkdir -p /var/backups/segmentra (0700)  ─────► Backup directory
 
-2. ssh → command -v nft                       ────────► Detect firewall backend
-   ◄──── "nft" or "iptables"
+2. command -v nft  (or iptables-restore)   ─────► Check that the tool for the
+                                                  policy's backend is installed
 
-3. ssh → sudo nft list ruleset >              ────────► Backup current rules
-         /var/backups/segmentra/                         to timestamped file
-         nft.ruleset.20260316143025
+3. Back up Segmentra's own state only:     ─────► /var/backups/segmentra/
+   nftables: table inet segmentra                   nft.ruleset.<timestamp>
+   iptables: SEGMENTRA-IN/OUT(/FWD) chains          iptables.<timestamp> (+ ip6tables.<timestamp>)
+             and their jumps                        (full iptables-save kept as <file>.full)
+   (deployment aborts if the backup fails)
 
-4. scp → compiled.nft ──────────────────────► ────────► Copy policy file
-         /tmp/segmentra.policy                           to /tmp/
+4. scp compiled policy → ~/.segmentra-*.policy ─► Upload to the SSH user's home
 
-5. ssh → sudo mv /tmp/segmentra.policy        ────────► Move to /etc/segmentra.policy
-         /etc/segmentra.policy                           (mode 0600)
-         sudo chmod 600 /etc/segmentra.policy
+5. install -m 600 → /etc/segmentra.policy  ─────► Root-owned policy file
+                                                  (/etc/segmentra.policy6 for IPv6 iptables)
 
-6. ssh → sudo nft -f /etc/segmentra.policy    ────────► Apply nftables rules
-   (or)  sudo iptables-restore <                        (or iptables-restore)
-         /etc/segmentra.policy
+6. Schedule an automatic revert            ─────► systemd-run timer (or nohup sleep)
+   (default 120 s)                                 restores the step-3 backup
 
-   If step 6 FAILS:
-7. ssh → sudo nft -f <latest backup>          ────────► Automatic rollback
-         (or iptables-restore < backup)                  to previous rules
+7. Apply:                                  ─────► nft -f /etc/segmentra.policy
+                                                  (replaces only table inet segmentra)
+                                                  or iptables-restore --noflush of the
+                                                  SEGMENTRA chains + INPUT/OUTPUT jumps
+   If apply FAILS: restore the backup immediately
+
+8. Open a NEW SSH connection               ─────► Reachability check
+   If the host is unreachable, the scheduled revert restores the backup (lockout protection)
+
+9. Cancel the scheduled revert             ─────► Deployment confirmed
 ```
 
 ### Key Details
 
-- **Sequential execution**: Hosts are processed one at a time
+- **Sequential execution**: Hosts are processed one at a time, in hostname order (this is what makes the canary/progressive gates possible)
+- **Scoped**: only Segmentra's own table/chains are backed up, replaced and restored; other tools' rules (Docker, Kubernetes, fail2ban) are never flushed or replaced
 - **SSH host keys**: trust-on-first-use — `StrictHostKeyChecking=accept-new` with the known_hosts file from `SEGMENTRA_KNOWN_HOSTS` (default `~/.ssh/known_hosts`); a changed host key fails the connection
-- **All commands use `sudo`**: The SSH user doesn't need to be root. Each root step is one `sudo sh -c '…'` (`sudo -n` without a password, `sudo -k -S -p ''` with the password on stdin)
-- **Backend mismatch detection**: If the host has nftables but the policy was compiled for iptables (or vice versa), the deployment fails for that host before applying
-- **Automatic rollback**: If `nft -f` or `iptables-restore` fails, the latest backup is automatically restored
-- **Timeout**: Hosts that don't respond within 10 minutes are marked as FAILED by a background job
+- **All commands use `sudo`**: The SSH user doesn't need to be root, but needs full sudo rights. Each root step is one `sudo sh -c '…'` (`sudo -n` without a password, `sudo -k -S -p ''` with the password on stdin)
+- **Missing tool**: If the tool for the policy's backend (`nft` or `iptables-restore`) is missing on the host, the deployment fails for that host before anything is changed
+- **Automatic rollback**: If `nft -f` or `iptables-restore` fails, the backup is restored at once; if the host stops answering after the apply, the scheduled revert restores it
+- **Timeout**: Hosts that don't finish within 10 minutes are marked as FAILED by a background job
 
 ### SSH Direct Pros and Cons
 
@@ -460,13 +520,15 @@ When the executor is set to **Ansible**, Segmentra generates a deployment bundle
 │  1. Compile policy per host      │
 │  2. Write bundle to /bundles/    │
 │     - inventory.ini              │
-│     - ssh_key (0600)             │
-│     - host_rules/*.nft           │
+│     - host_rules/<host>.nft|     │
+│       .iptables (+ .ip6tables)   │
+│     - .secrets/ keys, host_vars/ │
+│       (deleted after the run)    │
 │  3. Execute:                     │
 │     docker exec                  │
 │       segmentra-ansible-runner   │
 │       ansible-playbook           │
-│       -i /bundles/.../inv.ini    │
+│       -i /bundles/.../inventory.ini
 │       /runner/playbooks/         │
 │         apply-firewall.yml       │
 │                                  │
@@ -483,15 +545,15 @@ When the executor is set to **Ansible**, Segmentra generates a deployment bundle
 │  segmentra-ansible-runner        │
 │                                  │
 │  - Reads inventory.ini           │
-│  - Reads host_rules/*.nft        │
-│  - Uses SSH key from bundle      │
-│  - Runs playbook on all hosts    │
-│    (parallel by default)         │
+│  - Reads host_rules/*            │
+│  - Runs the playbook on all      │
+│    hosts in one run (Ansible     │
+│    runs hosts in parallel)       │
 │                                  │
 │  For each host:                  │
 │    1. Create backup dir          │
-│    2. Detect nft vs iptables     │
-│    3. Backup current rules       │
+│    2. Detect nft / iptables      │
+│    3. Back up Segmentra's state  │
 │    4. Copy policy file           │
 │    5. Apply rules                │
 │    6. Rollback on failure        │
@@ -507,49 +569,54 @@ When the executor is set to **Ansible**, Segmentra generates a deployment bundle
 
 ```
 /bundles/<deploymentId>/
-├── inventory.ini          # Ansible inventory with per-host variables
-├── ssh_key                # SSH private key (0600 permissions)
+├── inventory.ini          # Ansible inventory with per-host variables (no secrets)
 ├── manifest.json          # Deployment metadata
 ├── ansible.stdout.log     # Ansible stdout (written during execution)
 ├── ansible.stderr.log     # Ansible stderr
+├── .secrets/              # Private key files (0600), only during the run
+├── host_vars/<host>.yml   # ansible_password / ansible_become_password (0600), only during the run
 └── host_rules/
-    ├── webserver01.nft    # Compiled nftables policy for webserver01
-    ├── webserver02.nft    # Compiled nftables policy for webserver02
-    └── dbserver01.iptables # Compiled iptables policy for dbserver01
+    ├── webserver01.nft       # Compiled nftables policy for webserver01
+    ├── webserver02.nft       # Compiled nftables policy for webserver02
+    ├── dbserver01.iptables   # Compiled iptables policy for dbserver01
+    └── dbserver01.ip6tables  # IPv6 rules for dbserver01 (when present)
 ```
+
+Key files and `host_vars` are deleted as soon as the playbook finishes. Passphrase-protected keys are loaded into an `ssh-agent` inside the runner; the passphrase is never written to disk (see [security.md](security.md#how-secrets-are-used-when-connecting-to-hosts)).
 
 ### Generated Inventory File
 
 ```ini
 [all]
-webserver01 ansible_host=10.0.1.10 ansible_port=22 ansible_user=segmentra ansible_ssh_private_key_file=/bundles/abc123/ssh_key ansible_become=yes ansible_become_method=sudo segmentra_policy_file=/bundles/abc123/host_rules/webserver01.nft
-webserver02 ansible_host=10.0.1.11 ansible_port=22 ansible_user=segmentra ansible_ssh_private_key_file=/bundles/abc123/ssh_key ansible_become=yes ansible_become_method=sudo segmentra_policy_file=/bundles/abc123/host_rules/webserver02.nft
-dbserver01 ansible_host=10.0.2.10 ansible_port=2222 ansible_user=segmentra ansible_ssh_private_key_file=/bundles/abc123/ssh_key ansible_become=yes ansible_become_method=sudo segmentra_policy_file=/bundles/abc123/host_rules/dbserver01.iptables
+webserver01 ansible_host=10.0.1.10 ansible_user=segmentra ansible_port=22 ansible_ssh_private_key_file=/bundles/abc123/.secrets/<key file> ansible_become=yes ansible_become_method=sudo segmentra_policy_file=/bundles/abc123/host_rules/webserver01.nft
+dbserver01 ansible_host=10.0.2.10 ansible_user=segmentra ansible_port=2222 ansible_connection=ssh ansible_become=yes ansible_become_method=sudo segmentra_policy_file=/bundles/abc123/host_rules/dbserver01.iptables segmentra_ip6_policy_file=/bundles/abc123/host_rules/dbserver01.ip6tables
 ```
+
+(`dbserver01` uses a password credential; its password is in `host_vars/dbserver01.yml`, not in the inventory.)
 
 ### What the Playbook Does
 
 The playbook (`infra/ansible-runner/playbooks/apply-firewall.yml`) runs these tasks on each host:
 
 1. **Generate timestamp** for backup filenames
-2. **Create backup directory** (`/var/backups/segmentra`, mode 0700)
-3. **Detect firewall backend** (`command -v nft`)
-4. **Backup current rules** (nft list ruleset or iptables-save to timestamped file)
-5. **Validate policy file** (fail early if not provided)
-6. **Copy policy file** to `/etc/segmentra.policy` (mode 0600)
-7. **Detect backend mismatch** (fail if .nft file on iptables host or vice versa)
-8. **Apply rules** (`nft -f` or `iptables-restore`)
-9. **On failure: rollback** from latest backup and fail with error message
+2. **Validate policy file** (fail early if not provided)
+3. **Create backup directory** (`/var/backups/segmentra`, mode 0700)
+4. **Detect firewall backend** (`nft` / `iptables-restore`) and fail on a backend mismatch
+5. **Back up Segmentra's own state** (`table inet segmentra`, or the `SEGMENTRA-IN/OUT(/FWD)` chains for iptables and ip6tables)
+6. **Copy policy file** to `/etc/segmentra.policy` (mode 0600; `/etc/segmentra.policy6` for IPv6)
+7. **Apply rules** (`nft -f`, replacing only `table inet segmentra`, or the iptables chains and their `INPUT`/`OUTPUT`(/`FORWARD`) jumps)
+8. **On failure: rollback** from this run's backup and fail with an error message
+
+Unlike SSH Direct, the Ansible path has no post-apply reachability check with an automatic revert, and it ignores the canary/progressive gates.
 
 ### Ansible Pros and Cons
 
 | Pros | Cons |
 |------|------|
 | Parallel execution across hosts | Requires Docker container |
-| Better error handling | Requires Docker socket access |
-| Built-in rollback block/rescue | More complex setup |
-| Industry-standard tooling | Slightly slower startup |
-| Detailed per-host reporting | |
+| Built-in rollback block/rescue | Requires Docker socket access (not available with the hardened override) |
+| Industry-standard tooling | No lockout auto-revert, no canary/progressive gates |
+| | More complex setup, slightly slower startup |
 
 ---
 
@@ -563,7 +630,7 @@ The key insight: **the Linux kernel is the sensor**. Every Linux server has netf
 
 ### Step-by-Step
 
-1. Go to **Troubleshoot** in the sidebar
+1. Go to **Troubleshoot** in the sidebar (operator or admin)
 2. Scroll to **Firewall Learning**
 3. Select one or more hosts
 4. Set the duration (e.g., 60 minutes)
@@ -573,50 +640,40 @@ The key insight: **the Linux kernel is the sensor**. Every Linux server has netf
 
 ```
 Time 0:00  ─── Segmentra SSHes into the host
-               1. Backup current rules:
-                  sudo nft list ruleset > /var/backups/segmentra/nft.audit-backup.<ts>
+               1. Back up Segmentra's own state (scoped, like a deployment):
+                  /var/backups/segmentra/nft.audit-backup.<ts>
+                  (or iptables.audit-backup.<ts>)
 
                2. Configure rsyslog:
                   Create /etc/rsyslog.d/99-segmentra-audit.conf
                   Route "FW-AUDIT" kernel messages to /var/log/segmentra-audit-<host>-<ts>.log
-                  Reload rsyslog
+                  Restart rsyslog
 
-               3. Deploy log-only rules:
-                  table inet segmentra_audit {
-                    chain input {
-                      type filter hook input priority 0; policy accept;
-                      log prefix "FW-AUDIT: IN "
-                    }
-                    chain output {
-                      type filter hook output priority 0; policy accept;
-                      log prefix "FW-AUDIT: OUT "
-                    }
-                  }
+               3. Deploy a log-only policy into Segmentra's own table/chains
+                  (table inet segmentra, or SEGMENTRA-IN/OUT/FWD):
+                    every packet is logged with prefix "FW-AUDIT: ..." and accepted
 
-               Result: ALL traffic is logged, NOTHING is blocked
+               Result: ALL traffic is logged, NOTHING is blocked; other tools' rules are untouched
 
-Time 0:01-0:59 ─── Normal traffic flows, kernel logs every packet:
+Time 0:01-0:59 ─── Normal traffic flows, the kernel logs it:
 
-               FW-AUDIT: IN SRC=10.0.1.50 DST=10.0.2.10 PROTO=TCP SPT=44312 DPT=443
-               FW-AUDIT: OUT SRC=10.0.2.10 DST=10.0.1.100 PROTO=TCP SPT=38221 DPT=5432
-               FW-AUDIT: IN SRC=10.0.3.5 DST=10.0.2.10 PROTO=UDP SPT=12345 DPT=53
+               FW-AUDIT: ALLOW: catch-all: IN=eth0 SRC=10.0.1.50 DST=10.0.2.10 PROTO=TCP SPT=44312 DPT=443
                ...
 
-Time 1:00  ─── Background job detects session expired
-               1. SSH in and restore original rules:
-                  sudo nft -f /var/backups/segmentra/nft.audit-backup.<ts>
+Time 1:00  ─── Background job detects the session expired
+               1. SSH in and restore Segmentra's previous state from the backup
+                  (if the restore fails, the session stays RUNNING and is retried)
 
-               2. Retrieve log file via SCP
+               2. Retrieve the log file
 
-               3. Clean up rsyslog config:
-                  sudo rm /etc/rsyslog.d/99-segmentra-audit.conf
-                  sudo systemctl reload rsyslog
+               3. Clean up the rsyslog config and restart rsyslog
 
                4. Parse logs into structured flows:
                   10.0.1.50 → 10.0.2.10 : TCP/443   (1,247 packets, IN)
                   10.0.2.10 → 10.0.1.100 : TCP/5432  (892 packets, OUT)
-                  10.0.3.5  → 10.0.2.10 : UDP/53     (156 packets, IN)
 ```
+
+A running session can also be cancelled from **Active Audit Sessions**, which restores the rules right away.
 
 ### Viewing Results
 
@@ -637,7 +694,7 @@ Run a Firewall Learning session as described above and wait for it to complete.
 
 ### Step 2: Generate Recommendations
 
-In the Troubleshoot page, after viewing audit results, click **Generate Recommendations** (or use the Recommendations page).
+Recommendations are API-only for now (there is no Recommendations page in the UI): `POST /api/recommendations/generate` (operator/admin) with `auditSessionId` and `hostId` of a completed learning session, then list them with `GET /api/recommendations`.
 
 The engine:
 1. Takes each observed traffic flow
@@ -656,7 +713,7 @@ Each recommendation shows:
 
 ### Step 4: Accept or Reject
 
-Review each recommendation individually. Accepted recommendations can then be applied as a DRAFT policy version that goes through normal approval workflow.
+Accept or reject each recommendation (`POST /api/recommendations/:id/accept` or `/reject`). Accepted recommendations can then be applied (`/apply`) as rules in a DRAFT policy version that goes through the normal approval workflow.
 
 ---
 
@@ -666,24 +723,24 @@ Test a specific policy against real traffic before enforcing it.
 
 ### Step 1: Start a Policy Test
 
-Go to **Policy Testing** in the sidebar:
+Go to **Policy Impact Analysis** in the sidebar (operator, approver or admin):
 1. Click **+ Start Policy Test**
-2. Select a **Policy Version** (any status — doesn't need to be APPROVED)
-3. Select a **Target Host**
-4. Set **Duration** (e.g., 30 minutes)
+2. Select a **Policy Version**. Operators can test APPROVED or DEPLOYED versions; approvers and admins can also test DRAFT or PENDING_APPROVAL versions (e.g. while reviewing)
+3. Select a **Target Host** (one running test per host)
+4. Set **Duration (minutes)** (1 to 1440, default 30)
 
 ### Step 2: What Happens
 
-The system deploys the policy in log-only mode (same mechanism as firewall learning), then compares observed traffic against the policy rules.
+The system deploys the policy in log-only mode (same mechanism as firewall learning: nothing is blocked), collects the traffic log and restores the original rules when the timer expires. **Peek Logs** shows the traffic collected so far; **Stop & Collect** ends the test early.
 
 ### Step 3: Analyze Results
 
-Click **Analyze** after the test completes. The analysis shows:
+Click **Analyze** after the test has been collected. The analysis shows:
 
 | Category | Meaning | Color |
 |----------|---------|-------|
 | **Matched Flows** | Traffic that matches an ALLOW rule — expected | Green |
-| **Unexpected Blocks** | Traffic that matches a DENY rule but was actively flowing — would break things | Red |
+| **DENY Rule Hits** | Active traffic that matches a DENY rule — would be blocked | Red |
 | **Unmatched Flows** | Traffic with no matching rule — default-deny would block it | Yellow |
 
 **Coverage percentage** = matched flows / total flows
@@ -720,7 +777,7 @@ The system analyzes all deployed policies on both the source and destination hos
 - Which specific rules match
 - The blocking/allowing rule details
 
-### Policy Lookup
+### Policy Lookup (Search Tools)
 
 - **Search by IP**: Find all policy rules that reference a specific IP address
 - **Host Policies**: View all policies deployed to a specific host
@@ -734,108 +791,76 @@ Detect when hosts have been manually modified after a deployment.
 
 ### How It Works
 
-1. When Segmentra deploys a policy, it stores the SHA-256 hash of the compiled ruleset
-2. The compliance check SSHes into the host and reads current rules (`nft list ruleset` or `iptables-save`)
-3. It hashes the current rules and compares to the stored hash
-4. Status: **Compliant** (match), **Drifted** (mismatch), **Unknown** (never deployed), or **Error** (SSH failure)
+1. Right after a successful deployment, Segmentra reads Segmentra's own live state from the host and stores its hash (`v2:` fingerprint)
+2. The compliance check SSHes into the host and reads the same state again: `table inet segmentra` (nftables) or the `SEGMENTRA-IN/OUT` chains and their jumps (iptables). Rules of other tools (Docker, Kubernetes, fail2ban) are not part of the hash
+3. It hashes the current state and compares it to the stored hash
+4. Status: **compliant** (match), **drifted** (mismatch), **unknown** (never deployed, or last deployed by an older version that hashed the whole ruleset — redeploy once), or **error** (SSH failure)
 
 ### Using Compliance Checks
 
-- **Per-host**: In Inventory, click the compliance check button on a host
-- **Bulk**: Select multiple hosts and click **Bulk Compliance Check**
+- **Per-host**: In Inventory → Hosts, click **Check Compliance** on a host
+- **Bulk**: Select multiple hosts and click **Check Compliance (N)**
 - **API**: `GET /api/compliance/hosts/:hostId` or `POST /api/compliance/hosts/bulk`
 
 ---
 
 ## 17. Integrations
 
-Register and track external security tool integrations. Segmentra provides an administrative registry for managing integration configuration, credentials, and sync status. Actual data exchange with external systems requires custom adapter implementation.
+Go to **Integrations** in the sidebar (admin only) and click **+ New Integration**. Two types are functional:
 
-### Setting Up an Integration
-
-Go to **Integrations** in the sidebar:
-
-1. Click **+ New Integration**
-2. Select **Type**: SIEM, SOAR, Vulnerability DB, or Threat Intelligence
-3. Enter **Provider** (e.g., Splunk, QRadar, Tenable, MISP)
-4. Configure connection details in the **Config JSON**
-5. Optionally link to encrypted **Credentials** from the secret store
-
-### Integration Types
-
-| Type | What It Tracks |
+| Type | What it does |
 |------|-------------|
-| **SIEM** | Configuration for forwarding audit events to your SIEM via syslog/webhook |
-| **SOAR** | Configuration for inbound webhook actions (isolate host, apply emergency policy) |
-| **Vulnerability DB** | Configuration for vulnerability scanner API polling, CVE tracking per host |
-| **Threat Intelligence** | Configuration for threat feeds, IP/CIDR blocklists with confidence scores |
+| **SIEM (Syslog Forwarder)** | Forwards audit events to a syslog receiver (UDP or TCP). Config: `{"host": "siem.company.com", "port": 514, "protocol": "udp", "facility": 13, "severity": 6}`. Every Audit Log entry (deployments, SSH credentials, users and roles, approvals, inventory, LDAP, integrations, ...) is forwarded once to every enabled SIEM integration; see [security.md](security.md) for how it works. |
+| **Threat Intelligence (AbuseIPDB)** | **Sync** downloads the AbuseIPDB blacklist into Segmentra's threat-intel entries. Config: `{"apiKey": "...", "confidenceMinimum": 90, "maxResults": 100, "expiryDays": 7, "autoBlock": false}`. The entries are shown under **Threat Intelligence**. With `autoBlock: true` and `autoBlockPolicySetId`, new malicious IPs are added as DENY rules to a DRAFT version of that policy set (an open auto-block draft is reused; IPs already blocked are skipped), which still needs approval and deployment. |
 
-> **Note:** The integration types above describe the intended data exchange model. The current implementation provides configuration storage and status tracking. Actual connectivity to external systems requires building a custom adapter for each provider.
-
-### Testing & Syncing
-
-- **Test**: Placeholder connectivity check (logs a test event and updates status; does not connect to the external system)
-- **Sync**: Placeholder data sync (logs a sync event and updates status; does not exchange data with the external system)
-- **Events**: View the event log showing all test and sync operations
+**SOAR** and **Vulnerability DB** are listed as *planned* and cannot be selected. **Test** checks the connection (for SIEM it sends a test message), **Sync** runs the threat-intel download, and the event log shows each test and sync. API keys and tokens are masked in API responses.
 
 ---
 
 ## 18. Kubernetes Microsegmentation
 
-Generate Kubernetes NetworkPolicy manifests from Segmentra policies for export and application via `kubectl` or CI/CD pipelines.
+Generate Kubernetes NetworkPolicy manifests from Segmentra policies, to apply with `kubectl` or a CI/CD pipeline. Segmentra does not apply them to the cluster.
 
-### Step 1: Add a Cluster
+### Step 1: Register a Cluster
 
 Go to **Kubernetes** in the sidebar:
-1. Click **+ Add Cluster**
+1. Click **+ Add Cluster** (admin)
 2. Enter the **API Server URL** (e.g., `https://k8s-api.example.com:6443`)
 3. Select **Auth Type**: Kubeconfig, Service Account, or Bearer Token
-4. Store credentials in the secret store
 
-### Step 2: Sync Workloads
+Cluster sync is a placeholder: Segmentra does not call the Kubernetes API, so **Workloads** only shows workloads that were added another way (for example by the demo data). Mapping workload labels to tags is available through the API only (`POST /api/k8s/workloads/:workloadId/map-tag`).
 
-Click **Sync** to discover namespaces, pods, deployments, services, and their labels.
+### Step 2: Generate NetworkPolicy
 
-### Step 3: Map Labels to Tags
-
-Map Kubernetes labels to Segmentra tags for unified policy management. For example, `app=nginx` K8s label → `web-server` Segmentra tag.
-
-### Step 4: Generate NetworkPolicy
-
-Create a Segmentra policy set, get it approved, then generate a Kubernetes NetworkPolicy manifest:
-1. Select the cluster and namespace
-2. The system translates Segmentra rules into K8s NetworkPolicy manifest JSON
-3. The generated manifest is stored for export; apply it to your cluster using `kubectl apply` or your CI/CD pipeline
+1. Select the cluster and click **Generate NetworkPolicy**
+2. Pick an APPROVED or DEPLOYED policy version, the namespace and a policy name
+3. Segmentra builds an **Ingress-only** NetworkPolicy from the version's inbound ALLOW rules (IN/BOTH; sources are resolved to `ipBlock` CIDRs, ports are kept; outbound rules are not emitted because egress is not restricted). DENY, ICMP, FORWARD and other rules that NetworkPolicy cannot express exactly are skipped with a warning instead of being widened
+4. **Copy kubectl apply** or **Download JSON**, and apply it to the cluster yourself
 
 ---
 
 ## 19. OT/IoT Microsegmentation
 
-Manage devices that can't run agents — PLCs, HMIs, sensors, cameras, medical devices, etc.
+Protect devices that can't run agents — PLCs, HMIs, sensors, cameras, medical devices — by enforcing rules on a Linux **gateway** host that routes their traffic. The full walkthrough is in [iot.md](iot.md); the gateway itself is set up as described in [gateway-setup-guide.md](gateway-setup-guide.md).
 
-### Step 1: Add IoT Assets
+### Step 1: Add the Gateway to Inventory
 
-Go to **OT/IoT** in the sidebar:
-1. Click **+ Add Asset**
-2. Enter device details: name, type (PLC/HMI/sensor/camera/etc.), vendor, model, IP, MAC, VLAN, Purdue zone, criticality level
+Add the Linux host that routes traffic to the devices, and give it the system tag `iot-gateway`.
 
-### Step 2: (Optional) Configure Flow Collectors
+### Step 2: Register IoT Devices
 
-Switch to the **Flow Collectors** tab to set up passive traffic collection:
-- Configure NetFlow v5/v9, sFlow, or IPFIX collectors
-- Set listen address and port
-- Observed flows are stored and visible per asset
+Go to **OT/IoT** in the sidebar, **Assets** tab:
+1. Click **+ Add IoT Asset**
+2. Enter name, type, criticality, IP address, MAC, vendor, model and VLAN / zone
+3. Assign the device to its gateway(s) (**+ Assign gateway...**). The **Gateways** tab lists the gateways and the devices they protect.
 
-### Step 3: Configure Enforcement Points
+Once a device is assigned to a gateway, forwarded traffic **to** that device is dropped on the gateway unless a FORWARD rule allows it; other routed traffic is not affected.
 
-Switch to the **Enforcement Points** tab:
-1. Add managed switches or gateway firewalls
-2. Specify vendor (Cisco, Juniper, Arista, etc.), management IP, and SSH credentials
-3. Deploy ACLs to enforce policies on behalf of unmanaged IoT devices
+### Step 3: Create FORWARD Rules and Deploy
 
-### Step 4: Baseline Traffic
+Create a policy set scoped to the gateway (for example the `iot-gateway` tag) and add rules with direction **FORWARD (through gateway)** and a destination (IoT device, CIDR, VLAN, tag or host). Approve and deploy it like any other policy. On nftables the rules go into the `forward` chain of `table inet segmentra`; on iptables into `SEGMENTRA-FWD`.
 
-Select an asset and click **Baseline** to snapshot its current traffic pattern. This captures all observed flows as the "known good" state for future comparison.
+Flow collectors, enforcement points (switch ACLs) and traffic baselines exist only as API endpoints (`/api/flow-collectors`, `/api/enforcement-points`, `POST /api/iot-assets/:id/baseline`); they have no UI.
 
 ---
 
@@ -853,122 +878,56 @@ Select an asset and click **Baseline** to snapshot its current traffic pattern. 
 2. Fill in policy version, targets, mode as usual
 3. Set **Policy Expires At** to the desired expiry date/time
 4. Choose **On Expiry**:
-   - **Notify Only** — sends alert, rules stay active (default)
-   - **Remove** — marks deployment as expired, sends notification requesting manual rollback of firewall rules
-   - **Revert** — marks deployment as expired, sends notification requesting manual redeployment of previous version
-
-Full automated rollback/redeploy is planned for a future release.
+   - **Notify Only** — sends an alert; the rules stay active (default)
+   - **Remove** — automatically removes Segmentra's rules (`table inet segmentra`, or the `SEGMENTRA-*` chains and their jumps) from every host that still runs this deployment's policy
+   - **Revert** — automatically redeploys the previous successfully deployed version of the same policy set to the hosts that ran it, as a new system-created deployment (no new approval, but that version must still be APPROVED or DEPLOYED)
 
 ### What Happens Automatically
 
 - **24 hours before expiry**: A `POLICY_EXPIRING_SOON` notification is sent to subscribed channels
-- **At expiry**: The deployment is marked expired and a `POLICY_EXPIRED` notification is sent to subscribed channels
-- **Audit trail**: Both the warning and expiry are logged in audit events
+- **At expiry** (checked every minute): the deployment is marked expired, the expiry action runs, and a `POLICY_EXPIRED` notification is sent. The per-host result of REMOVE is shown in the **On Expiry** column of the deployment's hosts table
+- **Audit trail**: the warning, the expiry and the action are logged as audit events (actor *system*)
 
-### What Does NOT Happen Automatically
+### Limitations
 
-Segmentra does **not** automatically remove or rollback firewall rules on the target hosts when a deployment expires. The deployed rules remain active on each host until you manually intervene. This is by design — automatic rollback of firewall rules in production carries significant risk (connectivity loss, security gaps during the transition, partial failures across a fleet).
+- If a REMOVE or REVERT action fails on a host, the error is recorded and a notification is sent, but it is **not retried** automatically.
+- REVERT only redeploys to hosts that actually ran the previous version; other hosts keep the expired policy and are listed in the notification.
 
 ### Manually Restoring the Previous Ruleset
 
-When a deployment was created, the existing firewall rules on each host were backed up to `/var/backups/segmentra/` before the new policy was applied. To restore the previous ruleset after expiry:
-
-**Step 1: Find the backup file on the host**
-
-SSH into the host and list the available backups:
+Before every deployment, Segmentra's own state on each host is backed up to `/var/backups/segmentra/`. To roll back by hand (for example after a NOTIFY_ONLY expiry), prefer deploying the previous policy version through Segmentra (below). To restore a backup directly, use `scripts/restore-previous-policy.sh` from the repository:
 
 ```bash
-ls -lt /var/backups/segmentra/
+# Restore the most recent backup on each host
+./scripts/restore-previous-policy.sh --hosts hosts.txt --user segmentra --latest
+
+# Restore a specific backup timestamp (e.g. nft.ruleset.2026-03-18T11-46-05)
+./scripts/restore-previous-policy.sh --hosts hosts.txt --user segmentra --timestamp 2026-03-18T11-46-05
+
+# Show what would be done
+./scripts/restore-previous-policy.sh --hosts hosts.txt --user segmentra --latest --dry-run
 ```
 
-You'll see timestamped backup files:
+Options: `--hosts` (one IP or hostname per line), `--user` (SSH user with sudo), `--timestamp` or `--latest`, `--key` (private key), `--port` (default 22), `--dry-run`.
+
+The script restores only Segmentra's own state (`table inet segmentra`, or the `SEGMENTRA-IN/OUT(/FWD)` chains and their jumps) with the same host scripts the executor uses. It never flushes the ruleset, so rules of Docker, Kubernetes or fail2ban are not touched. Backup files look like this:
+
 ```
--rw------- 1 root root 2048 Mar 18 11:46 nft.ruleset.2026-03-18T11-46
--rw------- 1 root root 1892 Mar 15 09:00 nft.ruleset.2026-03-15T09-00
-```
-
-The most recent backup before the deployment is the one you want.
-
-**Step 2: Restore the backup**
-
-For **nftables** hosts:
-```bash
-# Preview the backup first
-sudo cat /var/backups/segmentra/nft.ruleset.2026-03-18T11-46
-
-# Restore the previous ruleset
-sudo nft flush ruleset
-sudo nft -f /var/backups/segmentra/nft.ruleset.2026-03-18T11-46
+-rw------- 1 root root 2048 Mar 18 11:46 nft.ruleset.2026-03-18T11-46-05
+-rw------- 1 root root 1892 Mar 15 09:00 iptables.2026-03-15T09-00-12
 ```
 
-For **iptables** hosts:
-```bash
-# Preview the backup first
-sudo cat /var/backups/segmentra/iptables.2026-03-18T11-46
-
-# Restore the previous ruleset
-sudo iptables-restore < /var/backups/segmentra/iptables.2026-03-18T11-46
-```
-
-**Step 3: Verify the restore**
-
-```bash
-# For nftables
-sudo nft list ruleset
-
-# For iptables
-sudo iptables -L -n -v
-```
-
-### Restoring at Scale
-
-If the expired deployment targeted many hosts, you can script the restore across your fleet:
-
-```bash
-#!/bin/bash
-# restore-previous-policy.sh
-# Usage: ./restore-previous-policy.sh <hosts-file> <ssh-user> <backup-timestamp>
-#
-# hosts-file: one IP/hostname per line
-# backup-timestamp: e.g., 2026-03-18T11-46
-
-HOSTS_FILE=$1
-SSH_USER=$2
-TIMESTAMP=$3
-BACKUP_DIR="/var/backups/segmentra"
-
-while read -r HOST; do
-  echo "=== Restoring $HOST ==="
-
-  # Detect backend
-  BACKEND=$(ssh "$SSH_USER@$HOST" "command -v nft > /dev/null 2>&1 && echo nft || echo iptables")
-
-  if [ "$BACKEND" = "nft" ]; then
-    BACKUP_FILE="$BACKUP_DIR/nft.ruleset.$TIMESTAMP"
-    ssh "$SSH_USER@$HOST" "sudo nft flush ruleset && sudo nft -f $BACKUP_FILE"
-  else
-    BACKUP_FILE="$BACKUP_DIR/iptables.$TIMESTAMP"
-    ssh "$SSH_USER@$HOST" "sudo iptables-restore < $BACKUP_FILE"
-  fi
-
-  if [ $? -eq 0 ]; then
-    echo "  ✓ Restored successfully"
-  else
-    echo "  ✗ FAILED — check manually"
-  fi
-done < "$HOSTS_FILE"
-```
+Do not restore these files with `nft flush ruleset` / `nft -f` or a plain `iptables-restore`: that would replace other tools' rules too.
 
 ### Alternative: Deploy the Previous Policy Version via Segmentra
 
-Instead of manually restoring backups, you can create a new deployment in Segmentra using the previous policy version:
+Instead of restoring backups, create a new deployment in Segmentra using the previous policy version:
 
 1. Go to **Deployments** → **+ Create Deployment**
 2. Select the **previous policy version** (the one that was active before the expired deployment)
 3. Target the same hosts
-4. This creates a clean, audited redeployment through the normal approval workflow
 
-This is the recommended approach for production environments as it maintains the full audit trail.
+This is the recommended approach for production environments as it keeps the full audit trail.
 
 ---
 
@@ -976,13 +935,17 @@ This is the recommended approach for production environments as it maintains the
 
 ### Setting Up
 
-1. Go to **Notifications** in the sidebar
+1. Go to **Notifications** in the sidebar (admin only)
 2. Click **+ New Channel** and choose:
-   - **Slack** — provide a webhook URL
-   - **Webhook** — provide an endpoint URL and optional auth header
-   - **Email** — provide SMTP settings and recipient (preview — requires SMTP implementation)
+   - **Slack** — provide an incoming webhook URL
+   - **HTTP Webhook** — provide an endpoint URL and optional auth header (Segmentra POSTs JSON)
+   - **Email** is listed as *planned* and cannot be selected yet
 3. Click **Send Test** to verify connectivity
-4. Add **Event Subscriptions** — choose which events trigger notifications on this channel
+4. Under **Event Subscriptions**, click **+ Add Event** to choose which events trigger notifications on this channel
+
+Available events: `POLICY_SUBMITTED`, `POLICY_APPROVED`, `POLICY_REJECTED`, `DEPLOYMENT_STARTED`, `DEPLOYMENT_COMPLETED`, `DEPLOYMENT_FAILED`, `COMPLIANCE_DRIFT`, `POLICY_EXPIRING_SOON`, `POLICY_EXPIRED`, `EXCESSIVE_RULES_DETECTED`. `COMPLIANCE_DRIFT` can be selected but is currently never sent. A subscription's optional filter is stored but not applied yet: every event of the subscribed type is sent. The API also accepts `AUDIT_RESTORE_FAILED` (a firewall-learning restore failed).
+
+Webhook URLs pointing to loopback, link-local or cloud-metadata addresses are refused unless `SEGMENTRA_ALLOW_PRIVATE_WEBHOOKS=true` (RFC1918 addresses are allowed). Webhook URLs and auth headers are masked in API responses.
 
 ### Example Configuration
 
@@ -991,9 +954,6 @@ This is the recommended approach for production environments as it maintains the
 
 **Webhook to SIEM:**
 - Subscribe to: POLICY_APPROVED, POLICY_EXPIRED, EXCESSIVE_RULES_DETECTED
-
-**Email to security team** (preview — requires SMTP implementation):
-- Subscribe to: POLICY_EXPIRING_SOON, COMPLIANCE_DRIFT, EXCESSIVE_RULES_DETECTED
 
 ---
 
@@ -1011,7 +971,7 @@ This is the recommended approach for production environments as it maintains the
 
 | Finding | Severity | Example |
 |---------|----------|---------|
-| SSH open to 0.0.0.0/0 | Critical | Port 22 ALLOW from any source |
+| Sensitive port open to any source | Critical | Port 22 (or RDP, databases, ...) ALLOW from any source |
 | All ports open to any | Critical | Protocol=any, ports=* from 0.0.0.0/0 |
 | Broad CIDR source | High | ALLOW from 10.0.0.0/8 (16M IPs) |
 | Any-protocol rule | High | Protocol=any with no port restriction |
@@ -1030,10 +990,11 @@ Segmentra runs several background jobs automatically:
 |-----|----------|---------|
 | **Stale deployment timeout** | 2 min | Marks hosts as FAILED if stuck in RUNNING > 10 minutes |
 | **Scheduled deployments** | 1 min | Starts deployments scheduled for the current time |
-| **Expired audit sessions** | 1 min | Auto-restores firewall rules when learning sessions expire |
+| **Expired audit sessions** | 1 min | Restores firewall rules and collects logs when learning sessions expire |
 | **Tag rule evaluation** | 5 min | Re-evaluates all enabled auto-tagging rules against hosts |
-| **Policy test expiry** | 1 min | Auto-stops test sessions past their scheduled end time |
-| **Deployment expiry** | 1 min | Processes expired deployments, sends 24h expiry warnings |
+| **Deployment expiry** | 1 min | Runs the expiry action (notify / remove / revert) for expired deployments, sends 24h expiry warnings |
+| **Discovery scheduler** | 1 min | Starts discovery runs whose schedule is due (at startup, runs left RUNNING by a previous process are marked FAILED) |
+| **Policy test expiry** | 1 min | Restores the original rules and collects logs for test sessions past their end time (retried if the restore fails) |
 
 These jobs run as `setInterval` callbacks in the API process — no external scheduler needed.
 
@@ -1043,13 +1004,14 @@ These jobs run as `setInterval` callbacks in the API process — no external sch
 
 | Feature | SSH Direct | Ansible |
 |---------|-----------|---------|
-| **Execution** | Sequential (one host at a time) | Parallel (all hosts simultaneously) |
+| **Execution** | Sequential (one host at a time) | Parallel (all hosts in one playbook run) |
 | **Connection** | Direct SSH from API server | Docker exec → Ansible → SSH to hosts |
-| **Dependencies** | `ssh` + `scp` commands | Docker container + Docker socket |
-| **Rollback** | Manual (restore from backup) | Block/rescue (automatic) |
+| **Dependencies** | `ssh` + `scp` (+ `sshpass` for passwords) | Docker container + Docker socket |
+| **Rollback on apply failure** | Automatic (restore this run's backup) | Automatic (block/rescue) |
+| **Lockout protection** | Scheduled auto-revert, cancelled after a reachability check | None |
+| **Canary / progressive gates** | Yes | No (all hosts at once) |
 | **Logging** | Combined stdout/stderr files | Ansible-format logs |
-| **Setup** | Minimal | Requires `segmentra-ansible-runner` container |
-| **Best for** | Small fleets, simple environments | Large fleets, production environments |
+| **Setup** | Minimal (works with the hardened compose override) | Requires `segmentra-ansible-runner` container |
 
 ---
 
@@ -1088,17 +1050,24 @@ APPROVED, DEPLOYED and PENDING_APPROVAL versions can be moved to ARCHIVED (read-
 Before Segmentra:                After Segmentra:
 ─────────────────                ────────────────
 
-No rules / unknown rules    →    /etc/segmentra.policy (compiled rules)
-No backups                  →    /var/backups/segmentra/
-                                   nft.ruleset.20260316143025
-                                   nft.ruleset.20260315090000
+Existing rules (Docker, etc.)  →  unchanged; Segmentra adds table inet segmentra
+                                   (or SEGMENTRA-IN/OUT/FWD chains + jumps)
+                                 /etc/segmentra.policy (compiled rules)
+No backups                     →  /var/backups/segmentra/
+                                   nft.ruleset.2026-03-16T14-30-25
+                                   nft.ruleset.2026-03-15T09-00-00
                                    ... (timestamped backups)
 ```
 
 **Files created on target hosts:**
-- `/etc/segmentra.policy` — Current active policy (0600)
+- `/etc/segmentra.policy` — Current active policy (0600); `/etc/segmentra.policy6` — IPv6 rules on iptables hosts
 - `/var/backups/segmentra/` — Backup directory (0700)
-- `/var/backups/segmentra/nft.ruleset.<timestamp>` — nftables backups
-- `/var/backups/segmentra/iptables.<timestamp>` — iptables backups
+- `/var/backups/segmentra/nft.ruleset.<timestamp>` — nftables backups (`table inet segmentra` only)
+- `/var/backups/segmentra/iptables.<timestamp>` / `ip6tables.<timestamp>` — iptables backups (Segmentra chains; the full `iptables-save` is kept as `<file>.full`)
+- `/var/backups/segmentra/segmentra-nft.sh`, `segmentra-iptables.sh` — helper scripts used for unattended restores (they are never run at boot)
+- Reboot persistence, written into the distribution's own files (see [Persistence across reboots](../README.md#persistence-across-reboots)):
+  - nftables: `/etc/nftables.d/segmentra.nft` (Debian/Ubuntu) or `/etc/nftables/segmentra.nft` (RHEL family), plus one `include` line (with a `# managed by Segmentra` marker) at the end of `/etc/nftables.conf` or `/etc/sysconfig/nftables.conf`
+  - iptables: Segmentra's chains and jumps merged into `/etc/iptables/rules.v4` / `rules.v6` (Debian/Ubuntu) or `/etc/sysconfig/iptables` / `ip6tables` (RHEL family); all other lines are left unchanged
+  - `/var/backups/segmentra/persist/` — previous version of each of those files before Segmentra changed it
 - `/var/log/segmentra-audit-<host>-<ts>.log` — Firewall learning logs (temporary, during audit sessions only)
 - `/etc/rsyslog.d/99-segmentra-audit.conf` — Rsyslog config (temporary, during audit sessions only)

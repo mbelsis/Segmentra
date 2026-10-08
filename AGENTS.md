@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-Segmentra is a Node.js workspace monorepo. Application code lives in `apps/`: `apps/web` is the Vite + React frontend, and `apps/api` is the TypeScript/Express backend. Shared domain logic lives in `packages/`: `shared` for common types/schemas, `compiler` and `executor` for policy-processing logic, and `db` for migrations and seed scripts. Repository docs are in `docs/`, with broader design references at the repo root.
+Segmentra is a Node.js workspace monorepo. Application code lives in `apps/`: `apps/web` is the Vite + React frontend, and `apps/api` is the TypeScript/Express backend. Shared domain logic lives in `packages/`: `shared` for common types/schemas, `compiler` and `executor` for policy-processing logic, and `db` for migrations and seed scripts. Repository docs are in `docs/` (start with `README.md` and `docs/Architecture.md`; `docs/segmentra_fleet_microsegmentation_firewall_manager_full_specification.md` is the original specification). Container images and compose files live in `infra/` and the repo root (`docker-compose.yml`, hardened override `docker-compose.hardened.yml`).
 
 ## Build, Test, and Development Commands
 - `npm install`: install workspace dependencies from the repo root.

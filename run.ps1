@@ -143,7 +143,28 @@ if ($Mode -eq "development") {
         }
         "stop" {
             Write-Host "[segmentra] Stopping development environment..."
-            Get-Process -Name "node" -ErrorAction SilentlyContinue | Where-Object { $_.Path -match "segmentra" } | Stop-Process -Force -ErrorAction SilentlyContinue
+            # Node processes started from this checkout. The node.exe path never contains the
+            # repository, so match on the command line (vite runs from the repo path) and on the
+            # dev ports 8080 (API: node --watch dist/index.js) and 5173 (UI), in case a background
+            # job left an orphaned node process behind.
+            $root = [regex]::Escape($PSScriptRoot)
+            $pids = @()
+            $pids += Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue |
+                Where-Object { $_.CommandLine -match $root } |
+                ForEach-Object { $_.ProcessId }
+            $portPids = Get-NetTCPConnection -State Listen -LocalPort 8080, 5173 -ErrorAction SilentlyContinue |
+                ForEach-Object { $_.OwningProcess } |
+                Where-Object { (Get-Process -Id $_ -ErrorAction SilentlyContinue).ProcessName -eq 'node' }
+            foreach ($p in $portPids) {
+                # Also stop the node parents (node --watch restarts its child; npm run waits on it).
+                $cur = $p
+                for ($depth = 0; $depth -lt 3 -and $cur; $depth++) {
+                    $pids += $cur
+                    $parent = (Get-CimInstance Win32_Process -Filter "ProcessId = $cur" -ErrorAction SilentlyContinue).ParentProcessId
+                    $cur = if ($parent -and (Get-Process -Id $parent -ErrorAction SilentlyContinue).ProcessName -eq 'node') { $parent } else { $null }
+                }
+            }
+            $pids | Sort-Object -Unique | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
             docker compose stop segmentra-db
             Write-Host "  All services stopped"
         }

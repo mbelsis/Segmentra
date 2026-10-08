@@ -12,19 +12,22 @@ Segmentra uses an Ansible playbook to deploy firewall policies to target hosts. 
 
 ## How It's Invoked
 
-The API invokes the playbook programmatically when a deployment is started:
+The API invokes the playbook programmatically when a deployment is started and the deployment executor (Admin → Deployment Executor) is set to Ansible. The container name comes from `ANSIBLE_RUNNER_CONTAINER` (default `segmentra-ansible-runner`):
 
 ```typescript
 runAnsiblePlaybook({
   runnerContainer: 'segmentra-ansible-runner',
   inventoryPath: `/bundles/${deploymentId}/inventory.ini`,
   playbookPath: `/runner/playbooks/apply-firewall.yml`,
+  agentKeys,      // passphrase-protected keys to load into ssh-agent (may be empty)
   stdoutPath,
   stderrPath
 })
 ```
 
 ## Playbook Execution Flow
+
+The order below is simplified; see the playbook for the exact task list.
 
 ### 1. **Backup Directory Creation**
 
@@ -41,8 +44,8 @@ The backend comes from the compiled policy file (`.nft` or `.iptables`, set by t
 
 Before applying, the playbook backs up only what Segmentra owns, using the `segmentra-nft.sh` / `segmentra-iptables.sh` scripts in `playbooks/files/`:
 
-- **nftables:** `table inet segmentra` (or a marker that it didn't exist) to `/var/backups/segmentra/nft.ruleset.<timestamp>`. A full `nft list ruleset` is also saved as `<file>.full`, for reference only.
-- **iptables / ip6tables:** the `SEGMENTRA-IN` / `SEGMENTRA-OUT` chains and whether their `INPUT` / `OUTPUT` jumps existed, to `/var/backups/segmentra/iptables.<timestamp>` (and `ip6tables.<timestamp>`). The full `iptables-save` is kept as `<file>.full`.
+- **nftables:** `table inet segmentra` (or a marker that it didn't exist) to `/var/backups/segmentra/nft.ruleset.<timestamp>`. A full `nft list ruleset` is also saved as `<file>.full`, for reference only. If `/etc/nftables.conf` exists it is copied to `/var/backups/segmentra/nftables.conf.<timestamp>`.
+- **iptables / ip6tables:** the `SEGMENTRA-IN` / `SEGMENTRA-OUT` chains (and `SEGMENTRA-FWD` on gateways that filter forwarded traffic) and whether their `INPUT` / `OUTPUT` / `FORWARD` jumps existed, to `/var/backups/segmentra/iptables.<timestamp>` (and `ip6tables.<timestamp>` when `ip6tables-save` / `ip6tables-restore` are installed). The full `iptables-save` is kept as `<file>.full`, for reference only.
 
 **Timestamp format:** `YYYY-MM-DDTHH-MM-SS`
 
@@ -64,11 +67,15 @@ The compiled policy file is copied from the deployment bundle to the target host
 ### 6. **Apply Firewall Rules**
 
 - **nftables:** `nft -f /etc/segmentra.policy`. The file replaces `table inet segmentra` atomically; other tables are untouched.
-- **iptables:** `iptables-restore --noflush` fills only `SEGMENTRA-IN` / `SEGMENTRA-OUT`, then a single jump is inserted at the top of `INPUT` / `OUTPUT`. Other chains and the built-in policies are untouched. The IPv6 file (`segmentra_ip6_policy_file`) is applied the same way with `ip6tables-restore`.
+- **iptables:** `iptables-restore --noflush` fills only `SEGMENTRA-IN` / `SEGMENTRA-OUT` (and `SEGMENTRA-FWD` when the policy has FORWARD rules), then a single jump is inserted at the top of `INPUT` / `OUTPUT` (and `FORWARD`). Segmentra's chains end in `RETURN`, so traffic they don't decide continues through the rest of the built-in chain. Other chains and the built-in chain policies are untouched. If the policy no longer has FORWARD rules, an existing `SEGMENTRA-FWD` chain and its jump are removed. The IPv6 file (`segmentra_ip6_policy_file`, copied to `/etc/segmentra.policy6`) is applied the same way with `ip6tables-restore`; if `ip6tables-restore` is missing, a warning is logged and only IPv4 is applied.
+
+### 6b. **Reboot persistence (distribution's own service)**
+
+After a successful apply, `files/segmentra-nft.sh persist` / `files/segmentra-iptables.sh persist iptables|ip6tables` copy Segmentra's live state into the files the distribution loads at boot: `/etc/nftables.d/segmentra.nft` (Debian/Ubuntu) or `/etc/nftables/segmentra.nft` (RHEL family) plus one `include` line in `/etc/nftables.conf` / `/etc/sysconfig/nftables.conf`, or Segmentra's lines merged into `/etc/iptables/rules.v4|v6` (iptables-persistent) or `/etc/sysconfig/iptables|ip6tables` (iptables-services). The matching service is enabled, never started. Nothing is installed and firewalld is never disabled; with firewalld active, a missing package or an unsupported distribution the task prints `SEGMENTRA_PERSIST_WARN …` lines and the play continues (these tasks never fail a host). The `Show reboot persistence result` task prints the result; the API records it per host with a read-only check after the run ("Survives reboot" column). See [Persistence across reboots](../README.md#persistence-across-reboots).
 
 ### 7. **Automatic Rollback on Failure**
 
-If applying fails, the playbook restores this run's backup with the same scripts. Only Segmentra's own table or chains are put back to their previous state; Docker, Kubernetes and fail2ban rules are never replaced. The rescue reports whether the rollback itself succeeded.
+If applying fails, the playbook restores this run's backup with the same scripts. Only Segmentra's own table or chains are put back to their previous state; Docker, Kubernetes and fail2ban rules are never replaced. The rescue then re-syncs reboot persistence to the restored state and reports whether the rollback itself succeeded.
 
 Hosts still on the old full-table iptables design (before chain-based policies) get a full restore of the `filter` table only. The `nat` and other tables are not touched.
 
@@ -80,18 +87,28 @@ The playbook uses a dynamically generated Ansible inventory file for each deploy
 **Example inventory entry:**
 ```ini
 [all]
-server1 ansible_host=10.0.0.1 ansible_port=22 ansible_user=admin ansible_ssh_private_key_file=/bundles/<deploymentId>/ssh_key ansible_become=yes ansible_become_method=sudo segmentra_policy_file=/bundles/<deploymentId>/host_rules/server1.nft
-server2 ansible_host=10.0.0.2 ansible_port=2222 ansible_user=admin ansible_ssh_private_key_file=/bundles/<deploymentId>/ssh_key ansible_become=yes ansible_become_method=sudo segmentra_policy_file=/bundles/<deploymentId>/host_rules/server2.iptables
+server1 ansible_host=10.0.0.1 ansible_user=admin ansible_port=22 ansible_ssh_private_key_file=/bundles/<deploymentId>/.secrets/ssh_key_<credentialId>_... ansible_become=yes ansible_become_method=sudo segmentra_policy_file=/bundles/<deploymentId>/host_rules/server1.nft
+server2 ansible_host=10.0.0.2 ansible_user=admin ansible_port=2222 ansible_connection=ssh ansible_become=yes ansible_become_method=sudo segmentra_policy_file=/bundles/<deploymentId>/host_rules/server2.iptables segmentra_ip6_policy_file=/bundles/<deploymentId>/host_rules/server2.ip6tables
 ```
 
 **Key variables:**
 - `ansible_host`: Management IP address of the host
 - `ansible_port`: SSH port (from host's `ssh_port` field, default: 22)
-- `ansible_user`: SSH username (from SSH credentials)
-- `ansible_ssh_private_key_file`: Path to SSH private key in the bundle
+- `ansible_user`: SSH username (from the host's effective SSH credential)
+- `ansible_ssh_private_key_file`: Path to the key file in the bundle (key credentials only; one file per credential)
+- `ansible_connection=ssh`: set for password credentials
 - `ansible_become=yes`: Enables privilege escalation (sudo)
 - `ansible_become_method=sudo`: Uses sudo for privilege escalation
 - `segmentra_policy_file`: Path to the host-specific compiled policy file
+- `segmentra_ip6_policy_file`: iptables hosts only, when the policy has IPv6 rules
+
+Each host uses its effective SSH credential (explicit assignment, then host-, tag-, VLAN- and global-scoped credentials; see [security.md](security.md#how-secrets-are-used-when-connecting-to-hosts)).
+
+**Passwords are never written into the inventory.** For password credentials, `ansible_password` and `ansible_become_password` are written to `/bundles/<deploymentId>/host_vars/<hostname>.yml` (`0600`, directory `0700`). The become password is the configured sudo password (login password or separate sudo password); with *sudo without password* the login password is still provided and only sent if sudo prompts. For key credentials with a separate sudo password, only `ansible_become_password` is written there.
+
+**Passphrase-protected keys:** the key file stays encrypted on disk. The playbook then runs under `ssh-agent` inside the runner; each passphrase is passed to `docker exec` as an environment variable (`SEGMENTRA_KP_<n>`) and piped to `ssh-add`, so it never touches disk or a command line. A `<key>.pub` file is written next to the key so `ssh` uses the agent.
+
+Key files, `.pub` files and `host_vars` files are deleted as soon as the playbook finishes, whether it succeeded or failed.
 
 ## Deployment Bundle Structure
 
@@ -100,11 +117,15 @@ Each deployment creates a bundle directory with the following structure:
 ```
 /bundles/<deploymentId>/
 ├── inventory.ini              # Ansible inventory file
-├── ssh_key                    # SSH private key (0600 permissions)
 ├── manifest.json              # Deployment metadata
+├── ansible.stdout.log         # playbook output (ssh.stdout.log with the SSH executor)
+├── ansible.stderr.log
+├── .secrets/                  # key files (0600, dir 0700) - only while the playbook runs
+├── host_vars/<hostname>.yml   # passwords (0600) - only while the playbook runs
 └── host_rules/
     ├── server1.nft            # nftables policy for server1
-    ├── server2.iptables      # iptables policy for server2
+    ├── server2.iptables       # iptables policy for server2
+    ├── server2.ip6tables      # optional IPv6 rules for server2
     └── ...
 ```
 
@@ -119,11 +140,12 @@ The playbook includes comprehensive error handling:
 
 ## Security Considerations
 
-- **SSH Key Permissions**: SSH private keys are stored with `0600` permissions
+- **SSH Key Permissions**: SSH private keys are written with `0600` permissions and removed after the run
 - **Policy File Permissions**: Policy files on hosts are set to `0600` (owner read/write only)
 - **Backup Directory**: Backup directory has `0700` permissions (owner access only)
 - **Privilege Escalation**: Uses `sudo` with `become: true` for all privileged operations
-- **SSH Key Storage**: Keys are stored in deployment bundles, not on target hosts
+- **SSH Key Storage**: Keys are written to the deployment bundle only for the duration of the run, never to target hosts
+- **sudo rights**: the playbook runs every task with `become`, so the account needs full sudo rights (`ALL`); a sudoers rule limited to `nft` / `iptables` is not enough
 
 ## Execution Environment
 
@@ -169,8 +191,8 @@ GET /api/executions/:executionId/logs
    - Verify SSH port is correct
 
 2. **Permission Denied**
-   - Ensure SSH user has sudo privileges
-   - Verify `ansible_become=yes` is set in inventory
+   - Ensure the SSH user has full sudo rights and that the credential's privilege escalation setting (sudo without password / with the login password / with a separate password) matches the host
+   - Run **Check Readiness** on the host: it reports sudo problems (password required, wrong password, `requiretty`, not permitted)
 
 3. **Policy File Not Found**
    - Check that policy compilation succeeded
@@ -182,11 +204,11 @@ GET /api/executions/:executionId/logs
 
 ## Best Practices
 
-1. **Always test policies** in a canary deployment before full rollout
+1. **Test policies first** with Policy Impact Analysis, or deploy to a small set of hosts before the whole fleet
 2. **Monitor deployment logs** for any warnings or errors
-3. **Keep backups** - the playbook creates backups, but consider additional backup strategies
-4. **Verify SSH access** before deploying to ensure connectivity
-5. **Use progressive deployments** for large fleets to minimize risk
+3. **Keep backups** - the playbook backs up only Segmentra's own table/chains; use your own backups for the rest of the host configuration
+4. **Verify SSH access** before deploying (Check Readiness)
+5. **Canary and progressive modes** are enforced only by the SSH Direct executor (hosts one by one, halting on failure). The Ansible executor deploys all hosts of a deployment in a single playbook run
 
 ---
 
@@ -194,18 +216,20 @@ GET /api/executions/:executionId/logs
 
 ### Policy Testing Mode
 
-Segmentra can deploy policies in **log-only mode** for pre-enforcement testing. This uses the same compiler infrastructure but with `logOnlyMode: true`, which:
-- Sets default policy to ACCEPT (nothing gets blocked)
-- Adds logging rules that capture all traffic with `FW-AUDIT` prefix
+Segmentra can deploy policies in **log-only mode** for pre-enforcement testing (Policy Impact Analysis and Firewall Learning). This uses the same compiler with `logOnlyMode: true`, which:
+- Accepts all traffic (nothing gets blocked)
+- Logs matching traffic with an `FW-AUDIT` prefix
 - Allows the policy test analyzer to compare observed flows against policy rules
 
-The Ansible playbook handles log-only policies identically to enforcement policies — the difference is entirely in the compiled ruleset content.
+Log-only policies are always applied over direct SSH (`packages/executor/src/audit-ssh.ts`), not through the Ansible playbook, regardless of the deployment executor setting.
 
 ### Kubernetes NetworkPolicy Deployment
 
-For Kubernetes environments, Segmentra generates and applies NetworkPolicy manifests directly via the K8s API — **the Ansible playbook is not used** for container microsegmentation. This is a separate deployment path through the `packages/k8s-executor` concept.
+For Kubernetes clusters, Segmentra generates a NetworkPolicy manifest (Ingress only) from an approved policy version and stores it for you to apply with `kubectl`; it does not connect to the cluster, and **the Ansible playbook is not used**. See [kubernetes.md](kubernetes.md).
 
 ### OT/IoT ACL Deployment
 
-For OT/IoT enforcement, Segmentra deploys vendor-specific ACLs to switches and gateways via SSH. This uses the same SSH credential infrastructure as host deployments but with a different compilation target (vendor ACL syntax vs. nftables/iptables).
+Linux IoT/OT gateways are regular inventory hosts: their FORWARD rules are compiled into the same nftables/iptables policy and deployed by this playbook (or the SSH executor). See [iot.md](iot.md).
+
+Enforcement points (switches, firewalls) are not configured by Segmentra: `POST /api/enforcement-points/:id/deploy-acl` only records an ACL with status `PENDING` for manual application on the device.
 

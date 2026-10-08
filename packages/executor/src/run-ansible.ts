@@ -33,6 +33,39 @@ export function ansibleAgentWrapper(keys: Array<{ keyPath: string }>): string {
   return lines.join('\n');
 }
 
+export interface AnsibleHostOutcome {
+  ok: boolean;
+  /** Last "fatal: [host]: ... msg" (or unreachable) text for the host, if any. */
+  error?: string;
+}
+
+/**
+ * Per-host outcome of an ansible-playbook run, from its stdout. The play runs with
+ * any_errors_fatal=false, so one failing host must not mark the others failed: a host is ok
+ * when its PLAY RECAP line shows failed=0 and unreachable=0. Hosts without a recap line are
+ * absent from the map (the caller then falls back to the overall exit code).
+ */
+export function parseAnsibleRecap(stdout: string): Map<string, AnsibleHostOutcome> {
+  const out = new Map<string, AnsibleHostOutcome>();
+  const recapIdx = stdout.lastIndexOf('PLAY RECAP');
+  if (recapIdx < 0) return out;
+  const errors = new Map<string, string>();
+  const errRe = /^(?:fatal|failed): \[([^\]]+)\]: (UNREACHABLE! |FAILED! )?=> (.*)$/gm;
+  let m: RegExpExecArray | null;
+  while ((m = errRe.exec(stdout.slice(0, recapIdx))) !== null) {
+    let msg = m[3];
+    try { const j = JSON.parse(msg); msg = String(j.msg ?? j.stderr ?? msg); } catch { /* keep raw */ }
+    errors.set(m[1], `${m[2] ? m[2].trim().replace(/!$/, '') + ': ' : ''}${msg}`.trim());
+  }
+  const lineRe = /^(\S+)\s+:\s+ok=\d+\s+changed=\d+\s+unreachable=(\d+)\s+failed=(\d+)/gm;
+  const recap = stdout.slice(recapIdx);
+  while ((m = lineRe.exec(recap)) !== null) {
+    const ok = Number(m[2]) === 0 && Number(m[3]) === 0;
+    out.set(m[1], ok ? { ok } : { ok, error: errors.get(m[1]) });
+  }
+  return out;
+}
+
 export async function runAnsiblePlaybook(params: {
   runnerContainer: string;
   inventoryPath: string; // path inside runner container

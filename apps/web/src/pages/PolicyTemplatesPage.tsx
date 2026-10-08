@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import { api, errorMessage } from '../lib/api';
 import { useAuth, hasRole } from '../lib/auth-context';
 
+const EMPTY_RULE_FORM = { direction: 'IN', action: 'ALLOW', protocol: 'tcp', ports: '', sourceType: 'CIDR', sourceValue: '0.0.0.0/0', logMode: 'NONE', comment: '', destinationType: 'CIDR', destinationValue: '' };
+
 export function PolicyTemplatesPage() {
   const { roles } = useAuth();
   const canManage = hasRole(roles, 'operator', 'admin');
@@ -15,7 +17,9 @@ export function PolicyTemplatesPage() {
   const [selectedTemplate, setSelectedTemplate] = useState<any>(null);
   const [templateRules, setTemplateRules] = useState<any[]>([]);
   const [form, setForm] = useState({ name: '', description: '', category: '', targetTagId: '', autoApply: false, interfaceScopeType: 'INTERFACE_ROLE' as string });
-  const [ruleForm, setRuleForm] = useState({ direction: 'IN', action: 'ALLOW', protocol: 'tcp', ports: '', sourceType: 'CIDR', sourceValue: '0.0.0.0/0', logMode: 'NONE', comment: '' });
+  const [ruleForm, setRuleForm] = useState(EMPTY_RULE_FORM);
+  // Pickers for FORWARD rule destinations (loaded on first use)
+  const [destOptions, setDestOptions] = useState<{ vlans: any[]; hosts: any[]; iotAssets: any[] } | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -59,8 +63,31 @@ export function PolicyTemplatesPage() {
     } catch (e: any) { setError(errorMessage(e)); }
   };
 
+  useEffect(() => {
+    const needed = ruleForm.direction === 'FORWARD' || templateRules.some((r) => r.direction === 'FORWARD');
+    if (!needed || destOptions) return;
+    Promise.all([
+      api.vlans().then((r) => r.vlans).catch(() => []),
+      api.allHosts().then((r) => r.hosts).catch(() => []),
+      api.iot.assets().then((r) => r.assets).catch(() => []),
+    ]).then(([vlans, hosts, iotAssets]) => setDestOptions({ vlans, hosts, iotAssets }));
+  }, [ruleForm.direction, templateRules, destOptions]);
+
+  const describeDestination = (type: string, value: string) => {
+    if (type === 'TAG') return tags.find((t) => t.id === value)?.name ?? value;
+    if (type === 'VLAN') { const v = destOptions?.vlans.find((x) => x.id === value); return v ? `${v.name} (${v.vlan_tag})` : value; }
+    if (type === 'HOST') return destOptions?.hosts.find((x) => x.id === value)?.hostname ?? value;
+    if (type === 'IOT_ASSET') return destOptions?.iotAssets.find((x) => x.id === value)?.name ?? value;
+    return value;
+  };
+
   const addRule = async () => {
     if (!selectedTemplate) return;
+    const isForward = ruleForm.direction === 'FORWARD';
+    if (isForward && !ruleForm.destinationValue.trim()) {
+      setError('FORWARD rules need a destination');
+      return;
+    }
     try {
       await api.templates.addRule(selectedTemplate.id, {
         orderIndex: templateRules.length,
@@ -72,10 +99,11 @@ export function PolicyTemplatesPage() {
         sourceValue: ruleForm.sourceValue,
         logMode: ruleForm.logMode,
         comment: ruleForm.comment || undefined,
+        ...(isForward ? { destinationType: ruleForm.destinationType, destinationValue: ruleForm.destinationValue.trim() } : {}),
       });
       const res = await api.templates.get(selectedTemplate.id);
       setTemplateRules(res.rules);
-      setRuleForm({ direction: 'IN', action: 'ALLOW', protocol: 'tcp', ports: '', sourceType: 'CIDR', sourceValue: '0.0.0.0/0', logMode: 'NONE', comment: '' });
+      setRuleForm(EMPTY_RULE_FORM);
     } catch (e: any) { setError(errorMessage(e)); }
   };
 
@@ -254,7 +282,7 @@ export function PolicyTemplatesPage() {
             )}
             {templateRules.length > 0 && (
             <table className="data-table" style={{ fontSize: '0.9em' }}>
-              <thead><tr><th>#</th><th>Dir</th><th>Action</th><th>Proto</th><th>Ports</th><th>Source</th><th>Comment</th>{canManage && <th style={{ width: 40 }}></th>}</tr></thead>
+              <thead><tr><th>#</th><th>Dir</th><th>Action</th><th>Proto</th><th>Ports</th><th>Source</th><th>Destination</th><th>Comment</th>{canManage && <th style={{ width: 40 }}></th>}</tr></thead>
               <tbody>
                 {templateRules.map(r => (
                   <tr key={r.id}>
@@ -264,6 +292,7 @@ export function PolicyTemplatesPage() {
                     <td>{r.protocol}</td>
                     <td><code style={{ background: '#f0ebe2', padding: '1px 4px', borderRadius: 3, fontSize: '0.9em' }}>{r.ports || '*'}</code></td>
                     <td style={{ fontSize: '12px' }}>{r.source_type}:{r.source_value}</td>
+                    <td style={{ fontSize: '12px' }}>{r.direction === 'FORWARD' && r.destination_type ? `${r.destination_type === 'IOT_ASSET' ? 'IoT device' : r.destination_type}:${describeDestination(r.destination_type, r.destination_value)}` : ''}</td>
                     <td style={{ color: '#78644e', fontSize: '12px' }}>{r.comment || ''}</td>
                     {canManage && (
                       <td>
@@ -287,6 +316,7 @@ export function PolicyTemplatesPage() {
                 <div><label style={{ fontSize: '11px', color: '#78644e', display: 'block', marginBottom: 2 }}>Direction</label>
                 <select value={ruleForm.direction} onChange={e => setRuleForm(f => ({ ...f, direction: e.target.value }))} style={{ width: '100%' }}>
                   <option value="IN">IN</option><option value="OUT">OUT</option><option value="BOTH">BOTH</option>
+                  <option value="FORWARD">FORWARD (through gateway)</option>
                 </select></div>
                 <div><label style={{ fontSize: '11px', color: '#78644e', display: 'block', marginBottom: 2 }}>Action</label>
                 <select value={ruleForm.action} onChange={e => setRuleForm(f => ({ ...f, action: e.target.value }))} style={{ width: '100%' }}>
@@ -304,6 +334,24 @@ export function PolicyTemplatesPage() {
                 </select></div>
                 <div><label style={{ fontSize: '11px', color: '#78644e', display: 'block', marginBottom: 2 }}>Source Value</label>
                 <input placeholder="e.g., 0.0.0.0/0" value={ruleForm.sourceValue} onChange={e => setRuleForm(f => ({ ...f, sourceValue: e.target.value }))} style={{ width: '100%' }} /></div>
+                {ruleForm.direction === 'FORWARD' && <>
+                <div><label style={{ fontSize: '11px', color: '#78644e', display: 'block', marginBottom: 2 }}>Destination Type</label>
+                <select value={ruleForm.destinationType} onChange={e => setRuleForm(f => ({ ...f, destinationType: e.target.value, destinationValue: '' }))} style={{ width: '100%' }}>
+                  <option value="CIDR">CIDR</option><option value="IOT_ASSET">IoT device</option><option value="VLAN">VLAN</option><option value="TAG">TAG</option><option value="HOST">HOST</option>
+                </select></div>
+                <div><label style={{ fontSize: '11px', color: '#78644e', display: 'block', marginBottom: 2 }}>Destination Value</label>
+                {ruleForm.destinationType === 'CIDR' ? (
+                  <input placeholder="e.g., 172.31.0.0/24" value={ruleForm.destinationValue} onChange={e => setRuleForm(f => ({ ...f, destinationValue: e.target.value }))} style={{ width: '100%' }} />
+                ) : (
+                  <select value={ruleForm.destinationValue} onChange={e => setRuleForm(f => ({ ...f, destinationValue: e.target.value }))} style={{ width: '100%' }}>
+                    <option value="">Select…</option>
+                    {ruleForm.destinationType === 'TAG' && tags.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                    {ruleForm.destinationType === 'VLAN' && (destOptions?.vlans ?? []).map((v) => <option key={v.id} value={v.id}>{v.name} ({v.vlan_tag})</option>)}
+                    {ruleForm.destinationType === 'HOST' && (destOptions?.hosts ?? []).map((h) => <option key={h.id} value={h.id}>{h.hostname}{h.mgmt_ip ? ` (${h.mgmt_ip})` : ''}</option>)}
+                    {ruleForm.destinationType === 'IOT_ASSET' && (destOptions?.iotAssets ?? []).map((a) => <option key={a.id} value={a.id}>{a.name}{a.ip_address ? ` (${a.ip_address})` : ' (no IP)'}</option>)}
+                  </select>
+                )}</div>
+                </>}
                 <div><label style={{ fontSize: '11px', color: '#78644e', display: 'block', marginBottom: 2 }}>Comment</label>
                 <input placeholder="Optional" value={ruleForm.comment} onChange={e => setRuleForm(f => ({ ...f, comment: e.target.value }))} style={{ width: '100%' }} /></div>
                 <div style={{ display: 'flex', alignItems: 'flex-end' }}>

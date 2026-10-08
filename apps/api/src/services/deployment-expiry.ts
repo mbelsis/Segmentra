@@ -157,6 +157,17 @@ async function handleRemove(dep: any, hosts: ExpiringHost[]): Promise<{ outcome:
       exitCode = r.exitCode;
       const lastErr = String(r.stderr || '').trim().split('\n').filter(Boolean).pop() ?? '';
       message = r.success ? 'Segmentra rules removed' : `Removal failed (exit ${r.exitCode})${lastErr ? `: ${lastErr}` : ''}`;
+      if (r.success && r.persistence && r.persistence.status !== 'unknown') {
+        // Segmentra's part of the distribution's boot configuration is removed as well.
+        const pw = [...r.persistence.warnings.filter((w) => !w.startsWith('unsupported_distro'))];
+        if (r.persistence.status === 'removed') message += ' (also removed from the boot configuration)';
+        else if (pw.length) message += ` (boot configuration: ${pw.join('; ')})`;
+        await pool.query(
+          `UPDATE deployment_hosts SET persistence_status='removed', persistence_message=$3
+           WHERE deployment_id=$1 AND host_id=$2`,
+          [dep.id, h.host_id, truncate(`Removed by the expiry REMOVE action; the rules do not come back after a reboot`, 2000)]
+        );
+      }
     } catch (e: any) {
       message = `Removal failed: ${e?.message ?? String(e)}`;
     } finally {

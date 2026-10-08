@@ -153,7 +153,7 @@ The default deployment executor is **Ansible**, which requires the Ansible runne
 docker compose up -d segmentra-ansible-runner
 ```
 
-Alternatively, switch to **SSH Direct** executor in the UI: **Admin → Deployment Executor → SSH**.
+Alternatively, switch to the **SSH Direct** executor in the UI: **Admin → Deployment Executor → SSH Direct**.
 
 ---
 
@@ -164,6 +164,7 @@ Alternatively, switch to **SSH Direct** executor in the UI: **Admin → Deployme
 - **Docker Engine** + **docker compose** (v2)
 - Linux host recommended
 - Network access from Segmentra to managed hosts (SSH, port 22)
+- On managed hosts: an account with full sudo rights, `nft` or `iptables`, and, for rules that survive a reboot, the distribution's own persistence service: Debian/Ubuntu `nftables` (nftables backend) or `iptables-persistent` (iptables backend); RHEL/Rocky/Alma `nftables` or `iptables-services` **with firewalld disabled**. Segmentra never installs these packages or disables firewalld; it reports what is missing (readiness check, "Survives reboot" column). See [guide.md](guide.md#on-target-linux-hosts) and [Persistence across reboots](../README.md#persistence-across-reboots).
 
 ### Docker Architecture
 
@@ -229,7 +230,7 @@ DOCKER_GID=
 > **Security notes**
 > - PostgreSQL and the API are published on `127.0.0.1` only. Browsers reach the API through the nginx container (`/api/` proxy). If you set `API_BIND=0.0.0.0`, review `TRUST_PROXY` (compose sets `1`, which trusts one proxy hop).
 > - **Docker socket:** `segmentra-app` mounts `/var/run/docker.sock` because the Ansible executor runs `docker exec segmentra-ansible-runner ansible-playbook ...`. Access to the Docker socket is **equivalent to root on the Docker host**. The SSH Direct executor does not need it — if you only use SSH Direct, remove the socket mount and the `group_add` entry from `docker-compose.yml`.
-> - JWT tokens are valid for 12 hours. Disabling a user or changing roles takes effect on next login, not immediately.
+> - JWT tokens are valid for 12 hours. Role changes take effect on the next request (roles are re-read from the database). Deactivating a user blocks their tokens only while the account stays deactivated: reactivating it within 12 hours makes unexpired tokens valid again. Changing or resetting a password does not end sessions that are already open.
 
 ### Step 2: Build and Start
 
@@ -381,9 +382,12 @@ docker compose up -d        # production: the API re-runs migrations + seed on s
 | `SEGMENTRA_BOOTSTRAP_TOKEN` | No | — | Enables one-time `POST /api/admin/bootstrap` while no users exist |
 | `SEGMENTRA_ADMIN_PASSWORD` | Prod: yes | `admin123` (dev only) | Password for the initial `admin` user created by the seed (min. 12 chars in production) |
 | `SEGMENTRA_SSH_COMMAND_TIMEOUT_MS` | No | `300000` | Per-command SSH timeout |
+| `SEGMENTRA_ASKPASS_DIR` | No | OS temp dir | Directory for the short-lived `SSH_ASKPASS` helper used with passphrase-protected keys (the helper never contains a secret) |
 | `SEGMENTRA_SKIP_MIGRATIONS` | No | `0` | Docker only: `1` skips migrations + seed in the API entrypoint |
 
 docker-compose also reads `POSTGRES_PASSWORD` (or legacy `DB_PASSWORD`), `DB_USER`, `DB_NAME`, `DB_PORT`, `API_PORT`, `API_BIND`, `WEB_PORT` and `DOCKER_GID`.
+
+The local dev scripts also read `SEGMENTRA_DATABASE_URL` (custom database URL instead of the local container; `start.sh`, `run.sh`, `run.ps1`) and `SEGMENTRA_RESET_DB=1` (`start.sh` / `start.bat`: wipe the Docker volumes before starting — data loss).
 
 ### Deployment Executors
 
@@ -392,9 +396,9 @@ Segmentra supports two executors for deploying firewall rules to hosts:
 | Executor | Setup | Best For |
 |----------|-------|----------|
 | **Ansible** (default) | Requires `segmentra-ansible-runner` container | Production — parallel execution, better rollback |
-| **SSH Direct** | No extra dependencies | Development — simpler, no Docker-in-Docker |
+| **SSH Direct** | No extra dependencies | Hardened installs (no Docker socket); lockout auto-revert and canary/progressive rollouts |
 
-Switch in: **Admin → Deployment Executor**
+Switch in: **Admin → Deployment Executor**. With the hardened override (`docker-compose.hardened.yml`) the Ansible runner is not started, so select **SSH Direct** before the first deployment. See the [executor comparison in the user guide](guide.md#quick-reference-deployment-executor-comparison).
 
 For development without Ansible, either:
 - Switch to SSH Direct in the UI
@@ -408,6 +412,7 @@ Configure in: **Admin → SSH Credentials**
 - Authentication: a private key (optionally passphrase-protected; the passphrase is checked when you save) or a password
 - **Privilege escalation:** *sudo without password*, *sudo with the login password* (password credentials) or *sudo with a separate password*. The account needs **full sudo rights** (e.g. `segmentra ALL=(ALL) ALL`, or `NOPASSWD: ALL` for passwordless): Segmentra runs its scripts as `sudo sh -c '…'`, so a sudoers entry limited to `nft`/`iptables` makes deployments fail. `Defaults requiretty` must not apply to the account.
 - The SSH client in the API image must be OpenSSH 8.4 or newer for passphrase-protected keys (the bundled Debian bookworm image has 9.2)
+- **Applies to:** all hosts (global), hosts with a tag, hosts in a VLAN, one host, or *not assigned* (only used by discovery or when assigned to a host explicitly). Each host uses its explicitly assigned credential, else a host-, tag-, VLAN- and finally the global credential (highest priority, then newest, within a level); **Inventory → Hosts** shows which one each host uses. See the [user guide](guide.md#step-4-add-ssh-credentials)
 - Keys, passphrases and passwords are encrypted at rest with AES-256-GCM (see [security.md](security.md))
 
 ---
@@ -421,7 +426,7 @@ Configure in: **Admin → SSH Credentials**
 - **PostgreSQL port** — published on `127.0.0.1:15432` only; remove the `ports` mapping entirely if you never need host access
 - **Docker socket mount** — `/var/run/docker.sock` is root-equivalent and only required for the Ansible executor; if using SSH Direct only, remove the mount and `group_add`. Treat the API container as high-trust when the socket is mounted.
 - **SSH host key verification** — trust-on-first-use (`StrictHostKeyChecking=accept-new`) for both the SSH executor (known_hosts at `SEGMENTRA_KNOWN_HOSTS`, persisted in the `segmentra_ssh_known_hosts` volume) and the Ansible runner (`segmentra_ansible_ssh` volume). A host whose key changes is rejected; remove its old entry from known_hosts after a legitimate re-key.
-- **JWT token lifetime** — tokens are valid for 12 hours. Disabling a user or changing roles takes effect on next login, not immediately. For faster revocation, consider shortening the token expiry in `apps/api/src/services/jwt.ts`.
+- **JWT token lifetime** — tokens are valid for 12 hours. Role changes take effect on the next request. Deactivating a user blocks their tokens only while the account stays deactivated (reactivating it within 12 hours makes unexpired tokens valid again). Changing or resetting a password does not end existing sessions, so keep a compromised account deactivated for at least 12 hours. The expiry is set in `apps/api/src/services/jwt.ts`.
 - **TLS** — in production, place a reverse proxy with TLS (e.g., nginx with Let's Encrypt) in front of the `segmentra-web` container
 - **Back up** the PostgreSQL volume (`segmentra_pgdata`) regularly
 
@@ -451,4 +456,4 @@ docker compose logs segmentra-db
 1. Check SSH credentials are configured: **Admin → SSH Credentials**
 2. Verify executor setting: **Admin → Deployment Executor**
 3. If using Ansible, verify runner is running: `docker compose ps segmentra-ansible-runner`
-4. Check execution logs in: **Deployments → (select deployment) → View Logs**
+4. Open the deployment (**Deployments →** select it): the **Message** column of the hosts table shows each host's result or error. Failed hosts can be redeployed with **Retry Failed Hosts**.

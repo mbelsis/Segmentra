@@ -250,7 +250,7 @@ export function KubernetesPage() {
                         <td style={{ fontSize: '11.5px' }}><code>{w.pod_ips?.join(', ') || w.service_cluster_ip || '-'}</code></td>
                       </tr>
                     ))}
-                    {workloads.length === 0 && <tr><td colSpan={6} className="empty-state">No workloads discovered. Workloads are populated via the API or sync.</td></tr>}
+                    {workloads.length === 0 && <tr><td colSpan={6} className="empty-state">No workloads. Workload sync from the cluster is not implemented yet; generate NetworkPolicy manifests from the Network Policies tab and apply them with kubectl.</td></tr>}
                   </tbody>
                 </table>
               </div>

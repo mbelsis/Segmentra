@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import { pool } from '../../db/pool.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
+import { countRuleReferences } from '../../lib/rule-references.js';
 import { isValidCidr } from '../../services/ip-utils.js';
 
 export const vlansRouter = Router();
@@ -81,6 +82,14 @@ vlansRouter.delete('/:id', requireRole('operator', 'admin'), async (req, res) =>
     [req.params.id]
   );
   const u = usage.rows[0];
+  const refs = await countRuleReferences('VLAN', req.params.id);
+  if (refs.total > 0) {
+    return res.status(409).json({
+      error: 'vlan_in_use',
+      message: `VLAN is used as a source or destination by ${refs.policyRules} policy rule(s) and ${refs.templateRules} template rule(s). Change those rules first.`,
+      usage: { ...u, ...refs }
+    });
+  }
   if (u && (u.hosts > 0 || u.interfaces > 0 || u.policy_sets > 0)) {
     return res.status(409).json({
       error: 'vlan_in_use',

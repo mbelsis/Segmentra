@@ -1,23 +1,10 @@
 import { pool } from '../db/pool.js';
 import type { CommunicationFlow } from './log-parser.js';
+import { cidrContains } from './ip-utils.js';
 
-// Helper: check if an IP matches a CIDR
+// Helper: check if an IP matches a CIDR (IPv4 or IPv6; a bare IP is a /32 or /128)
 function ipMatchesCidr(ip: string, cidr: string): boolean {
-  try {
-    const cleanIp = ip.split('/')[0];
-    const [cidrIp, prefix] = cidr.split('/');
-    const prefixLen = prefix ? parseInt(prefix, 10) : 32;
-    if (prefixLen < 0 || prefixLen > 32) return false;
-    const ipParts = cleanIp.split('.').map(Number);
-    const cidrParts = cidrIp.split('.').map(Number);
-    if (ipParts.length !== 4 || cidrParts.length !== 4) return false;
-    const mask = prefixLen === 0 ? 0 : (0xFFFFFFFF << (32 - prefixLen)) >>> 0;
-    const ipNum = (ipParts[0] << 24) + (ipParts[1] << 16) + (ipParts[2] << 8) + ipParts[3];
-    const cidrNum = (cidrParts[0] << 24) + (cidrParts[1] << 16) + (cidrParts[2] << 8) + cidrParts[3];
-    return (ipNum & mask) === (cidrNum & mask);
-  } catch {
-    return false;
-  }
+  return cidrContains(String(cidr).trim(), String(ip).split('/')[0]);
 }
 
 function portMatches(port: number | undefined, portSpec: string | null): boolean {
@@ -134,8 +121,21 @@ export async function analyzePolicyTest(sessionId: string): Promise<AnalysisResu
     ruleSourceIps.set(rule.id, await resolveSourceValue(rule));
   }
 
-  // Parse flows from raw log data
-  const flows: CommunicationFlow[] = session.raw_log_data?.flows ?? [];
+  // Parse flows from raw log data. Reply traffic accepted by the baseline established/related
+  // rule is not a flow the policy decides on, so it is not analyzed.
+  const flows: CommunicationFlow[] = (session.raw_log_data?.flows ?? []).filter((f: CommunicationFlow) => !f.established);
+
+  // Baseline of every compiled policy (see packages/compiler): SSH from the management VLAN is
+  // always allowed before any policy rule, and outbound traffic is allowed by default.
+  const { rows: hostRows } = await pool.query(`SELECT ssh_port FROM hosts WHERE id = $1`, [session.host_id]);
+  const sshPort = Number(hostRows[0]?.ssh_port) || 22;
+  const { rows: mgmtRows } = await pool.query(
+    `SELECT v.subnet FROM system_settings s JOIN vlans v ON v.id::text = s.value WHERE s.key = 'management_vlan_id'`
+  );
+  const mgmtCidrs: string[] = mgmtRows.map((r: any) => String(r.subnet)).filter(Boolean);
+  const isMgmtSsh = (f: CommunicationFlow) =>
+    f.direction === 'IN' && f.protocol === 'tcp' && f.destinationPort === sshPort &&
+    (mgmtCidrs.length === 0 || mgmtCidrs.some((c) => ipMatchesCidr(f.sourceIp, c)));
 
   const result: AnalysisResult = {
     matchedFlows: [],
@@ -148,6 +148,12 @@ export async function analyzePolicyTest(sessionId: string): Promise<AnalysisResu
   for (const flow of flows) {
     result.summary.totalFlows++;
     let matched = false;
+
+    if (isMgmtSsh(flow)) {
+      result.matchedFlows.push({ flow, matchedRule: { comment: 'baseline: management SSH (always allowed)' }, expectedAction: 'ALLOW' });
+      result.summary.matched++;
+      continue;
+    }
 
     for (const rule of rules) {
       const sourceIps = ruleSourceIps.get(rule.id) ?? [];
@@ -164,7 +170,11 @@ export async function analyzePolicyTest(sessionId: string): Promise<AnalysisResu
       }
     }
 
-    if (!matched) {
+    if (!matched && flow.direction === 'OUT') {
+      // Outbound default is allow
+      result.matchedFlows.push({ flow, matchedRule: { comment: 'default: outbound traffic is allowed' }, expectedAction: 'ALLOW' });
+      result.summary.matched++;
+    } else if (!matched) {
       // Default deny — this flow would be blocked
       result.unexpectedAllows.push({
         flow,

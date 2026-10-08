@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { LIVE_HASH_VERSION_PREFIX, readHostFirewallRules, type SshHostInfo } from '@segmentra/executor';
+import { LIVE_HASH_VERSION_PREFIX, checkHostPersistence, readHostFirewallRules, type SshHostInfo } from '@segmentra/executor';
 import { pool } from '../db/pool.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { getSshCredentialForHost, sshAuthFields, type MaterializedSshCredential } from '../services/ssh-credentials.js';
@@ -103,7 +103,21 @@ async function checkHost(host: any, lastDeployment: any) {
       };
     }
     const cmp = compareHashes(readResult.rulesHash, lastDeployment, readResult.segmentraPresent);
+    // Reboot persistence: does the distribution's boot configuration hold the same Segmentra
+    // state as the running rules? (read-only; does not change the compliance status)
+    const p = await checkHostPersistence(sshHostInfo(host, cred), readResult.backend);
+    const persistence = {
+      status: p.status,
+      state: p.state,
+      method: p.method,
+      warnings: p.warnings,
+      error: p.error ?? null
+    };
+    if (cmp.status === 'compliant' && (p.state === 'differs' || p.state === 'missing')) {
+      cmp.message = `running rules match the last deployment, but the boot configuration ${p.state === 'differs' ? 'differs from them' : 'does not contain them'} (they would not come back as deployed after a reboot)`;
+    }
     return {
+      persistence,
       hostId: host.id,
       hostname: host.hostname,
       status: cmp.status,

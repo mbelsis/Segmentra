@@ -10,14 +10,15 @@ This document provides detailed technical information about Segmentra's architec
 2. [API Endpoints](#api-endpoints)
 3. [Database Schema](#database-schema)
 4. [Deployment Executors](#deployment-executors)
-5. [Firewall Backend Configuration](#firewall-backend-configuration)
-6. [Advanced Features](#advanced-features)
+5. [Advanced Features](#advanced-features)
    - [Firewall Learning (Traffic Discovery)](#firewall-learning-traffic-discovery)
    - [Drift Detection & Configuration Compliance](#drift-detection--configuration-compliance)
    - [Safety Guardrails](#safety-guardrails)
    - [High-Risk Policy Detection](#high-risk-policy-detection)
    - [Policy Impact Analysis](#policy-impact-analysis)
    - [Host Readiness Verification](#host-readiness-verification)
+   - [SSH Credential Resolution](#ssh-credential-resolution)
+   - [Inventory Discovery](#inventory-discovery)
    - [Scheduled Deployments](#scheduled-deployments)
    - [Host Policy Visualization](#host-policy-visualization)
    - [Auto-Tagging Rule Engine](#auto-tagging-rule-engine)
@@ -32,11 +33,14 @@ This document provides detailed technical information about Segmentra's architec
    - [Notification System](#notification-system)
    - [Security Posture Audit](#security-posture-audit)
    - [Role-Based Access Control (RBAC)](#role-based-access-control-rbac)
+6. [Firewall Backend Configuration](#firewall-backend-configuration)
+   - [Generated Firewall Rules](#generated-firewall-rules)
    - [Async Deployment Execution](#async-deployment-execution)
    - [Login Security](#login-security)
 7. [Troubleshooting](#troubleshooting)
 8. [Configuration Details](#configuration-details)
    - [Environment Variables](#environment-variables)
+   - [Background Jobs](#background-jobs)
    - [Docker Compose Configuration](#docker-compose-configuration)
    - [Security Considerations](#security-considerations)
    - [Secret Storage & Encryption](#secret-storage--encryption)
@@ -51,423 +55,378 @@ apps/
   api/                         # Express API (TypeScript)
     src/
       db/                      # PostgreSQL pool
-      middleware/              # JWT auth + RBAC
+      middleware/              # JWT auth + RBAC (requireAuth, requireRole)
       routes/                  # REST endpoints
-        admin.ts
+        admin.ts               # Users, LDAP, AD group mapping, executor + management VLAN settings
         audit.ts
         auth.ts
         compliance.ts          # Drift detection & compliance checking
         dashboard.ts
-        deployments.ts
+        deployments.ts         # Deployments, executors, scheduled deployments, stale-host timeout
+        enforcement-points.ts  # Switch/gateway enforcement
+        flow-collectors.ts     # NetFlow/sFlow collectors
         health.ts
         host-readiness.ts      # Host capability verification
-        inventory/             # Hosts, tags, VLANs, interfaces
-          tag-rules.ts           # Auto-tagging rule engine
-        policies/              # Policy sets, versions, rules
-          templates.ts           # Policy templates
-        ssh-credentials.ts
-        troubleshoot.ts
-        topology.ts              # Visual topology design
-        recommendations.ts       # Policy auto-recommendations
-        integrations.ts          # SIEM/SOAR/Vuln/ThreatIntel integrations
-        policy-testing.ts        # On-device policy testing
-        kubernetes.ts            # Kubernetes cluster management
-        iot-assets.ts            # IoT/OT asset management
-        flow-collectors.ts       # NetFlow/sFlow collectors
-        enforcement-points.ts    # Switch/gateway enforcement
-        notifications.ts         # Notification channel management
-        security-audit.ts        # Security posture scanning
-      services/                # LDAP, secrets crypto, JWT, audit, ...
+        integrations.ts        # SIEM/SOAR/Vuln/ThreatIntel integrations
+        iot-assets.ts          # IoT/OT assets and gateway assignments
+        kubernetes.ts          # Kubernetes clusters, NetworkPolicy generation
+        notifications.ts       # Notification channel management
+        policy-testing.ts      # On-device policy testing
+        recommendations.ts     # Policy auto-recommendations
+        security-audit.ts      # Security posture scanning
+        ssh-credentials.ts     # SSH credentials (scopes, sudo modes)
+        topology.ts            # Visual topology design
+        troubleshoot.ts        # Lookups, simulation, Firewall Learning
+        inventory/             # hosts.ts, interfaces.ts, tags.ts, vlans.ts, tag-rules.ts, discovery.ts
+        policies/              # policy-sets.ts, policy-versions.ts, policy-rules.ts, render.ts, templates.ts
+      services/                # Business logic, e.g.:
+        ssh-credentials.ts     # Credential resolution + decryption for SSH connections
+        discovery.ts           # Inventory discovery runs and scheduler
+        deployment-expiry.ts   # Policy expiry processor (NOTIFY_ONLY / REMOVE / REVERT)
+        forward-rules.ts       # FORWARD rules / protected devices for IoT gateways
         policy-diff.ts         # Policy version comparison
         safety-check.ts        # Pre-deployment safety validation
         high-risk.ts           # High-risk policy detection
         log-parser.ts          # Firewall log parsing for learning sessions
         audit-scheduler.ts     # Background job for expired audit sessions
-        tag-rule-engine.ts       # Auto-tagging evaluation engine
-        template-engine.ts       # Policy template instantiation
+        tag-rule-engine.ts     # Auto-tagging evaluation engine
+        template-engine.ts     # Policy template instantiation / auto-apply
         recommendation-engine.ts # Audit-to-policy recommendations
-        topology-to-policy.ts    # Visual topology → policy conversion
+        topology-to-policy.ts  # Visual topology -> policy conversion
         policy-test-analyzer.ts  # Policy test gap analysis
-        notifications.ts         # Multi-channel notification delivery
+        notifications.ts       # Multi-channel notification delivery
         excessive-rules-audit.ts # Security posture scanning engine
-      lib/                     # Environment config
-      index.ts                 # Express app entry point
+        secrets.ts, crypto.ts  # Encrypted secret store (AES-256-GCM)
+      lib/                     # env.ts (environment config), safe-http.ts, rule validation, ...
+      index.ts                 # Express app entry point + background jobs
   web/                         # React UI (Vite)
     src/
-      components/              # App shell, auth gate, visualization
-        HostPolicyVisualization.tsx  # Policy visualization diagram
-      pages/                   # Dashboard/Inventory/Policies/...
-        PolicyTemplatesPage.tsx  # Policy template management
-        TopologyPage.tsx         # Visual topology designer
-        IntegrationsPage.tsx     # Integration management
-        PolicyTestPage.tsx       # On-device policy testing
-        KubernetesPage.tsx       # Kubernetes management
-        IoTPage.tsx              # OT/IoT asset management
-        SecurityAuditPage.tsx    # Security posture audit
-        NotificationsPage.tsx    # Notification management
+      components/              # AppShell, RequireAuth, RequireRole, DiscoveryTab, HostPolicyVisualization
+      pages/                   # One page per navigation entry (Dashboard, Inventory, Policy Sets, ...)
       lib/                     # API client, auth helpers
 infra/
   app/Dockerfile               # API container: multi-stage, non-root, docker CLI + openssh-client + sshpass
   app/docker-entrypoint.sh     # Validates secrets, runs migrations + seed, starts the API
   web/                         # nginx image (UI + /api proxy)
-  ansible-runner/              # Ansible container + playbooks (only needed for Ansible executor)
+  ansible-runner/              # Ansible container + playbooks (only needed for the Ansible executor)
     Dockerfile
     playbooks/
       apply-firewall.yml
 packages/
-  db/                          # node-pg-migrate migrations + seed scripts
-    migrations/
-      001_init.sql
-      007_add_scheduled_deployments.sql
-      008_add_firewall_audit_sessions.sql
-      009_add_tag_rules.sql
-      010_add_policy_templates.sql
-      011_add_visual_topologies.sql
-      012_add_policy_recommendations.sql
-      013_add_integrations.sql
-      014_add_policy_test_sessions.sql
-      015_add_kubernetes_clusters.sql
-      016_add_ot_iot.sql
-      017_add_policy_expiry.sql
-      018_add_notifications.sql
+  db/                          # node-pg-migrate migrations + scripts
+    migrations/                # 001_init.sql ... 030_credential_scopes.sql (plain SQL)
     scripts/
-      seed-roles.js
+      migrate.js
+      seed-roles.js            # Roles + initial admin user
   shared/                      # shared TS types
   compiler/                    # nftables/iptables rendering
     src/
-      compile.ts               # Supports logOnlyMode for firewall learning
-  executor/                    # Ansible CLI runner + SSH direct executor
+      compile.ts               # Per-host rulesets; supports logOnlyMode for firewall learning
+  executor/                    # Ansible runner + SSH direct executor
     src/
       run-ansible.ts
-      run-ssh.ts
-      read-rules.ts            # SSH-based firewall rule reading
+      run-ssh.ts               # SSH Direct apply with lockout auto-revert
+      read-rules.ts            # Read Segmentra's live rules + drift hash
       check-host-readiness.ts  # Host capability verification
       audit-ssh.ts             # Firewall learning/audit session management
+      discover-host.ts         # Read-only fact collection for inventory discovery
+      remove-policy.ts         # Remove Segmentra's rules (expiry REMOVE)
+      firewall-backup.ts       # Scoped backup/restore snippets (+ persistSnippet)
+      persist-scripts.ts       # Reboot persistence via the distro's own service (shell + output parser)
+      persistence.ts           # checkHostPersistence (read-only check: readiness, compliance, Ansible)
+      ssh-options.ts           # SSH/sudo/askpass helpers
       types.ts                 # Shared executor types
-docker-compose.yml             # Postgres + app + ansible-runner
+docker-compose.yml             # segmentra-db, segmentra-ansible-runner, segmentra-app, segmentra-web
+docker-compose.hardened.yml    # Hardened production override (see docs/security.md)
 ```
 
 ---
 
 ## API Endpoints
 
-Base URL: `http://localhost:8080/api`
+Base URL: `http://localhost:8080/api` (behind the bundled nginx: `http://<host>/api`).
+
+Routers are mounted in `apps/api/src/index.ts` (inventory and policy sub-routers in `routes/inventory/index.ts` and `routes/policies/index.ts`). Unless noted otherwise every endpoint requires a valid JWT (`Authorization: Bearer <token>`); the roles listed are the ones passed to `requireRole(...)`. "All roles" means `viewer`, `operator`, `approver` and `admin`. Unauthenticated endpoints: `GET /health`, `POST /auth/login`, `POST /auth/logout` and `POST /admin/bootstrap`.
+
+### Health
+
+- `GET /health` — liveness check (no auth)
 
 ### Authentication
 
-- `POST /auth/login` — LDAP login. Body: `{ "username": "...", "password": "..." }`
-- `POST /auth/logout` — stateless (client drops JWT)
-- `GET /auth/me` — returns current user + roles (Bearer token required)
-- `POST /auth/change-password` — Change password for current user
+- `POST /auth/login` — Body: `{ "username": "...", "password": "..." }`. Tries a local user (`users.password_hash`) first, then LDAP. Failed attempts are rate-limited per client IP (see [Login Security](#login-security)).
+- `POST /auth/logout` — stateless (the client drops the JWT)
+- `GET /auth/me` — current user + roles
+- `POST /auth/change-password` — change the current local user's password
 
-### Admin (Admin role required)
+### Admin (`admin`)
 
-- `POST /admin/bootstrap` — one-time bootstrap admin user (enabled by `SEGMENTRA_BOOTSTRAP_TOKEN`)
+- `POST /admin/bootstrap` — one-time creation of the first admin; no JWT, enabled only when `SEGMENTRA_BOOTSTRAP_TOKEN` is set (404 otherwise), 3 attempts per IP per 15 minutes
 - `GET /admin/roles`
-- `GET /admin/ldap-settings`
-- `PUT /admin/ldap-settings`
-- `POST /admin/ad-group-role-map`
-- `GET /admin/executor-setting` — Get deployment executor preference (ansible/ssh)
-- `PUT /admin/executor-setting` — Set deployment executor preference
-- `GET /admin/management-vlan-setting` — Get management VLAN setting
-- `PUT /admin/management-vlan-setting` — Set management VLAN setting
+- `GET /admin/ldap-settings` / `PUT /admin/ldap-settings` — the bind password is never returned; an empty password on save keeps the stored one
+- `GET /admin/ad-group-role-map` / `POST /admin/ad-group-role-map` / `DELETE /admin/ad-group-role-map/:id`
+- `GET /admin/executor-setting` / `PUT /admin/executor-setting` — deployment executor (`ansible` or `ssh`)
+- `GET /admin/management-vlan-setting` / `PUT /admin/management-vlan-setting`
+- `GET /admin/users`, `GET /admin/users/:id`, `POST /admin/users`, `PUT /admin/users/:id`, `DELETE /admin/users/:id`
+- `POST /admin/users/:id/reset-password` — local users only (`409 ldap_user_password` for LDAP users)
 
-### Inventory (Operator/Admin role required)
+### Inventory (read: all roles; write: `operator`, `admin`)
 
 #### Hosts
-- `GET /hosts?hostname=&tag=&vlan=&ip=&enabled=&page=&limit=` — Returns hosts with tags and VLAN info
-- `POST /hosts` — Body: `{ hostname, mgmtIp?, vlanId?, tagIds[]?, sshPort?, firewallBackend?, ... }`
-- `GET /hosts/:id` — Returns host with tags and VLAN info
-- `PUT /hosts/:id` — Body: `{ hostname?, mgmtIp?, vlanId?, tagIds[]?, ... }`
-- `DELETE /hosts/:id` (soft delete via `enabled=false`)
-- `POST /hosts/bulk/delete` — Bulk delete hosts
-- `POST /hosts/bulk/assign-vlan` — Bulk assign VLAN
-- `POST /hosts/bulk/assign-tag` — Bulk assign tag
-- `POST /hosts/bulk/set-enabled` — Bulk enable/disable hosts
-- `POST /hosts/bulk/import` — Import hosts from CSV
+- `GET /hosts?hostname=&ip=&tag=&vlan=&env=&backend=&enabled=&page=&limit=` — hosts with tags, VLAN info and `effective_credential` (paginated, default 50, max 1000 per page)
+- `GET /hosts/:id` — host with tags, VLAN info and `effective_credential`
+- `POST /hosts` — Body: `{ hostname, mgmtIp?, sshPort?, environment?, osFamily?, firewallBackend?: 'nftables'|'iptables'|'auto', vlanId?, tagIds?, enabled?, sshCredentialId? }`
+- `PUT /hosts/:id` — same fields, all optional
+- `DELETE /hosts/:id` — deletes the host; `409 host_has_deployment_history` if it has deployment history (disable it instead)
+- `POST /hosts/bulk/delete`, `/bulk/assign-vlan`, `/bulk/assign-tag`, `/bulk/set-enabled`, `/bulk/import` (CSV import)
+
+`effective_credential` is a non-secret summary of the SSH credential the host would use: `{ id, name, authMethod, sudoMode, scopeType, via: 'ASSIGNED'|'HOST'|'TAG'|'VLAN'|'GLOBAL', scopeName }` (`null` when no credential applies). `sshCredentialId` (uuid, or `null` to clear) sets the explicit credential assignment `hosts.ssh_credential_id`; only `admin` may send it (`403` for operators). See [SSH credential resolution](#ssh-credential-resolution).
+
+#### Interfaces
+- `GET /hosts/:id/interfaces`
+- `POST /hosts/:id/interfaces` — Body: `{ name, role?, ipAddress?, cidr?, vlanId?, isPrimary?, enabled? }`
+- `PUT /interfaces/:interfaceId`
+- `DELETE /interfaces/:interfaceId`
 
 #### Tags
 - `GET /tags`
 - `POST /tags` — Body: `{ name, description? }`
-- `PUT /tags/:id` — Body: `{ name?, description? }`
-- `DELETE /tags/:id`
+- `PUT /tags/:id`
+- `DELETE /tags/:id` — `409` while policy or template rules reference the tag
 
 #### VLANs
 - `GET /vlans`
-- `POST /vlans` — Body: `{ vlanTag, name, description?, subnet? }`
-- `PUT /vlans/:id` — Body: `{ vlanTag?, name?, description?, subnet? }`
-- `DELETE /vlans/:id`
+- `POST /vlans` — Body: `{ vlanTag, name, description?, subnet? }` (`vlan_tag` is unique)
+- `PUT /vlans/:id`
+- `DELETE /vlans/:id` — `409` while policy or template rules reference the VLAN
 
-### Interfaces (Operator/Admin role required)
+#### Tag Rules (Auto-Tagging)
+- `GET /tag-rules` — rules with match counts
+- `GET /tag-rules/:id` — rule with matched hosts
+- `POST /tag-rules/preview` — Body: `{ criteria }`; returns `{ hosts: [{ id, hostname }] }` without writing anything
+- `POST /tag-rules` — Body: `{ name, tagId, enabled?, priority?, criteria: { conditions: [{ field, operator, value }], logic: 'AND'|'OR' } }`; an enabled rule is applied immediately
+- `PUT /tag-rules/:id`
+- `DELETE /tag-rules/:id` — also removes the tags this rule assigned
+- `POST /tag-rules/:id/evaluate`, `POST /tag-rules/evaluate-all`, `POST /tag-rules/evaluate-host/:hostId`
 
-- `GET /hosts/:id/interfaces`
-- `POST /hosts/:id/interfaces` — Body: `{ name, role?, ipAddress?, cidr?, vlanId?, isPrimary?, enabled? }`
-- `PUT /interfaces/:interfaceId` — Body: `{ name?, role?, ipAddress?, cidr?, vlanId?, isPrimary?, enabled? }`
-- `DELETE /interfaces/:interfaceId`
+#### Discovery (read: all roles; profiles: `admin`; run: `operator`, `admin`)
+- `GET /discovery/profiles` — profiles with their target sets and last run
+- `GET /discovery/profiles/:id`
+- `POST /discovery/profiles` — Body: `{ name, enabled?, scheduleIntervalMinutes?: number|null, defaultTagName? (default 'new-server'), targets: [{ sshCredentialId, sshPort?, cidrs?, vlanIds? }] }` (1–20 target sets)
+- `PUT /discovery/profiles/:id`
+- `DELETE /discovery/profiles/:id`
+- `POST /discovery/profiles/:id/run` — starts a run in the background (`202 { runId, status: 'RUNNING' }`; `409 discovery_running` if one is already running)
+- `GET /discovery/profiles/:id/runs` — run history
+- `GET /discovery/runs/:runId` — run with per-address results
 
 ### Policies + Approvals
 
-#### Policy Sets
+#### Policy Sets (read: all roles; write: `operator`, `admin`)
 - `GET /policy-sets`
-- `POST /policy-sets` — Body: `{ name, description?, scopeType, scopeTagId?, scopeVlanId? }`
+- `POST /policy-sets` — Body: `{ name, description?, scopeType: 'TAG'|'VLAN'|'HOST_LIST', scopeTagId?, scopeVlanId?, hostIds? }`
 - `GET /policy-sets/:id`
-- `PUT /policy-sets/:id` — Body: `{ name?, description?, scopeType?, scopeTagId?, scopeVlanId? }`
+- `PUT /policy-sets/:id`
 - `DELETE /policy-sets/:id`
 
 #### Policy Versions
-- `GET /policy-sets/:id/versions`
-- `POST /policy-sets/:id/versions` — Creates `DRAFT` version. Body: `{ changeSummary?, interfaceScopeType?, interfaceScopeRoles?, interfaceScopeNames? }`
-- `GET /policy-versions/:versionId`
-- `PUT /policy-versions/:versionId` — Only while `DRAFT`. Body: `{ changeSummary?, interfaceScopeType?, interfaceScopeRoles?, interfaceScopeNames? }`
-- `POST /policy-versions/:versionId/submit-approval` — Changes status to `PENDING_APPROVAL`. Automatically evaluates and sets `is_high_risk` flag based on policy heuristics.
-- `POST /policy-versions/:versionId/approve` — Approver/Admin role required; approver must differ from maker. High-risk policies cannot be self-approved (even by admins). Body: `{ changeSummary? }`
-- `POST /policy-versions/:versionId/reject` — Approver/Admin role required. Body: `{ reason }`
-- `POST /policy-versions/:versionId/clone` — Clone version as new DRAFT
-- `GET /policy-versions/pending-approval` — Returns all policy versions with `PENDING_APPROVAL` status. Approver/Admin role required.
+- `GET /policy-sets/:id/versions` — all roles
+- `POST /policy-sets/:id/versions` — `operator`, `admin`. Creates a `DRAFT` version. Body: `{ changeSummary?, interfaceScopeType?, interfaceScopeRoles?, interfaceScopeNames? }`
+- `GET /policy-versions/pending-approval` — `approver`, `admin`. Versions in `PENDING_APPROVAL`
+- `GET /policy-versions/:versionId` — all roles
+- `PUT /policy-versions/:versionId` — `operator`, `admin`; only while `DRAFT` or `REJECTED`
+- `POST /policy-versions/:versionId/submit-approval` — `operator`, `admin`. Status → `PENDING_APPROVAL`; evaluates and sets `is_high_risk`
+- `POST /policy-versions/:versionId/approve` — `approver`, `admin`. Refused (`403`) for the creator, the submitter and anyone who edited the version (`policy_version_editors`) — this applies to every version, including for admins
+- `POST /policy-versions/:versionId/reject` — `approver`, `admin`. Body: `{ reason }`
+- `POST /policy-versions/:versionId/clone` — `operator`, `admin`. Copies the version and its rules into a new `DRAFT`
+- `DELETE /policy-versions/:versionId` — `operator`, `admin`. Only `DRAFT` or `REJECTED` versions
+- `POST /policy-versions/:versionId/archive` — `operator`, `admin`. `APPROVED`, `DEPLOYED` or `PENDING_APPROVAL` → `ARCHIVED`
 
-#### Policy Rules
+#### Policy Rules (read: all roles; write: `operator`, `admin`)
 - `GET /policy-versions/:versionId/rules`
-- `POST /policy-versions/:versionId/rules` — Body: `{ direction, action, protocol, ports?, sourceType, sourceValue, logMode?, comment?, usePolicyInterfaceScope?, interfaceScopeType?, interfaceScopeRoles?, interfaceScopeNames? }`
-- `PUT /policy-rules/:ruleId` — Body: `{ direction?, action?, protocol?, ports?, sourceType?, sourceValue?, logMode?, comment?, usePolicyInterfaceScope?, interfaceScopeType?, interfaceScopeRoles?, interfaceScopeNames? }`
+- `POST /policy-versions/:versionId/rules` — Body: `{ orderIndex, direction: 'IN'|'OUT'|'BOTH'|'FORWARD', action: 'ALLOW'|'DENY', protocol, ports?, sourceType, sourceValue, destinationType?, destinationValue?, logMode?, comment?, usePolicyInterfaceScope?, interfaceScopeType?, interfaceScopeRoles?, interfaceScopeNames? }`. `destinationType` (`CIDR|TAG|VLAN|HOST|IOT_ASSET`) and `destinationValue` are required for `FORWARD` rules and must be empty otherwise.
+- `PUT /policy-rules/:ruleId` — partial update; rules can only be added, changed or deleted while the version is `DRAFT` or `REJECTED`
 - `DELETE /policy-rules/:ruleId`
 
 #### Policy Utilities
-- `GET /policy-versions/:versionId/diff?fromVersionId=...` — Compare two policy versions (basic rule list diff)
-- `GET /policy-versions/:versionId/render/host/:hostId` — Per-host nft/iptables preview. Returns: `{ backend, sha256, text }`
-- `POST /policy-versions/:candidateVersionId/impact-diff` — Semantic policy impact analysis
+- `GET /policy-versions/:versionId/diff?fromVersionId=...` — all roles. Rule list diff between two versions
+- `GET /policy-versions/:versionId/render/host/:hostId` — `operator`, `admin`. Per-host nft/iptables preview: `{ backend, sha256, text }`
+- `POST /policy-versions/:candidateVersionId/impact-diff` — all roles. Semantic impact analysis
   - Body: `{ currentVersionId: string, hostIds: string[] }`
   - Returns: `{ diff: Array<{ hostId, hostname, changes: { newAllows, removedAllows, newDenies, removedDenies }, summary }> }`
-  - Shows what rules were added/removed/modified between versions
 
-### Deployments
+#### Policy Templates (read: all roles; write: `operator`, `admin`)
+- `GET /policy-templates` — templates with rule and instantiation counts
+- `GET /policy-templates/categories`
+- `GET /policy-templates/:id`
+- `POST /policy-templates` — Body: `{ name, category?, targetTagId?, autoApply?, interfaceScopeType?, ... }`
+- `PUT /policy-templates/:id`, `DELETE /policy-templates/:id`
+- `GET /policy-templates/:id/rules`, `POST /policy-templates/:id/rules`
+- `PUT /policy-templates/rules/:ruleId`, `DELETE /policy-templates/rules/:ruleId`
+- `POST /policy-templates/:id/instantiate` — creates policy set + DRAFT version + rules
+- `POST /policy-templates/:id/preview` — all roles; preview of what instantiation would create
 
-- `POST /deployments` — Body: `{ policyVersionId, mode, targetQuery, canarySize?, batchSize?, scheduledAt? }` (policy version must be APPROVED)
-  - `targetQuery`: `{ tags?: uuid[], vlans?: uuid[], hosts?: uuid[] }`
-  - `scheduledAt`: Optional ISO 8601 datetime string for deferred execution
-  - **Safety Check**: Automatically validates SSH access preservation before deployment
-    - FULL mode: Blocks deployment if SSH access would be blocked
-    - CANARY/PROGRESSIVE: Warns but allows deployment
-- `GET /deployments` — Returns all deployments
-- `GET /deployments/:deploymentId` — Returns deployment details
-- `GET /deployments/:deploymentId/hosts` — Returns host-level deployment status
-- `GET /deployments/:deploymentId/artifacts` — Returns deployment artifacts (bundles)
-- `POST /deployments/:deploymentId/start` — Creates bundle + runs executor (Ansible or SSH Direct, based on admin setting)
-- `POST /deployments/:deploymentId/pause` — Pause a running deployment (marks RUNNING hosts as PAUSED, leaves PENDING hosts for resume)
-- `POST /deployments/:deploymentId/resume` — Resume a paused deployment (marks PAUSED hosts back to RUNNING)
-- `POST /deployments/:deploymentId/stop` — Stop a running or paused deployment (marks all PENDING/RUNNING/PAUSED hosts as SKIPPED)
+### Deployments (read: all roles; write: `operator`, `admin`)
 
-> **Note:** Pause, resume, and stop currently update the deployment status in the database but do not interrupt an in-progress SSH/Ansible execution. If a deployment is already running, the executor will complete its current work. These controls are most useful for managing queued deployments that haven't started yet.
-- `POST /deployments/:deploymentId/cancel` — Best-effort cancellation (deprecated - use `/stop` instead)
-- `POST /deployments/:deploymentId/retry-failed` — Retry failed hosts (v1 helper)
-- `GET /executions/:executionId/logs` — Returns stdout and stderr from execution
+- `POST /deployments` — Body: `{ policyVersionId, mode: 'CANARY'|'PROGRESSIVE'|'FULL', targetQuery: { tags?, vlans?, hosts? }, canarySize?, batchSize?, scheduledAt?, expiresAt?, expiryAction?: 'NOTIFY_ONLY'|'REMOVE'|'REVERT' }`
+  - The policy version must be `APPROVED` or `DEPLOYED`; disabled hosts are skipped
+  - Status is `SCHEDULED` when `scheduledAt` is in the future, otherwise `QUEUED`
+  - **Safety check**: verifies SSH access is preserved. `FULL` mode is blocked (`400 safety_check_failed`) if SSH would be blocked; `CANARY`/`PROGRESSIVE` only warn
+  - **High risk**: the version's risk is re-evaluated with the real target count; a high-risk deployment is created with `requires_approval = true` and cannot start until a second person approves it
+- `GET /deployments?search=&mode=&status=&tag=&vlan=&fromDate=&toDate=&sortBy=&sortOrder=&page=&limit=` — paginated list (max 100 per page)
+- `GET /deployments/:deploymentId`
+- `GET /deployments/:deploymentId/hosts` — per-host status
+- `GET /deployments/:deploymentId/artifacts` — bundles
+- `GET /executions/:executionId/logs` — stdout/stderr of an execution
+- `POST /deployments/:deploymentId/start` — claims a `QUEUED`/`SCHEDULED` deployment, returns `202` and runs the executor in the background (`409 deployment_requires_approval` while an approval is pending)
+- `POST /deployments/:deploymentId/approve` — `approver`, `admin`. Approves a deployment with `requires_approval`; the creator cannot approve their own deployment (`403`)
+- `POST /deployments/:deploymentId/pause` — `RUNNING` → `PAUSED`. The host being deployed finishes; the executor stops before the next host, and not-yet-started hosts stay `PENDING`
+- `POST /deployments/:deploymentId/resume` — continues a `PAUSED` deployment with the remaining hosts
+- `POST /deployments/:deploymentId/stop` (alias `/cancel`) — `SCHEDULED`/`QUEUED`/`RUNNING`/`PAUSED` → `CANCELLED`; unfinished hosts are marked `SKIPPED` (a host mid-deploy records its real result)
+- `POST /deployments/:deploymentId/retry-failed` — for `FAILED`/`PARTIAL` deployments: resets failed hosts (and hosts skipped by a halted canary/progressive rollout) to `PENDING` and sets the deployment back to `QUEUED`; start it again with `/start`
 
-**Note**: Host deployments automatically timeout after 10 minutes if they remain in `RUNNING` status. Timed-out hosts are marked as `FAILED` with the message "Deployment timeout: Host did not respond within 10 minutes". The timeout check runs automatically every 2 minutes and also when fetching deployments or deployment hosts.
+Host deployments that stay `RUNNING` for more than 10 minutes are marked `FAILED` ("Deployment timeout: Host did not respond within 10 minutes"). The check runs every 2 minutes and when deployments or deployment hosts are fetched.
 
-### Dashboard
+### Dashboard (any authenticated user)
 
-- `GET /dashboard/stats` — Returns dashboard statistics:
-  - `totalDeployments`: Total number of deployments
-  - `runningDeployments`: Number of currently running deployments
-  - `successRate`: Percentage of successful deployments
-  - `statusBreakdown`: Array of status counts
-  - `topDeployers`: Array of most active users
-  - `recentDeployments`: Last 10 deployments
-  - `currentDeployments`: Currently running deployments with progress
-  - `deploymentActivity`: Deployment activity over last 30 days
+- `GET /dashboard/stats` — deployment totals, running deployments, success rate, status breakdown, top deployers, recent and current deployments, 30-day activity
 
-### Audit
+### Audit (all roles)
 
-- `GET /audit?actor=&action=&entityType=&from=&to=` — Returns last 500 audit events
-  - `actor`: Filter by username
-  - `action`: Filter by action (e.g., `DEPLOYMENT_CREATED`, `DEPLOYMENT_FINISHED`)
-  - `entityType`: Filter by entity type (e.g., `DEPLOYMENT`, `POLICY_VERSION`)
-  - `from`: Start timestamp (ISO format)
-  - `to`: End timestamp (ISO format)
+- `GET /audit?actor=&action=&entityType=&from=&to=` — last 500 matching audit events
 
-### Compliance & Drift Detection (Operator/Admin role required)
+### Compliance & Drift Detection (`operator`, `admin`)
 
-- `GET /compliance/hosts/:hostId` — Check compliance status for a specific host
-  - Returns: `{ hostId, hostname, status: 'compliant'|'drifted'|'unknown'|'error', currentHash, expectedHash, backend, lastDeployment, error? }`
-  - Reads current firewall rules via SSH and compares hash to `deployment_hosts.applied_hash`
-- `POST /compliance/hosts/bulk` — Bulk compliance check for multiple hosts
-  - Body: `{ hostIds: string[] }`
-  - Returns: `{ results: Array<{ hostId, hostname, status, currentHash, expectedHash, error? }> }`
+- `GET /compliance/hosts/:hostId` — `{ hostId, hostname, status: 'compliant'|'drifted'|'unknown'|'error', currentHash, expectedHash, backend, lastDeployment, message?, error? }`. Compares the hash of Segmentra's live rules with `deployment_hosts.applied_live_hash` (see [Drift Detection](#drift-detection--configuration-compliance)). Also returns `persistence: { status, state, method, warnings, error }`: whether the distribution's boot configuration holds the same Segmentra state (`state: in_sync|differs|missing|none|learning`); a compliant host whose boot configuration differs or is missing keeps status `compliant` with a message
+- `POST /compliance/hosts/bulk` — Body: `{ hostIds: string[] }`
 
-### Host Readiness (Operator/Admin role required)
+### Host Readiness (`operator`, `admin`)
 
-- `POST /host-readiness/hosts/:hostId/check` — Check if a host is ready for deployments
-  - Returns: `{ hostname, ready: boolean, backend: 'nftables'|'iptables'|'unknown', nftVersion?, iptablesVersion?, sudoAccess: boolean, sudoMode: 'nopasswd'|'password', sudoError?: 'password_required'|'wrong_password'|'tty_required'|'not_permitted', kernelSupport: boolean, errors: string[], warnings: string[] }`
-  - Verifies: nft/iptables availability, sudo with the credential's privilege escalation mode (runs `id -u` + a ruleset read via `sudo sh -c`), kernel module support
-  - Auto-updates `firewall_backend` if set to "auto"
+- `POST /host-readiness/hosts/:hostId/check` — `{ hostname, ready, backend: 'nftables'|'iptables'|'unknown', nftVersion?, iptablesVersion?, sudoAccess, sudoMode: 'nopasswd'|'password', sudoError?: 'password_required'|'wrong_password'|'tty_required'|'not_permitted', kernelSupport, errors[], warnings[] }`
+  - Verifies nft/iptables availability, sudo with the credential's privilege escalation mode (`id -u` + a ruleset read via `sudo sh -c`) and kernel support
+  - Updates `firewall_backend` if it is `auto`
+  - Also returns `persistence?: { distro, method, available, status, warnings[], notes[] }` (read-only check of reboot persistence; see [Reboot persistence](#reboot-persistence))
 
-### Troubleshoot
+### Troubleshoot (read: all roles; actions: `operator`, `admin`)
 
-- `GET /troubleshoot/policies/by-ip?ip=...` — Find which policies apply to a specific IP
-- `GET /troubleshoot/hosts/:hostId/policies` — Get all policies deployed to a host
-- `GET /troubleshoot/policy-versions/:versionId/hosts` — Get all hosts with a specific policy version
-- `POST /troubleshoot/simulate-communication` — Simulate communication between two IPs
-  - Body: `{ sourceIp, sourcePort?, destIp, destPort?, protocol? }`
-  - Returns: Analysis of whether communication would be blocked, matching rules, and host information
+- `GET /troubleshoot/policies/by-ip?ip=...` — which policies apply to an IP
+- `GET /troubleshoot/hosts/:hostId/policies` — policies deployed to a host
+- `GET /troubleshoot/policy-versions/:versionId/hosts` — hosts running a version
+- `POST /troubleshoot/simulate-communication` — Body: `{ sourceIp, sourcePort?, destIp, destPort?, protocol? }`
 
 #### Firewall Learning (Audit Sessions)
 
-- `POST /troubleshoot/audit/start` — Start firewall learning session(s) (Operator/Admin role required)
-  - Body: `{ hosts: string[], durationMinutes: number }`
-  - Creates audit sessions for specified hosts, backs up existing rules, deploys log-only policy
-  - Returns: `{ sessions: Array<{ id, host_id, status, duration_minutes, scheduled_restore_at, ... }> }`
-- `GET /troubleshoot/audit/sessions` — List all audit sessions
-  - Returns: `{ sessions: Array<{ id, host_id, status, duration_minutes, started_at, restored_at, log_data?, ... }> }`
-- `GET /troubleshoot/audit/sessions/:id` — Get audit session details
-- `POST /troubleshoot/audit/sessions/:id/restore` — Manually trigger restore (Operator/Admin role required)
-  - Restores original firewall rules and retrieves/parses logs
-  - Returns: `{ success: boolean, flows: Array<{ direction, sourceIp, destinationIp, protocol, count, ... }>, entryCount: number }`
-- `GET /troubleshoot/audit/sessions/:id/logs` — Get parsed log data
-  - Returns: `{ logData: { entries: Array<...>, flows: Array<...> } }`
-- `POST /troubleshoot/audit/sessions/:id/cancel` — Cancel running session (Operator/Admin role required)
-  - Restores original rules and marks session as CANCELLED
+- `POST /troubleshoot/audit/start` — Body: `{ hosts: uuid[], durationMinutes: 1-1440 }`. Backs up Segmentra's own rules, deploys a log-only policy and configures rsyslog
+- `GET /troubleshoot/audit/sessions`
+- `GET /troubleshoot/audit/sessions/:id`
+- `POST /troubleshoot/audit/sessions/:id/restore` — restore now and collect/parse the logs
+- `GET /troubleshoot/audit/sessions/:id/logs` — parsed entries and flows
+- `POST /troubleshoot/audit/sessions/:id/cancel` — restore and mark `CANCELLED`
 
-### SSH Credentials (Admin role required)
+### SSH Credentials (`admin`)
 
-- `GET /ssh-credentials` — List all SSH credentials: `id, name, username, auth_method, sudo_mode, scope_type, scope_id, created_at, has_passphrase, has_sudo_password` (no secret values or secret IDs)
-- `POST /ssh-credentials` — Create new SSH credential. Body: `{ name, username, authMethod: 'KEY', privateKeyPem, passphrase?, … }` or `{ name, username, authMethod: 'PASSWORD', password, … }`, plus `sudoMode?: 'NOPASSWD'|'LOGIN_PASSWORD'|'SUDO_PASSWORD'` (default `NOPASSWD`), `sudoPassword?` (required for `SUDO_PASSWORD`), `scopeType`, `scopeId?`. Secrets are stored encrypted.
-  - The key (and passphrase) is validated with `ssh-keygen -y`; errors: `400 invalid_key_or_passphrase` (unreadable key, encrypted key without passphrase, wrong passphrase), `400 invalid_sudo_mode` (`LOGIN_PASSWORD` with a key credential), `400 sudo_password_required`
-- `PUT /ssh-credentials/:id` — Update a credential. Body: `{ name?, username?, scopeType?, scopeId?, sudoMode?, sudoPassword?, passphrase? }` (`passphrase` for key credentials, validated against the stored key; `null`/`''` removes it if the key is unencrypted; omitting `sudoPassword` keeps the stored one)
-  - **Note**: The `PUT` endpoint does **not** replace the private key or login password. To rotate them, create a new credential via `POST` and delete the old one.
+- `GET /ssh-credentials` — `id, name, username, auth_method, sudo_mode, scope_type, scope_id, scope_name, priority, created_at, has_passphrase, has_sudo_password, assigned_host_count, discovery_target_count` (no secret values or secret IDs)
+- `POST /ssh-credentials` — Body: `{ name, username, authMethod: 'KEY', privateKeyPem, passphrase? }` or `{ name, username, authMethod: 'PASSWORD', password }`, plus `sudoMode?: 'NOPASSWD'|'LOGIN_PASSWORD'|'SUDO_PASSWORD'` (default `NOPASSWD`), `sudoPassword?` (required for `SUDO_PASSWORD`), `scopeType?: 'GLOBAL'|'TAG'|'VLAN'|'HOST'|'NONE'` (default `GLOBAL`), `scopeId?` (tag/VLAN/host id for `TAG`/`VLAN`/`HOST`), `priority?` (-1000..1000, default 0)
+  - The key (and passphrase) is validated with `ssh-keygen -y`. Errors: `400 invalid_key_or_passphrase`, `400 invalid_sudo_mode` (`LOGIN_PASSWORD` with a key credential), `400 sudo_password_required`, `400 scope_id_required`, `400 scope_not_found`; passwords and passphrases must not contain line breaks
+- `PUT /ssh-credentials/:id` — Body: `{ name?, username?, scopeType?, scopeId?, priority?, sudoMode?, sudoPassword?, password?, passphrase? }`. `password` only for password credentials; `passphrase` only for key credentials (validated against the stored key; `null`/`''` removes it if the key is unencrypted); omitted secrets are kept. The private key cannot be replaced: create a new credential instead
+- `DELETE /ssh-credentials/:id` — refused with `409` while the credential is used by a discovery target set (`credential_in_use_by_discovery`), explicitly assigned to hosts (`credential_assigned_to_hosts`) or used by an enforcement point (`credential_used_by_enforcement_points`). Secrets no other credential shares are deleted with it
 
-### Tag Rules (Auto-Tagging) (Operator/Admin role required)
+Create, update and delete are audited (`SSH_CREDENTIAL_CREATE`, `SSH_CREDENTIAL_UPDATE`, `SSH_CREDENTIAL_DELETE`) without secrets.
 
-- `GET /tag-rules` — List all tag rules with match counts
-- `GET /tag-rules/:id` — Get tag rule with matched hosts
-- `POST /tag-rules` — Create tag rule. Body: `{ name, tagId, enabled?, priority?, criteria: { conditions: [{field, operator, value}], logic: 'AND'|'OR' } }`
-- `PUT /tag-rules/:id` — Update tag rule
-- `DELETE /tag-rules/:id` — Delete tag rule and remove auto-assigned tags
-- `POST /tag-rules/:id/evaluate` — Evaluate single rule against all hosts
-- `POST /tag-rules/evaluate-all` — Evaluate all enabled rules
-- `POST /tag-rules/evaluate-host/:hostId` — Evaluate all rules for a specific host
+### Visual Topology (read: all roles; write: `operator`, `admin`)
 
-### Policy Templates (Operator/Admin role required)
+- `GET /topology/views`, `GET /topology/views/:id`
+- `POST /topology/views`, `PUT /topology/views/:id`, `DELETE /topology/views/:id`
+- `POST /topology/views/:id/flows`, `DELETE /topology/flows/:flowId`
+- `POST /topology/views/:id/generate-policies` — generates DRAFT policy sets from the flows
+- `GET /topology/auto-discover` — builds a topology from inventory and deployed policies
 
-- `GET /policy-templates` — List templates with rule counts and instantiation counts
-- `GET /policy-templates/categories` — List distinct template categories
-- `GET /policy-templates/:id` — Get template with rules
-- `POST /policy-templates` — Create template. Body: `{ name, category?, targetTagId?, autoApply?, interfaceScopeType?, ... }`
-- `PUT /policy-templates/:id` — Update template
-- `DELETE /policy-templates/:id` — Delete template
-- `GET /policy-templates/:id/rules` — List template rules
-- `POST /policy-templates/:id/rules` — Add rule to template
-- `PUT /policy-templates/rules/:ruleId` — Update template rule
-- `DELETE /policy-templates/rules/:ruleId` — Delete template rule
-- `POST /policy-templates/:id/instantiate` — Create policy set + version + rules from template (DRAFT)
-- `POST /policy-templates/:id/preview` — Preview what instantiation would create
+The Topology page itself is only shown to `operator` and `admin` in the UI.
 
-### Visual Topology (Operator/Admin role required)
+### Policy Recommendations (read: all roles; write: `operator`, `admin`)
 
-- `GET /topology/views` — List topology views
-- `GET /topology/views/:id` — Get view with flows
-- `POST /topology/views` — Create topology view
-- `PUT /topology/views/:id` — Update view (layout, name)
-- `DELETE /topology/views/:id` — Delete view
-- `POST /topology/views/:id/flows` — Add flow connection
-- `DELETE /topology/flows/:flowId` — Remove flow
-- `POST /topology/views/:id/generate-policies` — Generate policy sets from topology flows (DRAFT)
-- `GET /topology/auto-discover` — Auto-discover topology from existing inventory and deployed policies
+- `GET /recommendations?status=&hostId=`
+- `GET /recommendations/:id`
+- `POST /recommendations/generate` — Body: `{ auditSessionId, hostId }`
+- `POST /recommendations/:id/accept`, `POST /recommendations/:id/reject`
+- `POST /recommendations/:id/apply` — applies an accepted recommendation as a DRAFT policy version
 
-### Policy Recommendations (Operator/Admin role required)
+### Integrations (`admin`, all endpoints)
 
-- `GET /recommendations` — List recommendations (filter by status, hostId)
-- `GET /recommendations/:id` — Get recommendation details
-- `POST /recommendations/generate` — Generate from audit session. Body: `{ auditSessionId, hostId }`
-- `POST /recommendations/:id/accept` — Accept recommendation
-- `POST /recommendations/:id/reject` — Reject recommendation
-- `POST /recommendations/:id/apply` — Apply accepted recommendation as DRAFT policy version
+- `GET /integrations`, `GET /integrations/:id` (with recent events), `POST /integrations`, `PUT /integrations/:id`, `DELETE /integrations/:id`
+- `POST /integrations/:id/test`, `POST /integrations/:id/sync`
+- `GET /integrations/:id/events`
+- `GET /integrations/vulnerabilities/by-host/:hostId`
+- `GET /integrations/threat-intel` — active threat intelligence entries
 
-### Integrations (Admin role required for write, Viewer+ for read)
+Secret fields (API keys, tokens) are masked in responses (e.g. `••••abcd`); sending the masked value back on update keeps the stored value.
 
-- `GET /integrations` — List all integrations
-- `GET /integrations/:id` — Get integration with recent events
-- `POST /integrations` — Create integration. Body: `{ type: 'siem'|'soar'|'vulnerability_db'|'threat_intel', provider, name, config, ... }`
-- `PUT /integrations/:id` — Update integration
-- `DELETE /integrations/:id` — Delete integration
-- `POST /integrations/:id/test` — Test connectivity
-- `POST /integrations/:id/sync` — Trigger sync
-- `GET /integrations/:id/events` — Get integration events
-- `GET /integrations/vulnerabilities/by-host/:hostId` — Host vulnerabilities
-- `GET /integrations/threat-intel` — Active threat intelligence entries
+### Policy Testing (read: all roles; actions: `operator`, `approver`, `admin`)
 
-### Policy Testing (Operator/Admin role required)
+- `GET /policy-test/sessions?hostId=&status=`
+- `GET /policy-test/sessions/:id`
+- `POST /policy-test/start` — Body: `{ policyVersionId, hostId, durationMinutes? (1-1440, default 30) }`
+- `POST /policy-test/sessions/:id/stop`
+- `POST /policy-test/sessions/:id/collect-logs`
+- `POST /policy-test/sessions/:id/analyze`
 
-- `GET /policy-test/sessions` — List test sessions (filter by hostId, status)
-- `GET /policy-test/sessions/:id` — Get test session details with analysis results
-- `POST /policy-test/start` — Start policy test. Body: `{ policyVersionId, hostId, durationMinutes? }`
-- `POST /policy-test/sessions/:id/stop` — Stop running test session
-- `POST /policy-test/sessions/:id/analyze` — Analyze collected traffic against policy rules
+### Kubernetes (read: all roles; clusters: `admin`; sync/map/generate: `operator`, `admin`)
 
-### Kubernetes (Admin for write, Viewer+ for read)
+- `GET /k8s/clusters`, `GET /k8s/clusters/:id`
+- `POST /k8s/clusters`, `PUT /k8s/clusters/:id`, `DELETE /k8s/clusters/:id`
+- `POST /k8s/clusters/:id/sync` — not implemented: returns `501 not_implemented`, no Kubernetes API call
+- `GET /k8s/clusters/:id/workloads?namespace=&kind=`
+- `POST /k8s/workloads/:workloadId/map-tag`
+- `GET /k8s/clusters/:id/network-policies`
+- `POST /k8s/clusters/:id/deploy-policy` — Body: `{ policyVersionId, namespace, policyName }`. Generates an Ingress-only NetworkPolicy manifest from an `APPROVED`/`DEPLOYED` version, stores it with status `GENERATED` and returns it with warnings for rules that cannot be expressed (DENY, FORWARD, ICMP, ...). The manifest is **not** applied to the cluster (UI: "Generate NetworkPolicy")
 
-- `GET /k8s/clusters` — List K8s clusters
-- `GET /k8s/clusters/:id` — Get cluster with workload summary
-- `POST /k8s/clusters` — Add cluster. Body: `{ name, apiServerUrl, authType, ... }`
-- `PUT /k8s/clusters/:id` — Update cluster
-- `DELETE /k8s/clusters/:id` — Delete cluster
-- `POST /k8s/clusters/:id/sync` — Sync workloads from cluster
-- `GET /k8s/clusters/:id/workloads` — List workloads (filter by namespace, kind)
-- `POST /k8s/workloads/:workloadId/map-tag` — Map workload to Segmentra tag
-- `GET /k8s/clusters/:id/network-policies` — List deployed network policies
-- `POST /k8s/clusters/:id/deploy-policy` — Deploy NetworkPolicy. Body: `{ policyVersionId, namespace, policyName }`
+### OT/IoT Assets (read: all roles; write: `operator`, `admin`)
 
-### OT/IoT Assets (Operator/Admin role required)
+- `GET /iot-assets?assetType=&zone=&vlanId=`, `GET /iot-assets/:id`
+- `POST /iot-assets`, `PUT /iot-assets/:id`, `DELETE /iot-assets/:id`
+- `POST /iot-assets/bulk-import`
+- `POST /iot-assets/:id/gateways` — Body: `{ gatewayIds: uuid[] }` (assign gateway hosts that protect the asset)
+- `DELETE /iot-assets/:id/gateways/:hostId`
+- `GET /iot-assets/gateways/list` — gateway hosts with protected assets and FORWARD rule counts
+- `GET /iot-assets/gateways/:hostId`
+- `POST /iot-assets/:id/tags`, `DELETE /iot-assets/:id/tags/:tagId`
+- `GET /iot-assets/:id/flows`
+- `POST /iot-assets/:id/baseline`
 
-- `GET /iot-assets` — List IoT assets (filter by assetType, zone, vlanId)
-- `GET /iot-assets/:id` — Get asset with observed flows and tags
-- `POST /iot-assets` — Create asset. Body: `{ name, assetType, vendor?, ipAddress?, zone?, criticality, ... }`
-- `PUT /iot-assets/:id` — Update asset
-- `DELETE /iot-assets/:id` — Delete asset
-- `POST /iot-assets/bulk-import` — Bulk import assets
-- `POST /iot-assets/:id/tags` — Assign tag to asset
-- `DELETE /iot-assets/:id/tags/:tagId` — Remove tag from asset
-- `GET /iot-assets/:id/flows` — Get observed traffic flows
-- `POST /iot-assets/:id/baseline` — Capture current traffic as baseline
+### Flow Collectors (read: `viewer`, `operator`, `admin`; write: `admin`)
 
-### Flow Collectors (Admin role required)
+- `GET /flow-collectors`, `GET /flow-collectors/:id`, `GET /flow-collectors/:id/flows`
+- `POST /flow-collectors`, `PUT /flow-collectors/:id`, `DELETE /flow-collectors/:id`
 
-- `GET /flow-collectors` — List flow collectors
-- `GET /flow-collectors/:id` — Get collector with recent flows
-- `POST /flow-collectors` — Create collector. Body: `{ name, type, listenAddress, listenPort, ... }`
-- `PUT /flow-collectors/:id` — Update collector
-- `DELETE /flow-collectors/:id` — Delete collector
+### Enforcement Points (read: all roles; write: `admin`; deploy: `operator`, `admin`)
 
-### Enforcement Points (Admin role required)
+- `GET /enforcement-points`, `GET /enforcement-points/:id`, `GET /enforcement-points/:id/acls`
+- `POST /enforcement-points`, `PUT /enforcement-points/:id`, `DELETE /enforcement-points/:id`
+- `POST /enforcement-points/:id/deploy-acl` — Body: `{ policyVersionId, aclName, aclConfig }` (version must be `APPROVED`/`DEPLOYED`)
 
-- `GET /enforcement-points` — List enforcement points
-- `GET /enforcement-points/:id` — Get enforcement point with ACLs
-- `POST /enforcement-points` — Create. Body: `{ name, type, vendor?, mgmtIp, sshCredentialId?, ... }`
-- `PUT /enforcement-points/:id` — Update
-- `DELETE /enforcement-points/:id` — Delete
-- `POST /enforcement-points/:id/deploy-acl` — Deploy ACL. Body: `{ policyVersionId, aclName, aclConfig }`
-- `GET /enforcement-points/:id/acls` — List deployed ACLs
+### Notifications (`admin`)
 
-### Notifications (Admin role required)
+- `GET /notifications/channels`, `GET /notifications/channels/:id`
+- `POST /notifications/channels` — Body: `{ name, type: 'slack'|'webhook'|'email', config: {}, enabled? }`
+- `PUT /notifications/channels/:id`, `DELETE /notifications/channels/:id`
+- `POST /notifications/channels/:id/test`
+- `POST /notifications/channels/:id/rules` — Body: `{ eventType, enabled? }`
+- `DELETE /notifications/rules/:ruleId`
+- `GET /notifications/log?status=&limit=`
 
-- `GET /notifications/channels` — List notification channels with rule counts and failure stats
-- `GET /notifications/channels/:id` — Get channel with rules and recent log
-- `POST /notifications/channels` — Create channel. Body: `{ name, type: 'slack'|'webhook'|'email', config: {}, enabled? }`
-- `PUT /notifications/channels/:id` — Update channel
-- `DELETE /notifications/channels/:id` — Delete channel and rules
-- `POST /notifications/channels/:id/test` — Send test notification
-- `POST /notifications/channels/:id/rules` — Subscribe to event. Body: `{ eventType, enabled? }`
-- `DELETE /notifications/rules/:ruleId` — Unsubscribe from event
-- `GET /notifications/log` — View notification history (filter by status, limit)
+Webhook URLs and secrets are masked in responses like integration secrets.
 
-### Security Posture Audit (All roles)
+### Security Posture Audit (read: all roles; scan: `operator`, `admin`)
 
-- `GET /security-audit/scan` — Run full audit scan, returns findings with severity
-- `GET /security-audit/summary` — Get finding counts only (lighter)
+- `POST /security-audit/scan` (also `GET`) — runs a full scan, stores the result and returns the findings
+- `GET /security-audit/latest` — latest stored scan
+- `GET /security-audit/history` — last 20 scans
+- `GET /security-audit/summary` — finding counts of the latest scan
 
 ---
 
 ## Database Schema
 
-Migrations live in `packages/db/migrations/` as plain `NNN_description.sql` files (001–025), applied by `npm run db:migrate` (`packages/db/scripts/migrate.js` → node-pg-migrate). There are no `.js` wrappers: node-pg-migrate loads both `.js` and `.sql` files with the same name, so older releases ran most migrations twice.
+Migrations live in `packages/db/migrations/` as plain `NNN_description.sql` files (001–032), applied by `npm run db:migrate` (`packages/db/scripts/migrate.js` → node-pg-migrate). There are no `.js` wrappers: node-pg-migrate loads both `.js` and `.sql` files with the same name, so older releases ran most migrations twice.
 
 ### Auth & RBAC
 
@@ -513,7 +472,7 @@ Migrations live in `packages/db/migrations/` as plain `NNN_description.sql` file
 #### `secret_store`
 - `id` (uuid, PK)
 - `name` (text)
-- `type` (text) — `SSH_KEY|LDAP_BIND|TLS_CA_CERT`
+- `type` (text, no CHECK) — e.g. `SSH_KEY`, `SSH_KEY_PASSPHRASE`, `SSH_PASSWORD`, `SUDO_PASSWORD`, `LDAP_BIND`
 - `encrypted_blob` (bytea)
 - `created_at` (timestamptz)
 - `rotated_at` (timestamptz, nullable)
@@ -525,13 +484,14 @@ Migrations live in `packages/db/migrations/` as plain `NNN_description.sql` file
 - `id` (uuid, PK)
 - `name` (text, unique)
 - `description` (text)
+- `is_system` (boolean, default false) — system tags `iot-gateway` and `bastion` (migration 020)
 
 #### `vlans`
 - `id` (uuid, PK)
-- `vlan_tag` (int)
+- `vlan_tag` (int, unique since migration 021)
 - `name` (text)
 - `description` (text)
-- `subnet` (cidr, nullable) — Used for management VLAN baseline SSH access
+- `subnet` (text, nullable) — VLAN subnet; used for VLAN sources, management VLAN baseline SSH access and discovery targets
 
 #### `hosts`
 - `id` (uuid, PK)
@@ -543,6 +503,7 @@ Migrations live in `packages/db/migrations/` as plain `NNN_description.sql` file
 - `firewall_backend` (text) — `auto|nftables|iptables`
 - `vlan_id` (uuid, FK → vlans.id, nullable)
 - `enabled` (boolean, default true) — Disabled hosts are skipped from deployments
+- `ssh_credential_id` (uuid, FK → ssh_credentials.id, nullable, ON DELETE SET NULL) — explicit SSH credential assignment; overrides scope resolution (migration 030)
 - `created_at` (timestamptz)
 - `updated_at` (timestamptz)
 
@@ -553,6 +514,8 @@ Migrations live in `packages/db/migrations/` as plain `NNN_description.sql` file
 #### `host_tags`
 - `host_id` (uuid, FK → hosts.id)
 - `tag_id` (uuid, FK → tags.id)
+- `source` (text, default `manual`) — `manual|rule|integration` (migration 009)
+- `source_rule_id` (uuid, FK → tag_rules.id, nullable)
 - Primary key: `(host_id, tag_id)` — Many-to-many relationship
 
 #### `host_interfaces`
@@ -561,8 +524,8 @@ Migrations live in `packages/db/migrations/` as plain `NNN_description.sql` file
 - `name` (text) — Interface name (e.g., `eth0`, `ens3`)
 - `role` (text) — Interface role (e.g., `data`, `management`)
 - `ip_address` (inet, nullable)
-- `cidr` (cidr, nullable)
-- `vlan_id` (int, nullable) — VLAN tag number
+- `cidr` (int, nullable) — prefix length
+- `vlan_id` (uuid, FK → vlans.id, nullable)
 - `is_primary` (boolean)
 - `enabled` (boolean)
 - `created_at` (timestamptz)
@@ -578,6 +541,7 @@ Migrations live in `packages/db/migrations/` as plain `NNN_description.sql` file
 - `scope_vlan_id` (uuid, FK → vlans.id, nullable)
 - `created_by` (uuid, FK → users.id)
 - `created_at` (timestamptz)
+- `source_template_id` (uuid, FK → policy_templates.id, nullable)
 
 #### `policy_set_hosts`
 - `policy_set_id` (uuid, FK → policy_sets.id)
@@ -603,17 +567,25 @@ Migrations live in `packages/db/migrations/` as plain `NNN_description.sql` file
 - `interface_scope_names` (text[], nullable)
 - `interface_scope_roles` (text[], nullable)
 - `is_high_risk` (boolean, default false)
+- `source_template_id` (uuid, FK → policy_templates.id, nullable)
+- `expires_at` (timestamptz, nullable), `expiry_action` (text, default `NOTIFY_ONLY`) — migration 017 (the expiry used at runtime is the one on `deployments`)
+
+#### `policy_version_editors` (migration 025)
+- `policy_version_id` (uuid, FK → policy_versions.id), `user_id` (uuid, FK → users.id), `created_at`
+- Primary key: `(policy_version_id, user_id)` — users who edited a version; they cannot approve it
 
 #### `policy_rules`
 - `id` (uuid, PK)
 - `policy_version_id` (uuid, FK → policy_versions.id)
 - `order_index` (int)
-- `direction` (text) — `IN|OUT|BOTH`
+- `direction` (text, default `IN`) — `IN|OUT|BOTH|FORWARD` (CHECK since migration 028)
 - `action` (text) — `ALLOW|DENY`
 - `protocol` (text) — `tcp|udp|icmp|any`
 - `ports` (text, nullable) — Normalized format: `"22"` or `"80,443"` or `"1000-2000"`
 - `source_type` (text) — `CIDR|TAG|VLAN|HOST`
 - `source_value` (text) — CIDR string OR tag_id/vlan_id/host_id serialized
+- `destination_type` (text, nullable) — `CIDR|TAG|VLAN|HOST|IOT_ASSET`; required for `FORWARD` rules, NULL otherwise (migration 028)
+- `destination_value` (text, nullable) — CIDR or the id of the tag/VLAN/host/IoT asset
 - `log_mode` (text) — `NONE|LOG|LOG_RATE_LIMITED`
 - `comment` (text)
 - `use_policy_interface_scope` (boolean, default true)
@@ -625,7 +597,7 @@ Migrations live in `packages/db/migrations/` as plain `NNN_description.sql` file
 
 #### `deployments`
 - `id` (uuid, PK)
-- `policy_version_id` (uuid, FK → policy_versions.id) — Must be APPROVED
+- `policy_version_id` (uuid, FK → policy_versions.id) — Must be APPROVED or DEPLOYED
 - `mode` (text) — `CANARY|PROGRESSIVE|FULL`
 - `target_query` (jsonb) — `{ tags: uuid[], vlans: uuid[], hosts: uuid[] }`
 - `target_count` (int)
@@ -633,24 +605,33 @@ Migrations live in `packages/db/migrations/` as plain `NNN_description.sql` file
 - `created_at` (timestamptz)
 - `started_at` (timestamptz, nullable)
 - `finished_at` (timestamptz, nullable)
-- `status` (text) — `QUEUED|RUNNING|SUCCEEDED|FAILED|PARTIAL|CANCELLED|PAUSED`
-- `requires_approval` (boolean, default false)
+- `status` (text) — `SCHEDULED|QUEUED|RUNNING|PAUSED|SUCCEEDED|FAILED|PARTIAL|CANCELLED|EXPIRED`
+- `requires_approval` (boolean, default false) — set for high-risk deployments; a second person must approve
 - `approved_by` (uuid, FK → users.id, nullable)
 - `approved_at` (timestamptz, nullable)
 - `canary_size` (int, nullable)
 - `batch_size` (int, nullable)
-- `scheduled_at` (timestamptz, nullable) — For deferred/scheduled deployments
+- `scheduled_at` (timestamptz, nullable) — For deferred/scheduled deployments (migration 007)
+- `expires_at` (timestamptz, nullable), `expiry_action` (text, default `NOTIFY_ONLY`: `NOTIFY_ONLY|REMOVE|REVERT`), `expired` (boolean, default false) — migration 017
+- `progress` (jsonb, nullable) — live progress of a running deployment (migration 023)
+- `notes` (text, nullable) — e.g. why a system-created revert deployment exists (migration 026)
+- `revert_of_deployment_id` (uuid, FK → deployments.id, nullable) — set on the deployment created by an expiry REVERT (migration 026)
+- `expiry_outcome` (jsonb, nullable) — result of the expiry action (migration 026)
 
 #### `deployment_hosts`
 - `deployment_id` (uuid, FK → deployments.id)
 - `host_id` (uuid, FK → hosts.id)
-- `status` (text) — `PENDING|RUNNING|SUCCEEDED|FAILED|ROLLED_BACK|SKIPPED|PAUSED`
+- `status` (text) — `PENDING|RUNNING|SUCCEEDED|FAILED|SKIPPED` (`PAUSED` only on rows from older versions)
 - `started_at` (timestamptz, nullable)
 - `finished_at` (timestamptz, nullable)
 - `message` (text, nullable)
-- `applied_hash` (text, nullable) — SHA-256 hash of compiled policy text (for drift detection)
-- `applied_live_hash` (text, nullable) — hash of the ruleset read back from the host after apply (migration 025)
+- `applied_hash` (text, nullable) — SHA-256 of the compiled policy text (not comparable with a live read)
+- `applied_live_hash` (text, nullable) — `v2:`-prefixed hash of Segmentra's own live rules read back after apply; the drift baseline (migration 025)
+- `expiry_status`, `expiry_message` (text, nullable), `expiry_processed_at` (timestamptz, nullable) — per-host result of the expiry action (migration 026)
 - `rollback_performed` (boolean, default false)
+- `persistence_status` (text, nullable) — reboot persistence of this host after the deployment: `persisted|not_persisted|removed|unknown`; NULL = not reported (host failed before that step, or deployed by an older version) (migration 032)
+- `persistence_method` (text, nullable) — `nftables.service|netfilter-persistent|iptables-services` (migration 032)
+- `persistence_message` (text, nullable) — summary plus warnings/notes, e.g. `firewalld_active: …`, `iptables_persistent_missing: …`, `unsupported_distro: …` (migration 032)
 - Primary key: `(deployment_id, host_id)`
 
 #### `deployment_artifacts`
@@ -671,7 +652,7 @@ Migrations live in `packages/db/migrations/` as plain `NNN_description.sql` file
 - `stderr_path` (text, nullable)
 - `started_at` (timestamptz)
 - `finished_at` (timestamptz, nullable)
-- `status` (text) — `RUNNING|DONE|ERROR`
+- `status` (text, default `RUNNING`) — e.g. `RUNNING|DONE`
 
 ### Auditing
 
@@ -684,6 +665,7 @@ Migrations live in `packages/db/migrations/` as plain `NNN_description.sql` file
 - `timestamp` (timestamptz)
 - `ip_address` (inet, nullable)
 - `metadata` (jsonb) — Rich metadata for the event
+- `siem_forwarded_at` (timestamptz, nullable) — set when an API process claims the row for SIEM forwarding (see Integrations)
 
 **Deployment Audit Metadata Structure**:
 ```json
@@ -714,27 +696,30 @@ Migrations live in `packages/db/migrations/` as plain `NNN_description.sql` file
 - `id` (uuid, PK)
 - `name` (text)
 - `username` (text)
-- `private_key_secret_id` (uuid, FK → secret_store.id)
+- `private_key_secret_id` (uuid, FK → secret_store.id, nullable) — private key (`auth_method = 'KEY'`)
 - `passphrase_secret_id` (uuid, FK → secret_store.id, nullable) — key passphrase
 - `password_secret_id` (uuid, FK → secret_store.id, nullable) — login password (`auth_method = 'PASSWORD'`)
 - `auth_method` (text) — `KEY|PASSWORD`
 - `sudo_mode` (text, default `NOPASSWD`) — `NOPASSWD|LOGIN_PASSWORD|SUDO_PASSWORD` (migration 029; `LOGIN_PASSWORD` only with `PASSWORD` auth)
 - `sudo_password_secret_id` (uuid, FK → secret_store.id, nullable) — separate sudo password (required for `SUDO_PASSWORD`)
-- `scope_type` (text) — `GLOBAL|TAG|VLAN|HOST`
-- `scope_id` (uuid, nullable) — Tag/VLAN/Host ID when scope_type is not GLOBAL
+- `scope_type` (text) — `GLOBAL|TAG|VLAN|HOST|NONE` (CHECK since migration 030; `NONE` = stored only, never chosen automatically)
+- `scope_id` (uuid, nullable) — tag/VLAN/host id for `TAG`/`VLAN`/`HOST`, NULL for `GLOBAL`/`NONE` (CHECK); no FK, so a deleted tag/VLAN/host leaves the credential matching nothing
+- `priority` (integer, default 0) — tie-breaker within one resolution level, higher wins (migration 030)
 - `created_at` (timestamptz)
 
-### System Settings
+CHECK constraints: `auth_method` `KEY` needs `private_key_secret_id`, `PASSWORD` needs `password_secret_id` (migration 024); `LOGIN_PASSWORD` needs `auth_method = 'PASSWORD'` and `SUDO_PASSWORD` needs `sudo_password_secret_id` (migration 029).
+
+### Firewall Learning & Settings
 
 #### `firewall_audit_sessions`
 - `id` (uuid, PK)
 - `host_id` (uuid, FK → hosts.id)
-- `status` (text) — `RUNNING|COMPLETED|FAILED|CANCELLED`
+- `status` (text, default `RUNNING`) — e.g. `RUNNING|COMPLETED|FAILED|CANCELLED`
 - `duration_minutes` (integer)
 - `started_at` (timestamptz)
 - `scheduled_restore_at` (timestamptz)
 - `restored_at` (timestamptz, nullable)
-- `backup_path` (text) — Path to backup file on remote server
+- `backup_path` (text) — Path to the backup on the host (`/var/backups/segmentra/...`)
 - `log_file_path` (text) — Path to log file on remote server
 - `log_data` (jsonb, nullable) — Parsed log entries and communication flows
 - `created_by` (uuid, FK → users.id)
@@ -746,17 +731,11 @@ Migrations live in `packages/db/migrations/` as plain `NNN_description.sql` file
 - `description` (text, nullable)
 - `updated_at` (timestamptz)
 
-### Policy Expiry
-
-Added to existing `deployments` table:
-- `expires_at` (timestamptz, nullable) — When the deployment expires
-- `expiry_action` (text, default 'NOTIFY_ONLY') — What to do on expiry: NOTIFY_ONLY, REMOVE, REVERT
-- `expired` (boolean, default false) — Whether the deployment has been processed as expired
-
 ### Notifications
 
 #### `notification_channels`
-- `id` (uuid, PK), `name`, `type` (slack/webhook/email), `config` (jsonb), `enabled`
+- `id` (uuid, PK), `name`, `type` (slack/webhook/email), `config` (jsonb, masked display copy only), `enabled`
+- `config_secret_id` (FK → secret_store, type `NOTIFICATION_CONFIG`): the full config (webhook URL, `authHeader`, `customHeaders`) encrypted with AES-256-GCM
 - `created_by`, `created_at`, `updated_at`
 
 #### `notification_rules`
@@ -799,7 +778,7 @@ Added to existing `deployments` table:
 - `created_by`, `created_at`, `updated_at`
 
 #### `policy_template_rules`
-- Mirrors `policy_rules` schema (order_index, direction, action, protocol, ports, source_type, source_value, log_mode, comment, interface scope overrides)
+- Mirrors `policy_rules` schema (order_index, direction, action, protocol, ports, source_type, source_value, destination_type, destination_value, log_mode, comment, interface scope overrides)
 - `policy_template_id` (uuid, FK → policy_templates.id)
 
 **Note**: `policy_sets` and `policy_versions` extended with `source_template_id` column.
@@ -831,7 +810,8 @@ Added to existing `deployments` table:
 
 #### `integrations`
 - `id` (uuid, PK), `type` (siem/soar/vulnerability_db/threat_intel), `provider`, `name`
-- `enabled`, `config` (jsonb), `credentials_secret_id` (FK → secret_store)
+- `enabled`, `config` (jsonb, masked display copy only), `credentials_secret_id` (FK → secret_store)
+- `config_secret_id` (FK → secret_store, type `INTEGRATION_CONFIG`): the full config (e.g. `apiKey`) encrypted with AES-256-GCM
 - `last_sync_at`, `last_sync_status`
 
 #### `integration_events`
@@ -848,7 +828,7 @@ Added to existing `deployments` table:
 #### `policy_test_sessions`
 - `id` (uuid, PK)
 - `policy_version_id` (FK), `host_id` (FK)
-- `status` — `PENDING|DEPLOYING|RUNNING|COLLECTING|ANALYZING|COMPLETED|FAILED`
+- `status` — e.g. `PENDING|DEPLOYING|RUNNING|COLLECTING|COMPLETED|FAILED`
 - `duration_minutes`, `started_at`, `scheduled_end_at`, `completed_at`
 - `backup_path`, `log_file_path`, `raw_log_data` (jsonb)
 - `analysis_results` (jsonb) — matchedFlows, unmatchedFlows, unexpectedBlocks, unexpectedAllows, summary
@@ -866,7 +846,7 @@ Added to existing `deployments` table:
 - `workload_id` (FK), `tag_id` (FK), `source` (label_sync/manual)
 
 #### `k8s_network_policies`
-- `cluster_id` (FK), `policy_version_id` (FK), `namespace`, `policy_name`, `manifest` (jsonb), `status`, `deployed_hash`
+- `cluster_id` (FK), `policy_version_id` (FK), `namespace`, `policy_name`, `manifest` (jsonb), `status` (`GENERATED` for manifests created by deploy-policy), `deployed_hash`
 
 ### OT/IoT
 
@@ -890,19 +870,47 @@ Added to existing `deployments` table:
 #### `enforcement_acls`
 - `enforcement_point_id` (FK), `policy_version_id` (FK), `acl_name`, `acl_config`, `status`, `deployed_hash`
 
+#### `iot_asset_gateways` (migration 019)
+- `asset_id` (FK → iot_assets.id), `host_id` (FK → hosts.id) — gateway hosts that protect an asset. Forwarded traffic to a protected asset is dropped on the gateway unless a `FORWARD` rule allows it
+- Primary key: `(asset_id, host_id)`
+
+### Inventory Discovery (migration 027)
+
+#### `discovery_profiles`
+- `id`, `name` (unique), `enabled`
+- `schedule_interval_minutes` (int, nullable) — NULL = manual runs only; 1..525600
+- `default_tag_name` (text, default `new-server`) — tag applied to imported hosts
+- `next_run_at`, `last_run_at`, `created_by`, `created_at`, `updated_at`
+
+#### `discovery_targets`
+- `id`, `profile_id` (FK, cascade), `position`
+- `ssh_credential_id` (FK → ssh_credentials.id, ON DELETE RESTRICT)
+- `ssh_port` (default 22), `cidrs` (text[]), `vlan_ids` (uuid[], no FK; VLANs without a subnet are skipped)
+
+#### `discovery_runs`
+- `id`, `profile_id` (FK, cascade), `trigger` (`manual|scheduled`), `status` (`RUNNING|SUCCEEDED|FAILED`)
+- `started_at`, `finished_at`, counters `addresses_scanned`, `ssh_open`, `login_ok`, `imported`, `already_present`, `login_failed`
+- `results` (jsonb) — per-address results (addresses with an open SSH port, capped), `error`, `created_by`
+- At most one `RUNNING` run per profile (partial unique index)
+
+### Security Posture Audit (migration 022)
+
+#### `security_audit_results`
+- `id`, `findings` (jsonb), `summary` (jsonb), `triggered_by` (FK → users.id), `created_at`
+
 ---
 
 ## Deployment Executors
 
-Segmentra supports two deployment executors, selectable in Admin settings:
+Segmentra supports two deployment executors, selectable in **Admin → Deployment Executor** (`system_settings.deployment_executor`; the default after migration 003 is `ansible`). The hardened compose override has no Ansible runner, so it requires SSH Direct.
 
-### Ansible (Default, Recommended)
+### Ansible
 
-- Uses Ansible playbook for deployments
-- Better error handling and automatic rollback
-- Parallel execution across hosts
-- Requires Ansible container (`segmentra-ansible-runner`)
-- Uses `become: true` (sudo) for all privileged operations
+- Runs `infra/ansible-runner/playbooks/apply-firewall.yml` against all target hosts in one playbook run (Ansible's parallel forks)
+- On a failed apply, a `rescue` block restores the host from that run's scoped backup (only `table inet segmentra` / the `SEGMENTRA-*` chains)
+- No lockout auto-revert (unlike SSH Direct), and the `CANARY` / `PROGRESSIVE` gates are not applied: all hosts are deployed in the same run
+- Requires the Ansible container (`segmentra-ansible-runner`) and the Docker socket in the API container
+- Uses `become: true` (sudo) for privileged operations; the sudo password (if any) is passed as `ansible_become_password` in a temporary `host_vars` file, passphrase-protected keys are loaded into an `ssh-agent` in the runner (see [security.md](security.md#how-secrets-are-used-when-connecting-to-hosts))
 
 #### How Ansible Executor Connects to the Container
 
@@ -933,7 +941,7 @@ The app connects to the Ansible executor container using **Docker's API**, not S
      volumes:
        - segmentra_bundles:/bundles
      ```
-   - The API container writes deployment bundles (inventory, policy files, SSH keys) to `/bundles/<deploymentId>/`
+   - The API container writes deployment bundles (inventory, per-host policy files, temporary key files and `host_vars` password files) to `/bundles/<deploymentId>/`; key and password files are deleted when the playbook finishes
    - The Ansible runner container reads from the same path.
 
 **Visual Flow:**
@@ -989,18 +997,18 @@ This runs the `docker` CLI command from inside the API container, which communic
 
 ### SSH Direct
 
-- Lightweight direct SSH/SCP execution
-- No Ansible dependency
-- Requires `ssh` and `scp` commands on the API host
-- Uses `sudo` prefix for all privileged operations
-- Suitable for simpler environments or when Ansible is not available
-- Runs sequentially (one host at a time)
+- Lightweight direct SSH/SCP execution, no Ansible or Docker socket needed
+- Requires `ssh` and `scp` on the API host (plus `sshpass` for password credentials; all included in the API image)
+- Runs every root step as `sudo sh -c '…'` (passwordless, or with the sudo password on stdin)
+- Runs sequentially (one host at a time) and applies the `CANARY` / `PROGRESSIVE` gates (see [Async Deployment Execution](#async-deployment-execution))
+- **Lockout protection:** before applying, it schedules an automatic revert on the host (via `systemd-run` or `nohup`, default 120 s); if Segmentra cannot reach the host again after the apply, the previous state is restored
 
 **Both executors:**
-- Support sudo-capable accounts (not root)
-- Create backups before applying rules
-- Attempt rollback on failure
-- Work with nftables and iptables
+- Need an account with full sudo rights (`ALL`), not root
+- Back up only Segmentra's own state (`table inet segmentra`, or the `SEGMENTRA-IN/OUT/FWD` chains and their jumps) to `/var/backups/segmentra/` before applying
+- Roll back to that backup on failure
+- Work with nftables and iptables (see [Generated rules](#generated-firewall-rules))
+- Make the final state survive a reboot with the distribution's own service (see [Reboot persistence](#reboot-persistence))
 
 ---
 
@@ -1013,10 +1021,10 @@ Firewall Learning is a powerful feature that helps administrators discover the c
 #### How It Works
 
 1. **Session Creation**: User selects one or more hosts and specifies a duration (e.g., 60 minutes)
-2. **Backup**: System automatically backs up existing firewall rules to `/var/backups/segmentra/`
+2. **Backup**: Segmentra backs up its own state (`table inet segmentra`, or the `SEGMENTRA-*` chains and their jumps) to `/var/backups/segmentra/`; rules of other tools are not touched
 3. **Log-Only Policy Deployment**: 
    - Compiles a log-only firewall policy that logs all traffic but doesn't block anything
-   - Changes default policy from `DROP` to `ACCEPT` (nftables) or `DROP` to `ACCEPT` (iptables)
+   - The default for unmatched inbound traffic becomes accept (nft `input` chain policy `accept`; iptables `SEGMENTRA-IN` ends with `RETURN`)
    - Adds logging rules before each action to capture traffic details
    - Configures rsyslog to write FW-AUDIT logs to custom log file (`/var/log/segmentra-audit-*.log`)
 4. **Traffic Collection**: System collects traffic logs for the specified duration
@@ -1033,7 +1041,7 @@ Firewall Learning is a powerful feature that helps administrators discover the c
 #### Technical Implementation
 
 - **Compiler Enhancement**: `packages/compiler/src/compile.ts` supports `logOnlyMode` parameter
-  - When enabled, changes default policies to ACCEPT
+  - When enabled, unmatched traffic is accepted instead of dropped
   - Adds logging rules before each action
   - Includes catch-all logging rules for all remaining traffic
 - **Executor Functions**: `packages/executor/src/audit-ssh.ts` provides:
@@ -1090,24 +1098,26 @@ Segmentra provides **agentless drift detection** by comparing current firewall r
 
 #### How It Works
 
-1. **Policy Hash Storage**: When a deployment succeeds, the SHA-256 hash of the compiled policy text is stored in `deployment_hosts.applied_hash`.
+1. **Baseline**: Right after a successful apply, the executor reads Segmentra's own live rules back from the host and stores their hash in `deployment_hosts.applied_live_hash`. (`applied_hash`, the hash of the compiled file, is not comparable with a live read.)
 
-2. **Rule Reading**: The compliance check uses SSH to read current firewall rules:
-   - For nftables: `nft list ruleset` (as root via `sudo sh -c`, passwordless or with the sudo password on stdin)
-   - For iptables: `iptables-save` (+ `ip6tables-save`), same way
+2. **Rule Reading**: The compliance check reads only Segmentra's own state over SSH (as root via `sudo sh -c`, passwordless or with the sudo password on stdin):
+   - nftables: `table inet segmentra`
+   - iptables: the `SEGMENTRA-IN` / `SEGMENTRA-OUT` chains (and `SEGMENTRA-FWD` when present) plus their jumps from `INPUT` / `OUTPUT` / `FORWARD`
 
-3. **Normalization & Hashing**: Rules are normalized (removing timestamps, comments) and hashed using SHA-256.
+   Rules of Docker, Kubernetes, fail2ban and other tools are not part of the hash.
 
-4. **Comparison**: The current hash is compared to `applied_hash`:
-   - **Compliant**: Hashes match — host matches last deployed policy
-   - **Drifted**: Hashes differ — manual changes or failed apply detected
-   - **Unknown**: No successful deployment found (never deployed or hash missing)
-   - **Error**: Unable to read rules (SSH failure, permissions, etc.)
+3. **Normalization & Hashing**: The rules are normalized and hashed with SHA-256; the hash is prefixed with `v2:`.
+
+4. **Comparison** with `applied_live_hash` of the last successful deployment:
+   - **Compliant**: hashes match
+   - **Drifted**: hashes differ, or Segmentra's table/chain or its jump is missing
+   - **Unknown**: no successful deployment, the baseline was recorded by an older version (no `v2:` prefix; redeploy once), or the expiry `REMOVE` action removed the rules
+   - **Error**: rules could not be read (SSH failure, sudo, etc.)
 
 #### Usage
 
 - **Per-Host Check**: Use the "Check Compliance" button in Inventory → Hosts
-- **Bulk Check**: Select multiple hosts and use bulk compliance check
+- **Bulk Check**: Select multiple hosts and use **Check Compliance** in the bulk actions
 - **Status Display**: Compliance status is shown in the inventory table
 - **API Access**: `GET /api/compliance/hosts/:hostId` or `POST /api/compliance/hosts/bulk`
 
@@ -1154,7 +1164,7 @@ Before allowing a deployment, the system:
 
 ### High-Risk Policy Detection
 
-Segmentra automatically detects potentially dangerous policy changes and enforces enhanced approval requirements to prevent accidental security breaches.
+Segmentra automatically flags potentially dangerous policy changes. A high-risk deployment needs a second person's approval before it can start.
 
 #### How It Works
 
@@ -1189,16 +1199,11 @@ When a policy version is submitted for approval, the system automatically evalua
    - Sets `policy_versions.is_high_risk = true` if any heuristic triggers
    - Includes `isHighRisk` flag in audit metadata
 
-2. **On Approval**: When `POST /policy-versions/:id/approve` is called, the system:
-   - Checks the `is_high_risk` flag
-   - If high-risk and approver is the creator, blocks approval (even for admins)
-   - Requires a different approver to review high-risk policies
-   - Logs high-risk status in audit events
+2. **On Approval**: `POST /policy-versions/:id/approve` refuses every version (high-risk or not, even for admins) when the approver created, edited or submitted it. The `isHighRisk` flag is recorded in the audit event.
 
-3. **On Deployment Creation**: When `POST /deployments` is called, the system:
-   - Re-evaluates risk status with actual target count
-   - Updates `is_high_risk` flag if risk level changes based on deployment scope
-   - Allows deployment to proceed (flag is informational, not blocking)
+3. **On Deployment Creation**: `POST /deployments`:
+   - Re-evaluates the risk with the actual target count and sets `is_high_risk` if it now triggers
+   - Creates a high-risk deployment with `requires_approval = true`: it cannot be started (manually or by the scheduler) until an `approver`/`admin` other than its creator calls `POST /deployments/:id/approve`
 
 #### Implementation
 
@@ -1206,7 +1211,7 @@ When a policy version is submitted for approval, the system automatically evalua
 - **Function**: `isPolicyVersionHighRisk(params: { policyVersionId: string, targetCount?: number }): Promise<boolean>`
 - **Integration Points**:
   - Policy version submission (`POST /policy-versions/:id/submit-approval`)
-  - Policy version approval (`POST /policy-versions/:id/approve`)
+  - Policy version approval (`POST /policy-versions/:id/approve`, audit metadata only)
   - Deployment creation (`POST /deployments`)
 
 #### High-Risk Heuristics Details
@@ -1234,12 +1239,12 @@ The `policy_versions` table includes:
 #### API Behavior
 
 - **Submission**: Automatically sets `is_high_risk` flag
-- **Approval**: Blocks self-approval for high-risk policies
-- **Deployment**: Re-evaluates and updates flag based on actual deployment scope
+- **Approval**: Self-approval is blocked for all versions; the flag is only recorded
+- **Deployment**: Re-evaluates the flag with the actual scope; high-risk deployments require a second approval before they start
 
 ### Policy Impact Analysis
 
-Before approving a policy version, reviewers can analyze the impact of changes.
+Before approving a policy version, reviewers can analyze the impact of changes. (The navigation entry **Policy Impact Analysis** is a different feature: on-device policy testing, see [On-Device Policy Testing](#on-device-policy-testing).)
 
 #### Features
 
@@ -1254,10 +1259,10 @@ Before approving a policy version, reviewers can analyze the impact of changes.
 
 #### Usage
 
-- **In Approvals Screen**: Displays a table of all pending approval versions with: policy set name, version number, rule count, submitted by, submitted date, change summary, approve/reject buttons, and impact analysis. When reviewing a specific policy version, select:
-  1. Current deployed version ID
-  2. Sample hosts to analyze
-  3. Click "Analyze Impact"
+- **In the Approvals page**: lists all versions pending approval (policy set, version, rule count, submitter, date, change summary, approve/reject). Under **Impact Analysis (Optional)** for a version:
+  1. Choose the version to compare against
+  2. Choose sample hosts
+  3. Click **Analyze Impact**
 - **API**: `POST /api/policy-versions/:candidateVersionId/impact-diff`
 
 #### Benefits
@@ -1315,30 +1320,55 @@ Before deploying, verify that hosts are ready to receive firewall policies.
 }
 ```
 
+### SSH Credential Resolution
+
+Every SSH connection to a managed host (readiness, deployments, backend detection, drift checks, policy expiry, Firewall Learning, policy tests, Ansible runs) picks the credential the same way (`EFFECTIVE_CREDENTIAL_LATERAL` in `apps/api/src/services/ssh-credentials.ts`):
+
+1. the credential **explicitly assigned** to the host (`hosts.ssh_credential_id`; set by an admin in Inventory → edit host, or by discovery for the hosts it imports)
+2. a credential with scope `HOST` for that host
+3. a credential with scope `TAG` for one of the host's tags
+4. a credential with scope `VLAN` for the host's VLAN
+5. a `GLOBAL` credential
+
+Within one level the highest `priority` wins, then the newest credential. `NONE` ("not assigned") credentials are never chosen automatically; they are used by discovery target sets and for hosts they are explicitly assigned to. There is no fallback: if the chosen credential fails, Segmentra does not try the next one. The result is exposed as `effective_credential` on `/api/hosts` and shown in the **SSH credential** column of Inventory → Hosts.
+
+**Privilege escalation** (`sudo_mode`, migration 029): `NOPASSWD` (`sudo -n`), `LOGIN_PASSWORD` (the login password of a password credential) or `SUDO_PASSWORD` (a separate stored password). Passwords are sent to `sudo -k -S` on stdin. Every root step runs as `sudo sh -c '…'`, so the account needs full sudo rights (`ALL`); `requiretty`, `su`/`doas` and similar are not supported. Key credentials may be passphrase-protected: the passphrase is checked with `ssh-keygen -y` when saving and supplied at connect time through an OpenSSH askpass helper (`ssh-agent` in the Ansible runner). sudo refusals are classified as `password_required`, `wrong_password`, `tty_required` or `not_permitted` (see [Host Readiness Issues](#host-readiness-issues)).
+
+### Inventory Discovery
+
+Inventory → **Discovery** (`/api/discovery/*`, `services/discovery.ts`, migration 027):
+
+- A **profile** has 1–20 **target sets** (SSH credential + IPv4 CIDRs and/or VLAN subnets + SSH port), an optional schedule (every N minutes; none = manual) and a tag for new hosts (default `new-server`). Profiles are managed by admins; operators can **Run Now**
+- Limits: IPv4 only, each network at most /20 (4096 addresses), at most 8192 addresses per run; checked when saving and again at run time
+- A run TCP-probes the SSH port, logs in with the target set's credential, collects read-only facts (hostname, OS, firewall tool) and imports hosts that are not yet in inventory (matched by management IP); existing hosts are left untouched
+- An imported host gets the profile's tag and, unless scope resolution already picks the same credential, an explicit assignment of the credential that logged in (`hosts.ssh_credential_id`). Credentials added inline in the UI are stored with scope `NONE` (unless made global)
+- Each run stores counters and per-address results (`discovery_runs`); at most one run per profile is `RUNNING`. The scheduler runs every minute; runs interrupted by an API restart are marked `FAILED` at startup
+- A credential used by a target set cannot be deleted (`409`)
+
 ### Scheduled Deployments
 
 Deployments can be scheduled for future execution, useful for maintenance windows.
 
 #### Features
 
-- **Simple Scheduling**: Specify `scheduledAt` datetime when creating deployment
-- **Background Processing**: Background job checks every minute for ready deployments
-- **Queue Readiness**: When `scheduled_at <= now()`, the system clears `scheduled_at` and leaves the deployment in `QUEUED` status, ready to be started manually via the `/deployments/:id/start` endpoint
-- **No Calendar Logic**: Simple "tonight at 02:00" style scheduling
-- **Manual Start Required**: Scheduled deployments do not automatically start - they must be manually started via the start endpoint after the scheduled time has passed
+- **Simple Scheduling**: Specify `scheduledAt` when creating a deployment; it is created with status `SCHEDULED`
+- **Automatic Start**: A background job runs every minute and starts deployments whose `scheduled_at <= now()` (up to 10 per run, each claimed atomically)
+- **Approval First**: A high-risk deployment (`requires_approval`) is only started once it has been approved
+- **Manual Start Still Possible**: `POST /deployments/:id/start` starts a scheduled deployment early
+- **No Calendar Logic**: Simple "tonight at 02:00" style scheduling, no recurrence
 
 #### Usage
 
 - **UI**: Use datetime picker in deployment creation form
 - **API**: Include `scheduledAt: "2026-01-10T02:00:00Z"` in deployment creation payload
 - **Format**: ISO 8601 datetime string
-- **Starting**: After the scheduled time, call `POST /deployments/:id/start` to begin the deployment
+- **Starting**: Automatic at the scheduled time; or call `POST /deployments/:id/start` earlier
 
 #### Implementation
 
 - **Database**: `deployments.scheduled_at` field (added in migration 007)
 - **Background Job**: Runs every minute in `apps/api/src/index.ts`
-- **Processing**: `processScheduledDeployments()` function clears `scheduled_at` when `scheduled_at <= now()`, leaving deployments in `QUEUED` status for manual start
+- **Processing**: `processScheduledDeployments()` in `apps/api/src/routes/deployments.ts` claims each due deployment and runs it; a start error marks the deployment `FAILED`
 
 #### Example
 
@@ -1443,7 +1473,7 @@ Reusable policy blueprints that accelerate policy creation.
 
 - **Template Rules**: Mirror policy_rules schema exactly — same fields, same validation
 - **Instantiation**: Creates real policy_set + policy_version + policy_rules in DRAFT status
-- **Auto-Apply**: When enabled, automatically creates DRAFT policies when hosts gain the template's target tag
+- **Auto-Apply**: When enabled, creates a DRAFT policy set (once per template and tag) when hosts gain the template's target tag, whether by manual tagging, CSV import, tag rules or discovery
 - **Compiler Unchanged**: Templates produce standard policy objects, so the compiler needs zero changes
 
 ### Visual Topology Design
@@ -1480,14 +1510,15 @@ Adapter-based integration system for external security tools.
 
 | Type | Purpose |
 |------|---------|
-| SIEM | Forward audit events via syslog/webhook |
-| SOAR | Expose actions (isolate host, apply emergency policy) via webhooks |
-| Vulnerability DB | Poll scanner API, populate host vulnerabilities, trigger auto-tagging for critical CVEs |
-| Threat Intelligence | Poll threat feeds, maintain IP/CIDR blocklists with confidence and expiry |
+| SIEM | Forward audit events via syslog; **Test** sends a real syslog message |
+| SOAR | Configuration only (placeholder) |
+| Vulnerability DB | Configuration only (placeholder); `host_vulnerabilities` is not populated by a real scanner sync |
+| Threat Intelligence | AbuseIPDB: **Sync** fetches the blocklist into `threat_intel_entries` with confidence and expiry |
 
-- **Credentials**: Stored in existing `secret_store` with AES-256-GCM encryption
-- **Event Trail**: All sync/webhook operations logged in `integration_events`
-- **Auto-Block**: Threat intel auto-block is opt-in (admin configures confidence threshold)
+- **Implemented today**: only the AbuseIPDB threat-intel sync and SIEM syslog forwarding do real work; other types/providers store configuration and return placeholder results on sync
+- **SIEM scope**: every `audit_events` row is forwarded exactly once, however it was inserted. An `AFTER INSERT` trigger (migration 031) runs `pg_notify('segmentra_audit', id)`; `services/siem-audit-listener.ts` LISTENs on a dedicated connection (reconnects with backoff), claims the row via `audit_events.siem_forwarded_at` (so multiple API replicas don't duplicate) and sends it through `services/siem-forwarder.ts`. A sweep forwards unclaimed events of the last 60 minutes at startup, after reconnects and every minute. Do not call `forwardAuditToSiem` for audit events yourself
+- **Secrets**: API keys and tokens live in the integration's `config` and are masked in API responses
+- **Event Trail**: sync/test operations are logged in `integration_events`
 
 ### On-Device Policy Testing
 
@@ -1520,11 +1551,11 @@ Structured pre-enforcement testing that validates a policy against real traffic 
 
 Agentless Kubernetes NetworkPolicy management via K8s API.
 
-- **No Agent Required**: Connects to K8s API server directly — no sidecar, no service mesh dependency
-- **Separate Package**: K8s logic is separate from SSH-focused `packages/executor`
-- **Label Sync**: K8s labels synced to Segmentra tags for unified policy management across hosts and containers
-- **NetworkPolicy Generation**: Translates Segmentra rules into K8s NetworkPolicy manifests (label selectors, not IP sets)
-- **Credentials**: Supports kubeconfig, service account, and bearer token authentication — stored in `secret_store`
+Current state (see also [kubernetes.md](kubernetes.md)):
+
+- **Clusters**: cluster records (API server URL, auth type, namespace) can be managed, but Segmentra does not call the Kubernetes API: **Sync** is a placeholder that only updates `last_sync_at` / `last_sync_status`. Workloads in `k8s_workloads` come from the demo data seed, not from a cluster
+- **Tag mapping**: workloads can be mapped to Segmentra tags (`POST /k8s/workloads/:id/map-tag`)
+- **Generate NetworkPolicy**: `POST /k8s/clusters/:id/deploy-policy` translates an `APPROVED`/`DEPLOYED` policy version into an **Ingress-only** NetworkPolicy manifest (`ipBlock` sources, ports); DENY, FORWARD, ICMP and other rules that cannot be expressed are skipped with warnings. The manifest is stored (`k8s_network_policies`, status `GENERATED`) and shown for copying; it is **not** applied to the cluster
 
 ### OT/IoT Microsegmentation
 
@@ -1554,7 +1585,8 @@ Passive traffic discovery and upstream enforcement for devices that cannot run a
 
 - **Separate from Hosts**: `iot_assets` table is distinct from `hosts` — fundamentally different devices
 - **Zone Model**: Text field for Purdue levels, flexible for non-standard OT network layouts
-- **Enforcement**: Via existing SSH credential infrastructure to managed switches/gateways
+- **Gateway enforcement (implemented)**: a Linux host in inventory (typically tagged `iot-gateway`) is assigned as the gateway of one or more assets (`iot_asset_gateways`). Policies for the gateway can contain `FORWARD` rules with an explicit destination (`destination_type` `CIDR|TAG|VLAN|HOST|IOT_ASSET`). On the gateway, forwarded traffic **to a protected asset** is dropped unless a `FORWARD` rule allows it; other routed traffic passes unchanged. See [Generated firewall rules](#generated-firewall-rules) and [iot.md](iot.md)
+- **Flow collectors / enforcement points**: records and ACL texts can be stored; Segmentra does not run a NetFlow/sFlow listener or push ACLs to switches
 - **Baseline**: Snapshot current traffic as "allowed" for anomaly detection
 
 ### Policy Expiry
@@ -1563,22 +1595,20 @@ Optional time-limited deployments that automatically expire after a specified da
 
 #### How It Works
 
-1. When creating a deployment, optionally set **Expires At** and **On Expiry** action
-2. A background job checks every minute for expired deployments
-3. On expiry, the system:
-   - Marks the deployment as `expired = true` and sets its status to `EXPIRED`
-   - Sends a `POLICY_EXPIRED` notification (the subject/metadata reflect the chosen action)
-   - Logs an audit event
-   - Does **not** change any firewall rules on the hosts — every action currently results in a notification only
-4. A 24-hour warning notification is sent before expiry (deduped to avoid spam)
+1. When creating a deployment, optionally set **Expires At** and **On Expiry** action (`expiresAt`, `expiryAction`)
+2. A background job (`services/deployment-expiry.ts`) runs every minute; each expired deployment is claimed atomically (`expired = false → true`) so it is processed once
+3. The deployment's status becomes `EXPIRED`, the chosen action runs as "system" (no actor in the audit log), the result is stored in `deployments.expiry_outcome` (per host in `deployment_hosts.expiry_*`), and a `POLICY_EXPIRED` notification and audit event are written
+4. A 24-hour warning notification (`POLICY_EXPIRING_SOON`) is sent before expiry (once per deployment)
 
 #### Expiry Actions
 
 | Action | Behavior |
 |--------|----------|
-| **Notify Only** | Alert is sent, but firewall rules remain active on hosts. Manual removal required. |
-| **Remove** | Notification says "manual rollback required". Rules are **not** removed automatically — roll back manually (e.g. `scripts/restore-previous-policy.sh`). |
-| **Revert** | Notification says the previous version should be redeployed. Nothing is redeployed automatically — create a deployment of the previous version manually. |
+| **Notify Only** (`NOTIFY_ONLY`) | Notification only; the rules stay active on the hosts. |
+| **Remove** (`REMOVE`) | Over SSH, removes Segmentra's `table inet segmentra` or `SEGMENTRA-*` chains (and jumps) from every host that still runs this deployment's policy; other tools' rules are untouched. Hosts are then unmanaged (drift status `unknown`). |
+| **Revert** (`REVERT`) | Creates and starts a new system deployment (`revert_of_deployment_id`) of the previous successfully deployed version of the same policy set, to the hosts that ran it. No new approval is needed, but that version must still be `APPROVED` or `DEPLOYED`. |
+
+Failed REMOVE/REVERT actions are recorded and notified but not retried automatically.
 
 #### Use Cases
 
@@ -1596,7 +1626,7 @@ Multi-channel alerting for security events and operational changes.
 |-------------|---------------|---------|
 | **Slack** | `{ "webhookUrl": "https://hooks.slack.com/services/..." }` | Posts formatted messages with color-coded severity |
 | **Webhook** | `{ "url": "https://...", "authHeader": "Bearer ..." }` | POSTs JSON payload to any HTTP endpoint |
-| **Email** | `{ "to": "admin@company.com", "smtpHost": "..." }` | Sends email notifications (preview — requires SMTP implementation) |
+| **Email** | `{ "to": "admin@company.com" }` | Not implemented: delivery fails with an error and is logged as `FAILED` (no SMTP client) |
 
 #### Event Types
 
@@ -1612,12 +1642,17 @@ Multi-channel alerting for security events and operational changes.
 | `POLICY_EXPIRING_SOON` | Deployment within 24 hours of expiry |
 | `POLICY_EXPIRED` | Deployment has expired |
 | `EXCESSIVE_RULES_DETECTED` | Security audit found critical/high findings |
+| `AUDIT_RESTORE_FAILED` | A Firewall Learning session could not restore the host's rules |
+
+`COMPLIANCE_DRIFT` can be subscribed to, but no code currently emits it (compliance checks are on demand and do not notify).
 
 #### Design
 
 - **Fire-and-forget**: Notification failures never block core operations (logged but not thrown)
+- **Outbound URL checks**: webhook/Slack URLs that resolve to loopback, link-local or cloud metadata addresses are refused unless `SEGMENTRA_ALLOW_PRIVATE_WEBHOOKS=true`
 - **Deduplication**: Expiry warnings are sent once per 24-hour period per deployment
 - **Full log**: Every notification attempt is recorded in `notification_log` with status tracking
+- **Rule filters**: `notification_rules.filter` is stored but not applied; a subscribed channel receives every event of that type
 
 ### Security Posture Audit
 
@@ -1638,7 +1673,7 @@ On-demand scanning of all deployed policies for excessive permissions and compli
 
 #### Auto-Notification
 
-When the scan finds critical or high severity findings, it automatically sends an `EXCESSIVE_RULES_DETECTED` notification to all subscribed channels.
+Scans run on demand (`POST /security-audit/scan`, `operator`/`admin`); each result is stored in `security_audit_results` and the latest one is shown to all roles. When the scan finds critical or high severity findings, it sends an `EXCESSIVE_RULES_DETECTED` notification to all subscribed channels.
 
 ### Role-Based Access Control (RBAC)
 
@@ -1648,45 +1683,56 @@ Segmentra enforces role-based access control at both the API level (backend) and
 
 | Role | Description |
 |------|-------------|
-| **viewer** | Read-only access to all data. Cannot create, modify, or deploy anything. |
-| **operator** | Full operational access. Can manage inventory, create policies and rules, run deployments, use troubleshooting tools, and manage IoT assets. |
-| **approver** | Can view everything and approve/reject policy versions. Cannot create policies, manage inventory, or run deployments. |
-| **admin** | Full access to everything including user management, LDAP configuration, SSH credentials, integrations, notifications, and system settings. |
+| **viewer** | Read-only access to inventory, policies, deployments, troubleshooting lookups, IoT, Kubernetes, security audit results and the audit log. Cannot create, modify or deploy anything. |
+| **operator** | Operational access: manage inventory, tags, tag rules and policies, run deployments, run discovery profiles, troubleshooting tools, Firewall Learning, policy tests, compliance/readiness checks, and manage IoT assets. |
+| **approver** | Read access plus approve/reject policy versions and high-risk deployments, and run policy tests (Policy Impact Analysis). Cannot create policies, manage inventory or run deployments. |
+| **admin** | Everything, including users, LDAP, SSH credentials and host credential assignment, discovery profiles, integrations, notifications, Kubernetes clusters, flow collectors, enforcement points and system settings. |
+
+Users can hold several roles; permissions add up.
 
 #### Permission Matrix
 
+The API (`requireRole` calls) is authoritative; the UI hides what a role cannot use.
+
 | Action | Viewer | Operator | Approver | Admin |
 |--------|--------|----------|----------|-------|
-| **View** dashboard, inventory, policies, deployments, approvals | Yes | Yes | Yes | Yes |
-| **View** troubleshoot results, topology, IoT, K8s | Yes | Yes | Yes | Yes |
-| **View** security audit results | Yes | Yes | Yes | Yes |
-| **Create/edit** hosts, tags, VLANs, interfaces | - | Yes | - | Yes |
-| **Create/edit** policy sets, versions, rules | - | Yes | - | Yes |
-| **Create/edit** policy templates | - | Yes | - | Yes |
-| **Create/edit** topology views and flows | - | Yes | - | Yes |
-| **Create/start** deployments | - | Yes | - | Yes |
+| **View** dashboard, inventory, policies, deployments, templates | Yes | Yes | Yes | Yes |
+| **View** troubleshoot lookups, IoT, K8s, topology (API), discovery profiles/runs | Yes | Yes | Yes | Yes |
+| **View** security audit results and the audit log | Yes | Yes | Yes | Yes |
+| **View** flow collectors | Yes | Yes | - | Yes |
+| **View** pending approvals (Approvals page) | - | - | Yes | Yes |
+| **Create/edit** hosts, tags, VLANs, interfaces, tag rules | - | Yes | - | Yes |
+| **Assign** an SSH credential to a host (`sshCredentialId`) | - | - | - | Yes |
+| **Create/edit** discovery profiles | - | - | - | Yes |
+| **Run** discovery profiles | - | Yes | - | Yes |
+| **Create/edit** policy sets, versions, rules, templates, topology views | - | Yes | - | Yes |
 | **Submit** policy versions for approval | - | Yes | - | Yes |
-| **Approve/reject** policy versions | - | - | Yes | Yes |
-| **Run** firewall learning, policy testing | - | Yes | - | Yes |
-| **Run** communication simulation | - | Yes | - | Yes |
+| **Approve/reject** policy versions (not your own) | - | - | Yes | Yes |
+| **Render** per-host ruleset preview | - | Yes | - | Yes |
+| **Create/start/pause/resume/stop/retry** deployments | - | Yes | - | Yes |
+| **Approve** high-risk deployments (not your own) | - | - | Yes | Yes |
+| **Check** compliance (drift) and host readiness | - | Yes | - | Yes |
+| **Run** Firewall Learning and communication simulation | - | Yes | - | Yes |
+| **Run** policy tests (Policy Impact Analysis) | - | Yes | Yes | Yes |
+| **Generate/apply** policy recommendations | - | Yes | - | Yes |
 | **Manage** IoT assets and gateway assignments | - | Yes | - | Yes |
-| **Manage** K8s clusters and workloads | - | Yes | - | Yes |
-| **Evaluate** tag rules | - | Yes | - | Yes |
-| **Generate** policy recommendations | - | Yes | - | Yes |
+| **Sync** K8s clusters, map workloads, generate NetworkPolicy | - | Yes | - | Yes |
+| **Record** ACLs on enforcement points | - | Yes | - | Yes |
+| **Run** security audit scans | - | Yes | - | Yes |
+| **Manage** K8s clusters, flow collectors, enforcement points | - | - | - | Yes |
 | **Manage** users (create, edit, delete, reset password) | - | - | - | Yes |
-| **Configure** LDAP/AD settings | - | - | - | Yes |
+| **Configure** LDAP/AD settings and AD group mapping | - | - | - | Yes |
 | **Manage** SSH credentials | - | - | - | Yes |
 | **Manage** integrations (SIEM, SOAR, etc.) | - | - | - | Yes |
 | **Configure** notifications | - | - | - | Yes |
-| **View** audit log | - | - | - | Yes |
 | **Configure** deployment executor, management VLAN | - | - | - | Yes |
 
 #### Enforcement
 
-- **API Level**: Every route has `requireAuth` (JWT validation) and `requireRole(...)` middleware. Unauthorized requests return 401 (no token) or 403 (insufficient role).
+- **API Level**: Routes use `requireAuth` (JWT validation) and `requireRole(...)` (on the route or the whole router). Unauthorized requests return 401 (no or invalid token) or 403 (insufficient role). Exceptions: `/health`, `/auth/login`, `/auth/logout` and `/admin/bootstrap` need no token; `/dashboard/stats` and `/auth/me` need only a valid token.
 - **UI Level**: The sidebar navigation hides links the user cannot access. Route-level `RequireRole` components block direct URL access and show an "Access Denied" message.
-- **Authentication**: JWT tokens stored in browser localStorage (`segmentra_token`). Tokens contain `sub` (username) and `roles` (array of role names). Token is sent as `Authorization: Bearer <token>` on every API request.
-- **Separation of Duties**: Policy approvers must be different from policy creators. High-risk policies require a different approver even for admins.
+- **Authentication**: JWT tokens (HS256, 12 h) are stored in browser localStorage (`segmentra_token`) and sent as `Authorization: Bearer <token>`. They contain `sub` (username) and `roles`, but `requireAuth` re-reads the user's roles and `is_active` from the database on every request: role changes apply immediately and a deactivated user is rejected while deactivated. Changing or resetting a password does not revoke existing tokens (they stay valid until they expire).
+- **Separation of Duties**: Nobody (admins included) can approve a policy version they created, edited or submitted, or a high-risk deployment they created.
 
 #### Local Users vs LDAP Users
 
@@ -1706,7 +1752,7 @@ Segmentra supports multiple firewall backends to accommodate different Linux dis
 
 ### Firewall Backend Options
 
-- **`auto`** (default): Automatically uses `nftables` unless explicitly set to `iptables`. This is the recommended setting for most modern Linux systems.
+- **`auto`**: Detected over SSH during the deployment's checking phase (same check as **Check Readiness**); the result is stored on the host. If detection fails, `nftables` is used. Hosts without a backend value are treated as `auto`.
 - **`nftables`**: Uses nftables (modern Linux firewall, preferred). Used by default on RHEL 8+, Ubuntu 20.04+, and other modern distributions.
 - **`iptables`**: Uses iptables (legacy Linux firewall). Required for older systems that don't support nftables.
 
@@ -1715,8 +1761,8 @@ Segmentra supports multiple firewall backends to accommodate different Linux dis
 When deploying policies to multiple hosts with different firewall backends (e.g., 200 hosts where 10 use `iptables` and 190 use `nftables`), Segmentra handles this automatically:
 
 1. **Individual Policy Compilation**: Each host's policy is compiled separately based on its configured `firewall_backend` field:
-   - Hosts with `nftables` or `auto` → generates `.nft` files (nftables format)
-   - Hosts with `iptables` → generates `.iptables` files (iptables format)
+   - Hosts with `nftables` (or `auto` detected as nftables) → `.nft` file
+   - Hosts with `iptables` → `.iptables` file (IPv4) plus `.ip6tables` (IPv6) when needed
 
 2. **Separate Policy Files**: Each host receives its own policy file with the appropriate format:
    - `hostname.nft` for nftables hosts
@@ -1725,7 +1771,7 @@ When deploying policies to multiple hosts with different firewall backends (e.g.
 3. **Unified Deployment**: All hosts are included in a single deployment operation:
    - The Ansible inventory includes all hosts regardless of backend
    - Each host's inventory entry points to its specific policy file format
-   - The Ansible playbook automatically detects the file extension and applies the correct firewall commands
+   - The playbook applies each host's file with the matching tool (`nft -f`, or `iptables-restore --noflush` / `ip6tables-restore --noflush`); the SSH Direct executor does the same per host
 
 4. **Independent Status Tracking**: Each host's deployment status is tracked independently, so you can see which hosts succeeded or failed regardless of their firewall backend.
 
@@ -1756,9 +1802,33 @@ web-04 ansible_host=... segmentra_policy_file=/bundles/xxx/host_rules/web-04.nft
 
 ### Best Practices
 
-- **Use `auto` for most hosts**: Modern Linux systems will automatically use nftables, which is preferred.
+- **Use `auto` for most hosts**: the backend is detected on the first deployment (or readiness check) and stored.
 - **Set `iptables` explicitly**: Only when you know a host requires iptables (older systems, compatibility requirements).
 - **Set `nftables` explicitly**: When you want to ensure nftables is used even if the system might support both.
+
+### Generated Firewall Rules
+
+Segmentra only manages its own objects, so rules of Docker, Kubernetes, fail2ban or admins are left alone:
+
+- **nftables**: one table, `table inet segmentra` (IPv4 + IPv6). Each apply deletes and recreates only that table. Chains: `input` (policy `drop`; loopback, established/related, the management SSH baseline and the policy rules accept), `output` (policy `accept`) and, only when the host has `FORWARD` rules or protected devices, `forward` (policy `accept`, traffic to protected devices is dropped unless a rule allows it). A drop in Segmentra's table is final; an accept does not override drops in other tables.
+- **iptables**: an `iptables-restore --noflush` fragment that replaces only the chains `SEGMENTRA-IN`, `SEGMENTRA-OUT` and (when forwarding is filtered) `SEGMENTRA-FWD`; the executor inserts jumps at the top of `INPUT`, `OUTPUT` and `FORWARD`. "Allow" in these chains is `RETURN` (back to the built-in chain, so later rules of other tools still apply); only Segmentra's final `DROP` in `SEGMENTRA-IN` (and drops to protected devices in `SEGMENTRA-FWD`) is terminal. `SEGMENTRA-OUT` and `SEGMENTRA-FWD` end with `RETURN`. Built-in chain policies are not changed. IPv6 uses a separate `ip6tables` fragment.
+- **Baseline**: loopback, established/related and SSH to the host's port from the management VLAN subnet (from anywhere if no management VLAN is set) are always allowed before policy rules.
+- **Backups/restores** (rollback, lockout auto-revert, Firewall Learning, policy tests, `scripts/restore-previous-policy.sh`) cover only this table / these chains and jumps. Hosts last deployed by an older version that replaced the whole iptables `filter` table are restored that way once; redeploying moves them to the chain design.
+
+### Reboot persistence
+
+Deployments load rules into the running kernel only; persistence uses the **distribution's own mechanism**, so nothing of Segmentra runs at boot. The host scripts (`segmentra-nft.sh` / `segmentra-iptables.sh`, modes `persist`, `unpersist`, `check`; shared shell in `packages/executor/src/persist-scripts.ts`) detect the distribution from `/etc/os-release` (`ID` / `ID_LIKE`) and copy Segmentra's **live** state into the boot configuration:
+
+| | Debian / Ubuntu | RHEL family (RHEL, Rocky, Alma, CentOS Stream, Fedora) |
+|---|---|---|
+| nftables | `/etc/nftables.d/segmentra.nft` + one `include` line in `/etc/nftables.conf`; `systemctl enable nftables` | `/etc/nftables/segmentra.nft` + one `include` line in `/etc/sysconfig/nftables.conf`; `systemctl enable nftables` unless firewalld is active/enabled |
+| iptables | Segmentra's lines merged into `/etc/iptables/rules.v4` / `rules.v6` (iptables-persistent); `systemctl enable netfilter-persistent` | merged into `/etc/sysconfig/iptables` / `ip6tables` (iptables-services); `systemctl enable iptables ip6tables` unless firewalld is active/enabled |
+
+- The nft file is `nft -s list table inet segmentra` behind `add table inet segmentra` + `delete table inet segmentra`, so it can be loaded at boot or repeatedly. A missing `nftables.conf` is created with only a shebang and the include (no `flush ruleset`).
+- The iptables merge replaces only `:SEGMENTRA-IN/OUT/FWD` declarations, `-A SEGMENTRA-*` rules and the `-A INPUT/OUTPUT/FORWARD -j SEGMENTRA-*` jumps in the `*filter` section (jumps first in their chains); every other line stays byte-identical. Docker/Kubernetes chains are never written by Segmentra.
+- Services are only enabled, never started/restarted. Packages are never installed and firewalld is never disabled: missing pieces are reported as warnings (`firewalld_active`, `no_nftables_service`, `iptables_persistent_missing`, `iptables_services_missing`, `unsupported_distro`).
+- **When:** SSH Direct persists after the reachability check and the cancelled auto-revert (the final state); the auto-revert, the apply-failure rollback, Firewall Learning / policy-test restores and `scripts/restore-previous-policy.sh` re-sync it to the restored state; expiry REMOVE removes it. Firewall Learning persists the enforced policy at session start, and a live log-only policy is never persisted, so a reboot during a session comes back enforced. The Ansible playbook runs the same `persist` step (and re-syncs in its `rescue`); the API then records the status with a read-only `check`.
+- **Reporting:** `SshExecutionResult.persistence` → `deployment_hosts.persistence_*` ("Survives reboot" column on the deployment page); readiness returns `persistence: { distro, method, available, status, warnings, notes }`; compliance returns `persistence: { status, state: in_sync|differs|missing|none|learning, method, warnings }` and notes when the boot configuration differs from compliant running rules.
 
 ### Async Deployment Execution
 
@@ -1775,6 +1845,7 @@ Deployment execution is fully asynchronous with real-time progress tracking.
 
 | Phase | Description | Progress Bar Color |
 |-------|------------|-------------------|
+| `queued` | Reset by retry-failed, waiting for start | - |
 | `starting` | Initializing deployment | - |
 | `checking` | Pre-flight SSH checks (backend auto-detection) | Amber |
 | `deploying` | Pushing firewall rules to hosts | Green |
@@ -1797,16 +1868,26 @@ Deployment execution is fully asynchronous with real-time progress tracking.
 
 #### Stop/Pause Behavior
 
-The SSH executor checks a `shouldContinue()` callback between each host. When a deployment is stopped or paused via the API, remaining hosts are marked SKIPPED instead of being processed.
+The SSH executor checks between hosts whether it should continue. **Pause** stops before the next host and leaves the remaining hosts `PENDING` (deployed on **Resume**); **Stop** marks the remaining hosts `SKIPPED`. A host that is being deployed always finishes and records its real result. With the Ansible executor the playbook run is not interrupted.
+
+#### Canary / Progressive Rollout (SSH Direct)
+
+Hosts are deployed one by one in hostname order:
+
+- **CANARY**: the first `canarySize` hosts (default 1) are the canary; if one of them fails, the remaining hosts are not deployed
+- **PROGRESSIVE**: hosts go in batches of `batchSize` (default 5); if a host fails, the rollout stops at the end of that batch
+- **FULL**: all hosts, no gate
+
+Hosts not deployed because of a halted rollout are `SKIPPED` with a "Rollout halted:" message and are picked up again by `retry-failed`. The Ansible executor ignores these gates.
 
 ### Login Security
 
 #### Rate Limiting
 
-The login endpoint (`POST /api/auth/login`) implements in-memory rate limiting:
-- **10 attempts** per IP address per **15-minute window**
-- After exceeding the limit: `429 Too Many Requests` with message "Too many login attempts"
-- The counter resets automatically after 15 minutes
+The login endpoint (`POST /api/auth/login`) implements in-memory rate limiting of **failed** attempts:
+- **10 failed attempts** per client IP per **15-minute window** (a successful login resets the counter)
+- After that: `429` with `too_many_attempts` ("Too many failed login attempts. Please try again in 15 minutes.")
+- The client IP is `req.ip`; behind a reverse proxy set `TRUST_PROXY` so it is the real client address
 
 #### Username Enumeration Prevention
 
@@ -1835,80 +1916,30 @@ JWT tokens are stored in browser `localStorage`. This is a common pattern but me
 
 ### Communication Simulation
 
-The communication simulation feature (`POST /troubleshoot/simulate-communication`) provides a powerful analytical tool to predict whether network traffic between two IP addresses would be blocked by deployed firewall policies. This is particularly useful for troubleshooting connectivity issues and validating policy configurations before deployment.
+`POST /troubleshoot/simulate-communication` (`operator`, `admin`; UI: **Troubleshoot**) predicts whether traffic between two IP addresses would be allowed by the policies currently enforced. It is a guidance tool, not a packet-level replay.
 
 #### How Simulation Works
 
-The simulation engine performs a comprehensive analysis by:
+1. **Input**: `sourceIp`, `destIp` (IPv4 or IPv6), `protocol` (`tcp`, `udp`, `icmp`; default `tcp`), optional `destPort`
+2. **Host resolution**: finds inventory hosts whose management IP equals the source / destination IP
+3. **Enforced policy**: for each managed host, the version of its most recent successful deployment (`deployment_hosts.status = 'SUCCEEDED'`, version still `APPROVED`/`DEPLOYED`) — each deployment replaces Segmentra's whole table, so only that version counts
+4. **Source host (outbound)**: `OUT`/`BOTH` rules are evaluated in `order_index` order, first match wins; default accept
+5. **Destination host (inbound)**: the management SSH baseline is applied first (tcp to the host's SSH port from the management VLAN, or from anywhere if none is configured); then `IN`/`BOTH` rules, first match wins; default drop
+6. **Gateway (forwarded)**: if the destination is an IoT asset assigned to a gateway host, that gateway's `FORWARD` rules are evaluated (first match wins) and traffic no rule allows is dropped. The simulator assumes the traffic is routed through the gateway
+7. **Result**: blocked if any side denies, with the deciding rule, all matching rules and explanatory notes. Hosts that are not in inventory or have no deployed policy are treated as not filtering
 
-1. **Host Resolution**: 
-   - Queries the inventory to find hosts matching the source and destination IPs
-   - Supports both exact IP matches and CIDR notation (e.g., `192.168.1.10` matches `192.168.1.10/32`)
-   - Returns host information including hostname, management IP, and deployment status
-
-2. **Policy Discovery**:
-   - Retrieves all successfully deployed (`SUCCEEDED` status) and approved (`APPROVED` status) policy versions for both source and destination hosts
-   - Only considers policies that have been successfully deployed to the hosts (not just created)
-   - Filters out failed or cancelled deployments
-
-3. **Rule Evaluation** (Source Host - OUT Direction):
-   - For each policy deployed to the source host, evaluates rules with `OUT` or `BOTH` direction
-   - Checks if the destination IP matches the rule's source specification:
-     - **CIDR**: Uses CIDR matching algorithm to check if destination IP falls within the CIDR range
-     - **HOST**: Resolves the host ID to its management IP and compares with destination IP
-     - **TAG**: Resolves all hosts with the tag, extracts their management IPs, and checks if destination IP matches
-     - **VLAN**: Resolves all hosts in the VLAN, extracts their management IPs, and checks if destination IP matches
-   - Validates protocol match (rule protocol must be `any` or match the specified protocol)
-   - Validates port match for TCP/UDP (supports single ports, comma-separated lists, and ranges like `1000-2000`)
-   - If all conditions match, records the rule as either `ALLOW` or `DENY`
-
-4. **Rule Evaluation** (Destination Host - IN Direction):
-   - For each policy deployed to the destination host, evaluates rules with `IN` or `BOTH` direction
-   - Checks if the source IP matches the rule's source specification (same resolution logic as above)
-   - Validates protocol and port matches (same as source host evaluation)
-   - Records matching rules
-
-5. **Result Determination**:
-   - Collects all matching rules from both source and destination hosts
-   - Sorts rules by order index to determine precedence
-   - Applies firewall rule evaluation logic:
-     - **First DENY rule wins**: If any DENY rule matches before an ALLOW rule, communication is blocked
-     - **ALLOW rules**: If an ALLOW rule matches and no DENY rule precedes it, communication is allowed
-     - **Default DENY**: If no rules match, the default policy is DENY (typical firewall behavior)
-   - Returns the blocking rule (if any) and all matching rules for review
-
-#### Technical Implementation Details
-
-The simulation uses simplified rule matching logic designed for quick analysis. **Important**: The simulation is intentionally approximate and should be used as a guidance tool, not as exact ground truth. Key implementation aspects:
-
-- **CIDR Matching**: Implements bitwise AND operations with network masks for IPv4 CIDR range checking. **Note**: IPv6 is not supported in the simulation.
-- **Port Parsing**: Handles port specifications including:
-  - Single ports: `"80"`
-  - Multiple ports: `"80,443"`
-  - Port ranges: `"1000-2000"`
-- **Source Type Resolution**: Dynamically resolves TAG, VLAN, and HOST source types to actual IP addresses at simulation time
-- **Direction Handling**: Correctly evaluates both IN and OUT directions, understanding that:
-  - Source host OUT rules control traffic leaving the source
-  - Destination host IN rules control traffic arriving at the destination
-- **Rule Ordering**: Attempts to respect the `order_index` field, but **simplified evaluation**:
-  - For combined IN/OUT paths, the simulation builds separate lists of blocking and allowing rules
-  - **Pessimistic DENY interpretation**: The simulation treats DENY rules pessimistically - if any DENY rule matches, it assumes communication is blocked, even though firewalls evaluate rules strictly in order (first-match wins)
-  - This means the simulation may indicate blocking when an earlier ALLOW rule would actually permit the traffic
-  - **Recommendation**: Use simulation results as guidance, but verify critical paths by reviewing actual compiled firewall rules or testing in a non-production environment
+Rule matching resolves `CIDR`, `TAG`, `VLAN` and `HOST` sources to addresses at simulation time. A rule with ports only matches when a destination port is given.
 
 **Limitations**:
-- Does not perform exact first-match rule evaluation like actual firewalls
-- IPv6 addresses are not supported
-- Does not account for interface scoping or interface-specific rules
-- Does not model connection state (established/related) or other advanced firewall features
-- User IP safety warnings use very simplified CIDR matching (first octet comparison) and may produce false positives/negatives
+- Interface scoping is not modeled (rules are evaluated as if they applied to every interface)
+- Connection state (established/related) and rules of other tools on the host are not modeled
+- Only hosts whose management IP equals the given address are recognized
 
 #### Use Cases
 
 - **Pre-deployment Validation**: Test if a new policy would block critical communication paths
 - **Connectivity Troubleshooting**: Determine why two hosts cannot communicate
 - **Policy Audit**: Verify that deployed policies match intended security posture
-- **Change Impact Analysis**: Understand the effect of policy changes on existing communication patterns
 
 ### Compliance & Drift Detection Issues
 
@@ -1916,13 +1947,13 @@ The simulation uses simplified rule matching logic designed for quick analysis. 
 **Symptom**: Compliance check returns "error" status with SSH connection failure
 
 **Causes**:
-- SSH credentials not configured (no GLOBAL SSH credential)
+- No SSH credential applies to the host (none assigned, none matching its host/tag/VLAN scope and no global credential)
 - Host is unreachable or SSH port incorrect
 - SSH key authentication failure
 - Host firewall blocking SSH access
 
 **Solutions**:
-1. Verify SSH credentials exist: `GET /api/ssh-credentials`
+1. Check the host's **SSH credential** column in Inventory → Hosts (`effective_credential`) and the credentials in Admin → SSH Credentials
 2. Test SSH manually: `ssh -i <key> user@host`
 3. Check host `ssh_port` configuration matches actual port
 4. Verify host is reachable: `ping <host_ip>`
@@ -1933,25 +1964,25 @@ The simulation uses simplified rule matching logic designed for quick analysis. 
 
 **Causes**:
 - Host has never had a successful deployment
-- Last deployment failed (no `applied_hash` stored)
-- Deployment was created but never started
+- The last successful deployment was made by an older version (baseline without the `v2:` prefix, or no `applied_live_hash`)
+- The policy was removed by an expiry `REMOVE` action
 
 **Solutions**:
-1. Deploy a policy to the host successfully
+1. Deploy (or redeploy) a policy to the host successfully
 2. Check deployment history for the host
-3. Verify previous deployments completed with SUCCEEDED status
 
 #### Compliance Shows "Drifted" Status
 **Symptom**: Host shows "Drifted" status (hash mismatch)
 
 **Causes**:
-- Manual firewall rule changes on the host
-- Failed deployment that partially applied
-- Policy was rolled back manually
-- Another tool modified firewall rules
+- Manual changes to `table inet segmentra` or the `SEGMENTRA-*` chains (or their jumps) on the host
+- Segmentra's table/chain or jump was deleted (e.g. `nft flush ruleset`, firewall service restart)
+- Policy was rolled back manually (e.g. `scripts/restore-previous-policy.sh`)
+
+Rules other tools add outside Segmentra's table/chains do not cause drift.
 
 **Solutions**:
-1. Review current rules on host: `ssh host "sudo nft list ruleset"` or `ssh host "sudo iptables-save"`
+1. Review current rules on host: `sudo nft list table inet segmentra` or `sudo iptables-save | grep SEGMENTRA`
 2. Compare to expected policy: Use policy render endpoint
 3. Redeploy the policy to restore compliance
 4. Investigate what caused the drift (manual changes, other tools, etc.)
@@ -2023,28 +2054,25 @@ The simulation uses simplified rule matching logic designed for quick analysis. 
 **Symptom**: Deployment with `scheduled_at` never starts
 
 **Causes**:
-- Background job not running
-- `scheduled_at` is in the future
-- API server was restarted and background job didn't restart
-- Timezone mismatch
+- `scheduled_at` is still in the future (the UI sends the browser's local time)
+- The deployment is high-risk and has not been approved yet (`requires_approval`)
+- The API process is not running (the scheduler runs inside it)
 
 **Solutions**:
-1. Check API logs for scheduled deployment processing
-2. Verify `scheduled_at` timestamp is in the past
-3. Use UTC timezone for `scheduled_at` to avoid timezone issues
-4. Manually start deployment if needed: `POST /api/deployments/:id/start`
+1. Check API logs for `[Scheduled Deployments]` lines
+2. Approve the deployment (`approver`/`admin`, not its creator)
+3. Start it manually if needed: `POST /api/deployments/:id/start`
 
 #### Scheduled Deployment Starts Immediately
-**Symptom**: Deployment starts even though `scheduled_at` is in the future
+**Symptom**: Deployment starts even though `scheduled_at` should be in the future
 
 **Causes**:
-- Background job processes immediately (bug)
-- `scheduled_at` parsing error
+- The time was interpreted in a different time zone than intended
+- Someone used **Start** (`POST /deployments/:id/start` also starts `SCHEDULED` deployments)
 
 **Solutions**:
-1. Verify `scheduled_at` format is correct ISO 8601
-2. Check that deployment status is QUEUED (not RUNNING)
-3. Review background job implementation
+1. Check `scheduled_at` in the deployment details
+2. Check the audit log for `DEPLOYMENT_STARTED`
 
 ### Deployment Issues
 
@@ -2068,16 +2096,16 @@ The simulation uses simplified rule matching logic designed for quick analysis. 
 **Symptom**: Deployment fails immediately with no host-level failures
 
 **Causes**:
-- Missing SSH credentials
+- No SSH credential applies to one of the hosts
 - Ansible container not running (if using Ansible executor)
 - Bundle generation failure
-- Invalid policy version (not APPROVED)
+- Invalid policy version (not APPROVED or DEPLOYED)
 
 **Solutions**:
-1. Check Admin → SSH Credentials has a GLOBAL credential configured
+1. Check the **SSH credential** column in Inventory → Hosts and Admin → SSH Credentials (a global credential is the fallback for every host)
 2. Verify Ansible container is running: `docker ps | grep ansible-runner`
 3. Check API logs for bundle generation errors
-4. Verify policy version status is APPROVED
+4. Verify policy version status is APPROVED or DEPLOYED
 
 #### Partial Success (Some Hosts Fail)
 **Symptom**: Deployment shows `PARTIAL` status with some hosts succeeded and some failed
@@ -2100,15 +2128,13 @@ The simulation uses simplified rule matching logic designed for quick analysis. 
 **Symptom**: Policy version stuck in `PENDING_APPROVAL` or approval fails
 
 **Causes**:
-- Approver is the same user who created the policy (separation of duties)
+- The approver created, edited or submitted the version (separation of duties, `403 cannot_approve_own_changes`)
 - User doesn't have approver/admin role
-- Policy version has validation errors
 
 **Solutions**:
 1. Verify approver has `approver` or `admin` role
-2. Ensure approver is different from creator
-3. Check policy version for validation errors
-4. Review rejection reason if rejected
+2. Have someone who did not work on the version approve it
+3. Review rejection reason if rejected
 
 #### Policy Rules Not Applying
 **Symptom**: Rules are defined but not appearing in rendered output
@@ -2136,9 +2162,9 @@ The simulation uses simplified rule matching logic designed for quick analysis. 
 - User filter not matching
 
 **Solutions**:
-1. Verify LDAP is enabled in Admin → LDAP Settings
+1. Verify LDAP is enabled in Admin → LDAP / Active Directory Settings
 2. Test LDAP connection with `ldapsearch` or similar tool
-3. Check AD group mappings in Admin → AD Group → Role map
+3. Check AD group mappings in Admin → AD Group → Role Mapping
 4. Verify user filter matches your LDAP structure
 5. Check API logs for LDAP connection errors
 
@@ -2152,7 +2178,7 @@ The simulation uses simplified rule matching logic designed for quick analysis. 
 
 **Solutions**:
 1. Verify user exists: Check `users` table
-2. Reset password via API or database
+2. Reset the password in Admin → Local Users (or `POST /api/admin/users/:id/reset-password`)
 3. Check `is_active` flag in database
 
 ### Database Issues
@@ -2170,7 +2196,7 @@ The simulation uses simplified rule matching logic designed for quick analysis. 
 2. Check PostgreSQL is running and accessible
 3. Review migration files in `packages/db/migrations/`
 4. Check migration history: `SELECT * FROM pgmigrations;`
-5. Reset database if needed: `SEGMENTRA_RESET_DB=1`
+5. Local dev only: `SEGMENTRA_RESET_DB=1 ./start.sh dev` wipes the Docker volumes (data loss)
 
 ### Performance Issues
 
@@ -2184,8 +2210,8 @@ The simulation uses simplified rule matching logic designed for quick analysis. 
 - Host response time
 
 **Solutions**:
-1. Use Ansible executor for parallel execution
-2. Reduce batch size for progressive deployments
+1. Use the Ansible executor for parallel execution (no canary/progressive gates)
+2. Use FULL mode or a larger batch size if rollout gates are not needed
 3. Check network connectivity and latency
 4. Monitor host resource usage
 5. Consider canary deployments for large changes
@@ -2196,42 +2222,69 @@ The simulation uses simplified rule matching logic designed for quick analysis. 
 
 ### Environment Variables
 
-The API reads env vars in `apps/api/src/lib/env.ts`:
+The API validates these in `apps/api/src/lib/env.ts`:
 
-- `NODE_ENV` — `production` enables strict checks
+- `NODE_ENV` — `production` enables strict checks (longer `JWT_SECRET`, unsafe defaults refused, generic error messages)
 - `PORT` (default `8080`) — API server port
 - `DATABASE_URL` (**required**) — PostgreSQL connection string
 - `JWT_SECRET` (**required**; min 32 chars when `NODE_ENV=production`, 16 otherwise; known placeholder values are refused in production) — Secret for JWT token signing
-- `SEGMENTRA_KEK_B64` (required in production) — Base64 of a 32-byte key for AES-256-GCM secret encryption. If not provided, the key is derived from `JWT_SECRET`, so rotating `JWT_SECRET` breaks stored secrets. Set it before storing secrets.
-- `SEGMENTRA_BOOTSTRAP_TOKEN` (optional) — Enables `POST /api/admin/bootstrap` endpoint for one-time admin creation
-- `BUNDLES_DIR` (default `./data/bundles`) — Directory where deployment bundles/logs are written
+- `SEGMENTRA_KEK_B64` (required in production by the container entrypoint) — Base64 of a 32-byte key for AES-256-GCM secret encryption. If not provided, the key is derived from `JWT_SECRET`, so rotating `JWT_SECRET` breaks stored secrets. Set it before storing secrets.
+- `SEGMENTRA_BOOTSTRAP_TOKEN` (optional) — Enables `POST /api/admin/bootstrap` for one-time admin creation
+- `BUNDLES_DIR` (default `./data/bundles`; `/bundles` in Docker) — Directory where deployment bundles/logs are written
 - `ANSIBLE_RUNNER_CONTAINER` (default `segmentra-ansible-runner`) — Name of the Ansible runner container
 - `CORS_ORIGIN` (optional) — Comma-separated allowed browser origins (empty = allow all)
-- `TRUST_PROXY` (optional) — Express `trust proxy` value when running behind a reverse proxy
+- `TRUST_PROXY` (optional; `1` in docker-compose) — Express `trust proxy` value when running behind a reverse proxy
 
-Read outside `env.ts`: `SEGMENTRA_KNOWN_HOSTS` (SSH known_hosts path, accept-new host key checking), `SEGMENTRA_ALLOW_PRIVATE_WEBHOOKS` (allow webhooks to loopback/link-local/metadata addresses), `SEGMENTRA_SSH_COMMAND_TIMEOUT_MS`, and — in the seed script — `SEGMENTRA_ADMIN_PASSWORD`. See [installation.md](installation.md#environment-variables) for the full table.
+Read elsewhere:
+
+- `SEGMENTRA_KNOWN_HOSTS` (`packages/executor`) — SSH known_hosts file (host keys accepted on first use, `accept-new`); default `~/.ssh/known_hosts`
+- `SEGMENTRA_SSH_COMMAND_TIMEOUT_MS` (`packages/executor`) — overall per-command SSH timeout, default 300000 (5 minutes)
+- `SEGMENTRA_ASKPASS_DIR` (`packages/executor`) — directory for the temporary askpass helper used for key passphrases / passwords (default: OS temp dir; it never contains a secret)
+- `SEGMENTRA_ALLOW_PRIVATE_WEBHOOKS` (API) — `true` allows webhook/Slack URLs that resolve to loopback, link-local or cloud metadata addresses
+- `SEGMENTRA_ADMIN_PASSWORD` (`packages/db/scripts/seed-roles.js`) — password for the initial `admin` user; in production no default admin is created without it
+- `SEGMENTRA_SKIP_MIGRATIONS` (`infra/app/docker-entrypoint.sh`) — `1` skips migrations and seeding at container start
+
+See [installation.md](installation.md#environment-variables) for the full table including the compose and launcher variables (`POSTGRES_PASSWORD`, `DB_PORT`, `API_BIND`, `WEB_PORT`, `DOCKER_GID`, `SEGMENTRA_RESET_DB`, ...).
+
+### Background Jobs
+
+Started in `apps/api/src/index.ts` when the API begins listening (all in-process `setInterval` timers):
+
+| Job | Interval | What it does |
+|-----|----------|--------------|
+| Stale host timeout | 2 min | Marks hosts `RUNNING` for more than 10 minutes as `FAILED` and finalizes their deployments (`checkAndTimeoutStaleHosts`) |
+| Scheduled deployments | 1 min | Starts due `SCHEDULED`/`QUEUED` deployments with `scheduled_at <= now()` that need no (or have) approval (`processScheduledDeployments`) |
+| Firewall Learning sessions | 1 min | Restores hosts and collects/parses logs of expired learning sessions (`services/audit-scheduler.ts`) |
+| Tag rules | 5 min | Re-evaluates all enabled auto-tagging rules (`services/tag-rule-engine.ts`) |
+| Policy expiry | 1 min | Processes expired deployments (NOTIFY_ONLY / REMOVE / REVERT) and sends 24 h warnings (`services/deployment-expiry.ts`) |
+| Inventory discovery | 1 min | Starts runs of due discovery profiles (claimed with `SKIP LOCKED`); at startup, runs left `RUNNING` by a previous process are marked `FAILED` (`services/discovery.ts`) |
+| Policy test sessions | 1 min | Restores hosts and collects logs of expired policy test sessions; failed restores are retried |
+
+The jobs run in every API process; claims in the database keep work from being done twice.
 
 ### Docker Compose Configuration
 
-The `docker-compose.yml` file defines:
+`docker-compose.yml` defines four services:
 
-- **PostgreSQL**: Database container on 127.0.0.1:15432 with a healthcheck
-- **App Container**: API server (non-root, `NODE_ENV=production`, runs migrations + seed on start) with Docker socket mount
-- **Ansible Runner**: `container_name: segmentra-ansible-runner`, used by the Ansible executor via `docker exec`
-- **Web**: nginx serving the UI and proxying `/api/`
-- **Volumes**: Shared bundle storage (`/bundles` in both the API and runner), PostgreSQL data, SSH known_hosts
+- **segmentra-db**: PostgreSQL 16, published on `127.0.0.1:${DB_PORT:-15432}`, with a healthcheck
+- **segmentra-ansible-runner**: `container_name: segmentra-ansible-runner`, used by the Ansible executor via `docker exec`
+- **segmentra-app**: API server (non-root, `NODE_ENV=production`, runs migrations + seed on start), published on `${API_BIND:-127.0.0.1}:${API_PORT:-8080}`, with the Docker socket mounted for the Ansible executor
+- **segmentra-web**: nginx serving the UI and proxying `/api/`, published on `${WEB_PORT:-80}`
+- **Volumes**: `segmentra_pgdata`, `segmentra_bundles` (`/bundles` in the API and runner), `segmentra_ansible_ssh`, `segmentra_ssh_known_hosts`
+
+`docker-compose.hardened.yml` is an override for production (`docker compose -f docker-compose.yml -f docker-compose.hardened.yml up -d --build`): no Docker socket and no Ansible runner (SSH Direct only), read-only root filesystems, all capabilities dropped (a few added back per image), `no-new-privileges`, PID/memory limits, and only nginx published. See [security.md](security.md#hardening-a-production-install).
 
 ### Security Considerations
 
-1. **Docker Socket Mount**: The app container mounts `/var/run/docker.sock` for Ansible executor. This gives full Docker access - treat as high trust.
+1. **Docker Socket Mount**: The app container mounts `/var/run/docker.sock` for the Ansible executor. This is root-equivalent on the Docker host; use the SSH Direct executor and the hardened compose override to avoid it.
 2. **Secret Encryption**: SSH keys, key passphrases, SSH/sudo passwords and LDAP passwords are encrypted using AES-256-GCM. Store `SEGMENTRA_KEK_B64` securely.
 3. **JWT Tokens**: Tokens expire after 12 hours. Store `JWT_SECRET` securely.
-4. **SSH Credentials**: Use a dedicated account, not root, with full sudo rights — sudo with a password (stored encrypted, sent on stdin) or `NOPASSWD` (see docs/security.md).
+4. **SSH Credentials**: Use a dedicated account, not root, with full sudo rights — sudo with a password (stored encrypted, sent on stdin) or `NOPASSWD` (see [security.md](security.md)).
 5. **LDAP**: Use LDAPS (port 636) for secure LDAP connections in production.
 
 ### Secret Storage & Encryption
 
-Segmentra implements robust encryption for sensitive data stored in the database, including SSH private keys, SSH key passphrases, and LDAP bind passwords.
+Segmentra encrypts sensitive data stored in the database: SSH private keys, key passphrases, SSH login passwords, sudo passwords and LDAP bind passwords.
 
 #### Encryption Architecture
 
@@ -2239,7 +2292,7 @@ Segmentra implements robust encryption for sensitive data stored in the database
 - When creating an SSH credential or LDAP setting, sensitive data (private keys, passphrases, passwords) is passed to `createSecret()` service function
 - `createSecret()` calls `encryptBlob()` which encrypts the data using **AES-256-GCM** (Galois/Counter Mode)
 - The encrypted blob is stored in the `secret_store` table in the `encrypted_blob` column (bytea type)
-- Reference tables (e.g., `ssh_credentials`, `ldap_settings`) only store UUID references (`private_key_secret_id`, `passphrase_secret_id`, `bind_password_secret_id`) to the encrypted secrets
+- Reference tables (`ssh_credentials`, `ldap_settings`) only store UUID references (`private_key_secret_id`, `passphrase_secret_id`, `password_secret_id`, `sudo_password_secret_id`, `bind_password_secret_id`) to the encrypted secrets
 - The actual sensitive data is never stored in plaintext in the database
 
 **Encryption Algorithm**:
@@ -2264,8 +2317,8 @@ Segmentra implements robust encryption for sensitive data stored in the database
 - When secrets are needed (e.g., for SSH deployments), `readSecretPlaintext()` retrieves the encrypted blob from `secret_store`
 - Calls `decryptBlob()` to decrypt using the same KEK
 - Decrypted data is only held in memory temporarily
-- For SSH operations, decrypted keys are written to temporary files in `os.tmpdir()` (system temporary directory)
-- Temporary files are created with restrictive permissions (mode 0o600) and cleaned up immediately after use
+- For SSH operations, key files (as stored, so passphrase-protected keys stay encrypted) are written to a temporary directory in `os.tmpdir()` with mode 0600 and removed after use; passwords, passphrases and sudo passwords stay in memory and are passed via `sshpass`, an askpass helper or `sudo -S` on stdin, never on a command line
+- Output returned from hosts is scrubbed of the credential's secrets before it is stored
 - Keys are never logged or exposed in API responses
 
 #### Security Features
@@ -2276,7 +2329,7 @@ Segmentra implements robust encryption for sensitive data stored in the database
 - **Key Separation**: The encryption key (KEK) is stored separately (environment variable), never in the database
 - **Temporary File Handling**: Decrypted keys are only written to temporary files that are automatically cleaned up
 - **No Plaintext Storage**: The database never contains unencrypted sensitive data
-- **Immutable Secrets**: SSH keys cannot be updated via PUT endpoint - must create new credential and delete old one
+- **Immutable Keys**: a private key cannot be replaced via `PUT` (create a new credential instead); passwords, the sudo password and the key passphrase can be changed
 
 #### Production Recommendations
 
@@ -2319,15 +2372,17 @@ Segmentra implements robust encryption for sensitive data stored in the database
 
 ### Current v1 Limitations
 
-- Canary/progressive orchestration and advanced guardrails are stubbed at the API level (basic deployment flow is implemented). The deployment modes (`CANARY`, `PROGRESSIVE`, `FULL`) are accepted and stored, but all selected hosts are processed immediately without host-by-host orchestration.
-- Baseline mgmt SSH CIDR is configured via the management VLAN setting (`/admin/management-vlan-setting`). The system uses the `subnet` field from the VLAN referenced by `system_settings.management_vlan_id` to determine which CIDR ranges should have baseline SSH access. This is configurable per environment. If no management VLAN is configured, baseline SSH access is disabled (no hardcoded CIDR).
-- SSH Direct executor runs sequentially (one host at a time); Ansible runs in parallel.
+- `CANARY` / `PROGRESSIVE` rollout gates only apply to the SSH Direct executor; the Ansible executor deploys all target hosts in one playbook run.
+- Baseline management SSH access comes from the subnet of the VLAN in `system_settings.management_vlan_id` (`/admin/management-vlan-setting`). If no management VLAN is configured, the SSH port is allowed from any source so hosts cannot be locked out.
+- SSH Direct runs sequentially (one host at a time); Ansible runs hosts in parallel.
 - Deployment timeout is fixed at 10 minutes per host.
-- No built-in rollback UI (rollback happens automatically on failure).
-- Firewall backend `auto` setting is now auto-detected before compilation via SSH. If auto-detection fails, it defaults to `nftables`. The detected backend is stored in the host record for future deployments. Executors validate that the compiled policy format matches the detected backend at runtime.
-- Drift detection requires SSH access and sudo (passwordless or with the credential's sudo password). Hosts without SSH credentials configured cannot be checked for compliance.
-- Scheduled deployments use simple datetime comparison. When `scheduled_at <= now()`, the system clears `scheduled_at` and leaves the deployment in `QUEUED` status - manual start via `/deployments/:id/start` is still required. No support for recurring schedules, timezone handling, or complex scheduling rules.
-- **High-risk policy detection**: The system automatically evaluates policy versions for high-risk patterns and sets the `is_high_risk` flag. High-risk policies require a different approver (no self-approval, even for admins). Risk evaluation considers interface scope, target count, source ranges, and sensitive ports. See [High-Risk Policy Detection](#high-risk-policy-detection) for details.
+- No rollback button: rollback happens automatically on failure (and via the lockout auto-revert with SSH Direct); `scripts/restore-previous-policy.sh` restores a host manually.
+- Firewall backend `auto` is detected over SSH before compilation; if detection fails, `nftables` is used. The detected backend is stored on the host.
+- Drift detection requires SSH access and sudo. Hosts without an applicable SSH credential cannot be checked.
+- Scheduled deployments use a simple datetime comparison: no recurrence or calendar rules.
+- SSH credentials: no per-environment scope and no fallback to another credential when the chosen one fails (see [SSH credential resolution](#ssh-credential-resolution)).
+- Kubernetes: no connection to real clusters (sync is a placeholder; NetworkPolicies are generated, not applied). Email notifications, SOAR and vulnerability integrations are not implemented.
+- **High-risk policy detection**: see [High-Risk Policy Detection](#high-risk-policy-detection).
 
 ---
 

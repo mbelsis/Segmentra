@@ -6,7 +6,7 @@ This page explains how Segmentra stores and uses sensitive data (SSH passwords a
 
 ## Summary
 
-- SSH passwords, SSH private keys, key passphrases, sudo passwords and LDAP bind passwords are **encrypted at rest**. They are never stored in plain text.
+- SSH passwords, SSH private keys, key passphrases, sudo passwords, LDAP bind passwords and the configuration of integrations and notification channels (API keys, webhook URLs, auth headers) are **encrypted at rest**. They are never stored in plain text.
 - They live in the `secret_store` table, encrypted with **AES-256-GCM**.
 - The encryption key comes from the `SEGMENTRA_KEK_B64` environment variable. It is never stored in the database.
 - The API never returns secret values. Only administrators can manage SSH credentials.
@@ -21,9 +21,13 @@ This page explains how Segmentra stores and uses sensitive data (SSH passwords a
 | SSH password | `secret_store` (type `SSH_PASSWORD`), referenced by `ssh_credentials.password_secret_id` | AES-256-GCM |
 | Separate sudo password (optional) | `secret_store` (type `SUDO_PASSWORD`), referenced by `ssh_credentials.sudo_password_secret_id` | AES-256-GCM |
 | LDAP bind password | `secret_store` (type `LDAP_BIND`), referenced by `ldap_settings.bind_password_secret_id` | AES-256-GCM |
+| Integration config (e.g. AbuseIPDB `apiKey`, SIEM host/port) | whole config object as JSON in `secret_store` (type `INTEGRATION_CONFIG`), referenced by `integrations.config_secret_id` | AES-256-GCM |
+| Notification channel config (Slack/webhook URL incl. tokens, `authHeader`, `customHeaders`) | whole config object as JSON in `secret_store` (type `NOTIFICATION_CONFIG`), referenced by `notification_channels.config_secret_id` | AES-256-GCM |
 | User passwords (local login) | `users.password_hash` | bcrypt hash (not reversible) |
 
 Each encrypted value is stored as `[1-byte format version][12-byte random IV][16-byte GCM authentication tag][ciphertext]`. Every secret gets a fresh random IV. The authentication tag means that tampering with the stored bytes is detected: decryption fails instead of returning modified data. The implementation is in `apps/api/src/services/crypto.ts` and `apps/api/src/services/secrets.ts`.
+
+For integrations and notification channels the plain `config` column only keeps a **masked display copy** (for example `{"apiKey": "••••abcd"}`, `{"url": "https://hooks.slack.com/services/••••wxyz", "authHeader": "••••"}`); it is never used to contact anything. Masked are values under secret-like keys (`apiKey`, `token`, `secret`, `password`, `authHeader`, `authorization`, `credential`, `privateKey`), all `customHeaders` values, and inside URLs the userinfo password, token-like query parameters (`token`, `key`, `sig`, `code`, ...), Slack/Teams/Discord webhook paths and any opaque token-like path segment. Non-secret parts (SIEM host and port, the webhook host and plain path) stay readable there. Rows saved by versions before migration 031 are encrypted once by the API at startup (`[Secrets] Encrypted plaintext config of N integration(s) and M notification channel(s)` in the log); the step is idempotent and safe with several API replicas. Deleting an integration or channel deletes its encrypted config.
 
 A stored SSH password in the database looks like random bytes, for example `019233da90faeba82a2ac6...`. The `01` at the start is the format version, followed by the IV, tag and ciphertext.
 
@@ -37,16 +41,18 @@ A stored SSH password in the database looks like random bytes, for example `0192
 **Operator checklist:**
 
 1. Set `SEGMENTRA_KEK_B64` **before** storing any credentials.
-2. **Back up `.env`** somewhere safe and separate from database backups. If the key is lost, the stored SSH and LDAP secrets can't be recovered and must be entered again.
+2. **Back up `.env`** somewhere safe and separate from database backups. If the key is lost, the stored SSH, LDAP, integration and notification secrets can't be recovered and must be entered again.
 3. Keep `.env` readable only by the account that runs Segmentra (`chmod 600 .env`).
-4. There is no built-in key rotation. To change the key, set the new value, restart the API, and re-enter every SSH credential and the LDAP bind password.
+4. There is no built-in key rotation. To change the key, set the new value, restart the API, and re-enter every SSH credential, the LDAP bind password and the configuration of every integration and notification channel.
 
 ## Who can see or change credentials
 
-- **SSH credentials** (Admin → SSH Credentials, `/api/ssh-credentials`) can only be listed, created, changed or deleted by users with the `admin` role. The list returns names, usernames, auth method, privilege escalation mode (`sudo_mode`), scope and the flags `has_passphrase` / `has_sudo_password`; neither secret values nor the IDs of the encrypted secrets are returned.
+- **SSH credentials** (Admin → SSH Credentials, `/api/ssh-credentials`) can only be listed, created, changed or deleted by users with the `admin` role. The list returns names, usernames, auth method, privilege escalation mode (`sudo_mode`), scope ("Applies to") with the tag / VLAN / host name, priority, how many hosts are explicitly assigned to it, whether discovery uses it, and the flags `has_passphrase` / `has_sudo_password`; neither secret values nor the IDs of the encrypted secrets are returned. Editing a credential can change its name, scope, priority, sudo settings, key passphrase and (for password credentials) the login password; a private key cannot be replaced (add a new credential instead).
+- **Assigning a credential to a host** (Inventory → edit host → *SSH credential*, `sshCredentialId` on `/api/hosts`) is admin-only as well; operators get `403`. Every role that can see inventory sees which credential a host uses (`effective_credential` in the host list and detail: name, scope, auth method, sudo mode and why it was chosen), never the secret.
+- **Deleting a credential** is refused with `409` while a discovery target set uses it (`credential_in_use_by_discovery`), a host is explicitly assigned to it (`credential_assigned_to_hosts`) or an enforcement point uses it (`credential_used_by_enforcement_points`), so nothing silently switches credentials. Encrypted secrets that no other credential shares are deleted with it.
 - **LDAP settings** (`/api/admin/ldap-settings`) are admin-only. The bind password is never returned. Leaving the password field empty when saving keeps the stored password.
-- **Integration and notification secrets** (API keys, webhook tokens, auth headers) are masked in API responses (for example `••••abcd`). Sending the masked value back on update keeps the stored value.
-- Creating or changing credentials is recorded in the **Audit Log** (`SSH_CREDENTIAL_CREATE` and so on). The audit entry contains the credential name, username, auth method and sudo mode (and whether a passphrase / sudo password was set or changed), never the secret.
+- **Integration and notification secrets** (API keys, webhook URLs with tokens, auth headers, custom header values) are admin-only, stored encrypted (see the table above) and masked in API responses (for example `••••abcd`). On update, sending the masked value back (or omitting a secret key) keeps the stored value, sending a new value replaces it, and an empty string clears it. A webhook URL equal to the masked form of the stored URL keeps the stored URL.
+- Creating, changing or deleting credentials is recorded in the **Audit Log** (`SSH_CREDENTIAL_CREATE`, `SSH_CREDENTIAL_UPDATE`, `SSH_CREDENTIAL_DELETE`). The audit entry contains the credential name, username, auth method, sudo mode, scope (old and new on a scope change) and whether a password / passphrase / sudo password was set or changed, never the secret. Host credential assignments appear in `HOST_UPDATE` entries (`sshCredentialId`).
 
 ## How secrets are used when connecting to hosts
 
@@ -59,15 +65,23 @@ Secrets are decrypted only when Segmentra needs to reach a host (deployments, re
 - **Output scrubbing:** the stdout/stderr returned from hosts (deployment logs, readiness and error messages) has every secret of that credential (login password, key passphrase, sudo password) replaced by `********` before it is stored or returned. sudo refusals are reported as readable errors (wrong sudo password, sudo needs a password but the credential is set to passwordless, `requiretty`, account not allowed to run `sh` as root).
 - **Ansible executor:** for the run of the playbook, key files (as stored, so passphrase-protected keys stay encrypted) and per-host password files (`host_vars/<host>.yml` with `ansible_password` and/or `ansible_become_password`, `0600`, directories `0700`) are written into that deployment's bundle directory, which the Ansible runner container reads. They are deleted as soon as the playbook finishes, whether it succeeded or failed. Passwords are never placed in the inventory file or on the command line. The become (sudo) password is the configured sudo password; with *sudo without password* the login password of a password credential is still provided (Ansible only sends it if sudo prompts).
 - **Ansible with passphrase-protected keys:** the playbook runs under `ssh-agent` inside the runner (`docker exec … ssh-agent -t <timeout> sh -c '<loader>' … ansible-playbook …`). Each passphrase is passed as `docker exec -e SEGMENTRA_KP_<n>` (variable name only; Docker reads the value from the API process's environment) and piped to `ssh-add` with the shell builtin `printf`, so it is never on disk or on a command line. The public half of the key (`<key>.pub`) is written next to the key file so `ssh` uses the agent for it. The agent, and with it the decrypted key, ends with the playbook (keys also expire from the agent shortly after the run's timeout).
-- **Host-scoped credentials:** a credential can apply to all hosts (global) or to a single host. Segmentra uses the host's own credential if one exists, otherwise the newest global credential.
+- **Which credential is used for a host:** every SSH connection to a managed host (readiness, deployments, drift/compliance checks, policy expiry, Firewall Learning, policy tests, troubleshooting, Ansible runs) picks the credential the same way:
+  1. a credential **explicitly assigned** to the host (Inventory → edit host; discovery sets this for the hosts it imports);
+  2. a credential scoped to **that host** (*A specific host*);
+  3. a credential scoped to **one of the host's tags** (*Hosts with tag*);
+  4. a credential scoped to **the host's VLAN** (*Hosts in VLAN*);
+  5. the **global** default (*All hosts*).
+
+  Within one level the highest **priority** wins, then the newest credential (for example a host carrying two tags that both have a credential). Credentials set to *Not assigned (manual use)* are never chosen automatically: they are only used by discovery target sets and for hosts they are explicitly assigned to. Adding a tag-, VLAN- or host-scoped credential therefore only affects the hosts it matches; adding a new global credential changes the default for every host that has nothing more specific. Note that tags can be added by tag rules, so a tag-scoped credential follows those rules too. A credential whose tag, VLAN or host is deleted matches nothing (the list shows it as *(deleted)*).
 
 ## Related protections
 
 - **SSH host keys** are checked with "trust on first use" (`StrictHostKeyChecking=accept-new`): a host's key is recorded on the first connection, and later connections are refused if the key changes. The known_hosts file is set with `SEGMENTRA_KNOWN_HOSTS` (default `~/.ssh/known_hosts`; a Docker volume in production).
 - **Dedicated account on hosts:** use a dedicated SSH account rather than `root`, with an SSH key (optionally passphrase-protected) or a password. It needs **full sudo rights** because Segmentra runs `sh` as root through sudo; sudo may require a password (set *Privilege escalation* on the credential) or be passwordless. No agent is installed on the hosts.
+- **What Segmentra writes on hosts, and what runs at boot:** Segmentra is agentless; it installs no service, timer, cron job or boot script. It writes `/etc/segmentra.policy` (`/etc/segmentra.policy6`, `0600`), backups and its two helper scripts under `/var/backups/segmentra/` (`0700`; the scripts run only during a Segmentra SSH session or the lockout auto-revert, which is a one-shot `systemd-run` timer removed when cancelled or fired), and, for reboot persistence, only the distribution's own files: `/etc/nftables.d/segmentra.nft` or `/etc/nftables/segmentra.nft` (`0600`) plus one marked `include` line in `/etc/nftables.conf` / `/etc/sysconfig/nftables.conf`, or Segmentra's lines merged into `/etc/iptables/rules.v4`/`rules.v6` or `/etc/sysconfig/iptables`/`ip6tables` (other lines unchanged; the previous file is kept in `/var/backups/segmentra/persist/`). At boot nothing of Segmentra executes: the distribution's own `nftables.service`, `netfilter-persistent.service` or `iptables`/`ip6tables.service` loads those files. Segmentra only runs `systemctl enable` for that service (never start/restart), never installs packages and never disables firewalld. A Firewall Learning / policy test (log-only) policy is never persisted. Removing the policy (expiry REMOVE) removes the include line, the file and the merged lines again; the service stays enabled. See [Persistence across reboots](../README.md#persistence-across-reboots).
 - **Login protection:** JWT sessions expire after 12 hours. Failed logins are rate-limited. In production the API refuses weak or placeholder `JWT_SECRET` values and requires at least 32 characters.
-- **Change control:** new policy versions must be approved by an `approver` or `admin` who did not create, edit or submit them. All actions are written to the Audit Log, which can be forwarded to a SIEM.
-- **Outbound calls:** notification webhooks can't be pointed at loopback, link-local or cloud-metadata addresses, and the check happens at connection time so DNS rebinding doesn't work.
+- **Change control:** new policy versions must be approved by an `approver` or `admin` who did not create, edit or submit them. Changes are written to the Audit Log, and every Audit Log entry is also forwarded to the enabled SIEM integrations (see Monitoring below).
+- **Outbound calls:** notification webhooks can't be pointed at loopback, link-local or cloud-metadata addresses (RFC1918 private ranges are allowed, since Segmentra is on-premise), and the check happens at connection time so DNS rebinding doesn't work. `SEGMENTRA_ALLOW_PRIVATE_WEBHOOKS=true` disables this check; leave it unset in production.
 
 ## Hardening a production install
 
@@ -132,10 +146,11 @@ If you need the Ansible executor, don't apply the `segmentra-app` part of this f
 **6. Users and roles**
 - Prefer LDAP / Active Directory with multi-factor authentication at the identity provider. Segmentra has no built-in MFA.
 - Keep the number of `admin` users small. Give people separate `operator` and `approver` roles. Policy approvals already require a different person than the author.
-- Disable accounts of people who leave. JWT sessions stay valid until they expire (12 hours).
+- Disable accounts of people who leave: deactivating a user blocks their sessions immediately (every request re-checks that the user is active and re-reads their roles). Changing or resetting a password does **not** end existing sessions; those tokens stay valid until they expire (up to 12 hours). If a password was compromised, deactivate the account and keep it deactivated for 12 hours, because reactivating it earlier makes the old tokens valid again.
 
 **7. Monitoring**
-- Forward the **Audit Log** to your SIEM (Integrations → SIEM). Alert at least on: SSH credential changes, user and role changes, approvals of high-risk deployments, and Firewall Learning or policy-test starts (these put hosts into log-only mode).
+- Configure a **SIEM integration** (Integrations). **Every** Audit Log entry is forwarded (RFC 5424 syslog over UDP or TCP) to each enabled SIEM integration: SSH credential, user/role, LDAP, policy, approval, inventory, integration and deployment events alike, whichever code path wrote them. Alert at least on deployments (especially high-risk ones), SSH credential and role changes, Firewall Learning starts (they put hosts into log-only mode) and restore failures.
+- **How forwarding works:** a database trigger on `audit_events` sends `pg_notify('segmentra_audit', <event id>)` for every inserted row (only after the inserting transaction commits). Each API process keeps one dedicated database connection that `LISTEN`s on that channel, loads the row and the actor's username, and sends it. The row is first claimed with `UPDATE audit_events SET siem_forwarded_at = now() WHERE id = … AND siem_forwarded_at IS NULL`, so with **several API replicas** each event is still sent only once (by whichever replica claims it). If the listen connection drops it reconnects with backoff (1 s up to 30 s). A catch-up sweep (at startup, after each reconnect and every minute) sends events of the **last 60 minutes** that were not forwarded yet; older unforwarded events are not sent. Consequences: events written while no SIEM integration is enabled are sent once one is enabled if they are less than 60 minutes old; if every SIEM collector rejects an event (e.g. TCP collector down) it is retried by the sweep within that window; with several SIEM integrations, an event that reached at least one of them is not retried for the others (UDP delivery can't be confirmed at all). Secret-like metadata keys are masked in the syslog message as an extra safeguard; audit metadata never contains secret values (only flags such as `passwordChanged`).
 - Watch the API logs for repeated failed logins and restore failures.
 - Back up the database and `.env`, and test a restore.
 
@@ -144,10 +159,7 @@ If you need the Ansible executor, don't apply the `segmentra-app` part of this f
 - No built-in TLS or MFA (use a reverse proxy and your identity provider).
 - No built-in rotation of `SEGMENTRA_KEK_B64`.
 - The SSH user needs full sudo rights on managed hosts (with or without a sudo password).
+- Changing or resetting a password does not revoke existing sessions (tokens stay valid for up to 12 hours); deactivating the user blocks them only while it stays deactivated.
 - Decrypted secrets are in the API process's memory while in use, so control of the API container means control of the credentials.
-
-## Known gaps
-
-- No built-in rotation of `SEGMENTRA_KEK_B64` (re-enter secrets after changing it).
-- Secrets are decrypted inside the API process while in use, so anyone with control of the API container or host can read them. Protect that host accordingly.
-- The Ansible executor needs the Docker socket (`/var/run/docker.sock`), which is root-equivalent on the Docker host. SSH-executor-only installs can remove that mount.
+- The Ansible executor needs the Docker socket (`/var/run/docker.sock`), which is root-equivalent on the Docker host. SSH-executor-only installs can remove that mount (the hardened override does).
+- SIEM forwarding sends unforwarded events only from the last 60 minutes and does not retry per collector (see Monitoring above).

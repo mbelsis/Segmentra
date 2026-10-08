@@ -170,6 +170,22 @@ adminRouter.post('/ad-group-role-map', requireAuth, requireRole('admin'), async 
   res.json({ map: rows[0] });
 });
 
+adminRouter.get('/ad-group-role-map', requireAuth, requireRole('admin'), async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT m.id, m.ad_group_dn, r.name AS role_name
+     FROM ad_group_role_map m JOIN roles r ON r.id = m.role_id
+     ORDER BY m.ad_group_dn ASC, r.name ASC`
+  );
+  res.json({ maps: rows });
+});
+
+adminRouter.delete('/ad-group-role-map/:id', requireAuth, requireRole('admin'), async (req, res) => {
+  if (!z.string().uuid().safeParse(req.params.id).success) return res.status(400).json({ error: 'invalid_id' });
+  const { rowCount } = await pool.query(`DELETE FROM ad_group_role_map WHERE id=$1`, [req.params.id]);
+  if (!rowCount) return res.status(404).json({ error: 'not_found' });
+  res.json({ ok: true });
+});
+
 adminRouter.get('/executor-setting', requireAuth, requireRole('admin'), async (_req, res) => {
   const { rows } = await pool.query(
     `SELECT value FROM system_settings WHERE key='deployment_executor'`
@@ -429,6 +445,17 @@ adminRouter.post('/users/:id/reset-password', requireAuth, requireRole('admin'),
   const bodySchema = z.object({ newPassword: z.string().min(8) });
   const parsed = bodySchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body', message: 'Password must be at least 8 characters.' });
+
+  const target = await pool.query('SELECT (password_hash IS NULL AND directory_subject IS NOT NULL) AS is_directory FROM users WHERE id = $1', [req.params.id]);
+  if (!target.rows[0]) return res.status(404).json({ error: 'not_found' });
+  // Setting a password on a directory (LDAP) user would turn it into a local account that
+  // keeps working even after it is disabled or removed from its groups in the directory.
+  if (target.rows[0].is_directory) {
+    return res.status(409).json({
+      error: 'ldap_user_password',
+      message: 'This user signs in through LDAP/Active Directory. Change the password in the directory instead.'
+    });
+  }
 
   const passwordHash = await bcrypt.hash(parsed.data.newPassword, 10);
   const { rowCount } = await pool.query(

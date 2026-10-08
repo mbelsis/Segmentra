@@ -11,6 +11,7 @@ case "$mode" in
   remove) pol=; legacy=${3:-} ;;
   backup|restore) pol=; legacy=; bfile=${3:-}
     if [ -z "$bfile" ]; then echo "segmentra-iptables: $mode needs a backup file argument" >&2; exit 2; fi ;;
+  persist|unpersist|check) pol=; legacy= ;;
   *) echo "segmentra-iptables: invalid mode '$mode'" >&2; exit 2 ;;
 esac
 save="$ipt-save"
@@ -328,11 +329,222 @@ restore_backup() {
   restore_scoped
 }
 
+# ---- reboot persistence with the distribution's own service (nothing of Segmentra runs at boot) ----
+PMARK='# managed by Segmentra (reboot persistence) - do not edit this line or the next'
+PBK=/var/backups/segmentra/persist
+P_DISTRO=unsupported
+P_FAMILY=
+pwarn() { echo "SEGMENTRA_PERSIST_WARN $1 $2"; }
+pnote() { echo "SEGMENTRA_PERSIST_NOTE $1 $2"; }
+presult() { echo "SEGMENTRA_PERSIST status=$1 method=$2 distro=$P_DISTRO family=$P_FAMILY state=$3"; }
+
+detect_distro() {
+  P_DISTRO=unsupported
+  [ -r /etc/os-release ] || return 0
+  ids=" $(sed -n -e 's/^ID=//p' -e 's/^ID_LIKE=//p' /etc/os-release | tr -d '"' | tr -d "'" | tr '\n' ' ') "
+  case "$ids" in
+    *" debian "*|*" ubuntu "*) P_DISTRO=debian ;;
+    *" rhel "*|*" centos "*|*" rocky "*|*" almalinux "*|*" fedora "*) P_DISTRO=rhel ;;
+  esac
+}
+
+have_systemctl() { command -v systemctl >/dev/null 2>&1; }
+unit_exists() {
+  for d in /etc/systemd/system /run/systemd/system /usr/lib/systemd/system /lib/systemd/system; do
+    if [ -f "$d/$1" ]; then return 0; fi
+  done
+  return 1
+}
+unit_enabled() { have_systemctl && [ "$(systemctl is-enabled "$1" 2>/dev/null)" = enabled ]; }
+firewalld_on() {
+  have_systemctl || return 1
+  if systemctl is-active --quiet firewalld.service 2>/dev/null; then return 0; fi
+  unit_enabled firewalld.service
+}
+# Enable (never start or restart) a unit: starting it now would reload the whole saved
+# configuration, which may flush the rules of Docker, Kubernetes, fail2ban, ...
+enable_unit() {
+  if unit_enabled "$1"; then return 0; fi
+  systemctl enable "$1" >/dev/null 2>"$tmpd/enerr" || { pwarn enable_failed "systemctl enable $1 failed: $(tr '\n' ' ' < "$tmpd/enerr")"; return 1; }
+  unit_enabled "$1"
+}
+
+same_file() { [ -f "$1" ] && [ -f "$2" ] && [ "$(cksum < "$1")" = "$(cksum < "$2")" ]; }
+
+# replace_file <dest> <new-content> <mode-if-new>: atomic replace when the content differs.
+# An existing file keeps its owner/mode; its previous content is kept in $PBK.
+replace_file() {
+  if same_file "$1" "$2"; then return 0; fi
+  if [ -f "$1" ]; then
+    mkdir -p "$PBK" 2>/dev/null && chmod 700 "$PBK" 2>/dev/null
+    cp -p "$1" "$PBK/$(echo "$1" | tr / _).prev" 2>/dev/null
+    cp -p "$1" "$1.segmentra-tmp" || return 1
+  else
+    mkdir -p "$(dirname "$1")" || return 1
+    : > "$1.segmentra-tmp" || return 1
+    chmod "$3" "$1.segmentra-tmp"
+  fi
+  if ! cat "$2" > "$1.segmentra-tmp" || ! mv -f "$1.segmentra-tmp" "$1"; then rm -f "$1.segmentra-tmp"; return 1; fi
+  if command -v restorecon >/dev/null 2>&1; then restorecon "$1" >/dev/null 2>&1; fi
+  return 0
+}
+
+# ensure_include <conf> <line>: <conf> contains <line> exactly once, preceded by PMARK, appended
+# at the end; every other line is left as it is. A missing <conf> is created WITHOUT flush ruleset.
+ensure_include() {
+  if [ -f "$1" ]; then
+    if [ "$(grep -cxF -- "$2" "$1")" = 1 ] && [ "$(grep -cxF -- "$PMARK" "$1")" = 1 ]; then return 0; fi
+    awk -v l="$2" -v m="$PMARK" '$0 != l && $0 != m' "$1" > "$tmpd/pconf" || return 1
+    printf '%s\n%s\n' "$PMARK" "$2" >> "$tmpd/pconf"
+  else
+    printf '#!/usr/sbin/nft -f\n%s\n%s\n' "$PMARK" "$2" > "$tmpd/pconf"
+  fi
+  replace_file "$1" "$tmpd/pconf" 755
+}
+
+# drop_include <conf> <line>: remove <line> and PMARK from <conf> (other lines untouched).
+drop_include() {
+  [ -f "$1" ] || return 0
+  if ! grep -qxF -- "$2" "$1" && ! grep -qxF -- "$PMARK" "$1"; then return 0; fi
+  awk -v l="$2" -v m="$PMARK" '$0 != l && $0 != m' "$1" > "$tmpd/pconf" || return 1
+  replace_file "$1" "$tmpd/pconf" 755
+}
+
+ipt_paths() {
+  IFILE=; IUNIT=; IPLUG=; IMETH=none
+  case "$P_DISTRO" in
+    debian)
+      IUNIT=netfilter-persistent.service; IMETH=netfilter-persistent
+      if [ "$ipt" = iptables ]; then IFILE=/etc/iptables/rules.v4; IPLUG=/usr/share/netfilter-persistent/plugins.d/15-ip4tables
+      else IFILE=/etc/iptables/rules.v6; IPLUG=/usr/share/netfilter-persistent/plugins.d/25-ip6tables; fi ;;
+    rhel)
+      IUNIT=$ipt.service; IMETH=iptables-services
+      if [ "$ipt" = iptables ]; then IFILE=/etc/sysconfig/iptables; else IFILE=/etc/sysconfig/ip6tables; fi ;;
+  esac
+}
+
+# Segmentra's live lines -> $tmpd/pdecl (chain declarations) and $tmpd/prules (jumps first, then
+# the SEGMENTRA-* rules). Returns 1 = no Segmentra chains, 2 = log-only policy, 3 = read error.
+ipt_render() {
+  : > "$tmpd/pdecl"; : > "$tmpd/prules"
+  $save > "$tmpd/psave" 2>/dev/null || return 3
+  seg_fragment "$tmpd/psave" > "$tmpd/pfrag"
+  grep '^:' "$tmpd/pfrag" > "$tmpd/pdecl"
+  [ -s "$tmpd/pdecl" ] || return 1
+  if grep -q 'FW-AUDIT: ALLOW: catch-all' "$tmpd/pfrag"; then return 2; fi
+  {
+    if save_has_jump "$tmpd/psave" INPUT $IN; then echo "-A INPUT -j $IN"; fi
+    if save_has_jump "$tmpd/psave" OUTPUT $OUT; then echo "-A OUTPUT -j $OUT"; fi
+    if save_has_jump "$tmpd/psave" FORWARD $FWD; then echo "-A FORWARD -j $FWD"; fi
+    grep '^-A ' "$tmpd/pfrag"
+  } > "$tmpd/prules"
+  return 0
+}
+
+# ipt_merge <saved-file|/dev/null>: the saved file with Segmentra's lines of its *filter section
+# replaced by $tmpd/pdecl + $tmpd/prules (inserted after the chain declarations, so the jumps are
+# the first rules of INPUT/OUTPUT/FORWARD). All other lines are printed unchanged. Without a
+# *filter section (or file) and with something to add, a minimal *filter section is appended.
+ipt_merge() {
+  awk -v decl="$tmpd/pdecl" -v rules="$tmpd/prules" '
+    BEGIN {
+      while ((getline l < decl) > 0) d[++nd] = l
+      while ((getline l < rules) > 0) r[++nr] = l
+    }
+    function emit(  i) { if (!done) { for (i = 1; i <= nd; i++) print d[i]; for (i = 1; i <= nr; i++) print r[i]; done = 1 } }
+    function ours(s) {
+      if (s ~ /^:SEGMENTRA-(IN|OUT|FWD)[ \t]/) return 1
+      if (s ~ /^-A SEGMENTRA-(IN|OUT|FWD)[ \t]/) return 1
+      if (s ~ /^-A (INPUT|OUTPUT|FORWARD) -j SEGMENTRA-(IN|OUT|FWD)[ \t]*$/) return 1
+      return 0
+    }
+    substr($0, 1, 1) == "*" { if (inf && !done) emit(); inf = ($0 == "*filter"); if (inf) seen = 1; print; next }
+    inf && ours($0) { next }
+    inf && !done && $0 !~ /^:/ && $0 !~ /^#/ && NF > 0 { emit() }
+    { print }
+    END {
+      if (!seen && nd + nr > 0) {
+        print "*filter"; print ":INPUT ACCEPT [0:0]"; print ":FORWARD ACCEPT [0:0]"; print ":OUTPUT ACCEPT [0:0]"
+        emit(); print "COMMIT"
+      }
+    }' "$1"
+}
+
+ipt_persist() {
+  pm=$1
+  P_FAMILY=$ipt
+  detect_distro
+  ipt_paths
+  if [ -z "$IFILE" ]; then
+    pwarn unsupported_distro "reboot persistence is supported on Debian, Ubuntu and RHEL-family hosts only; the $ipt SEGMENTRA chains will not survive a reboot"
+    presult not_persisted none unsupported; return 0
+  fi
+  if [ "$pm" = unpersist ]; then : > "$tmpd/pdecl"; : > "$tmpd/prules"; rr=1
+  else ipt_render; rr=$?; fi
+  if [ "$rr" = 3 ]; then pwarn read_failed "$save failed"; presult not_persisted none error; exit 4; fi
+  pkg=1
+  if [ "$P_DISTRO" = debian ]; then
+    if [ ! -e "$IPLUG" ] || ! unit_exists netfilter-persistent.service; then pkg=0; fi
+  elif ! unit_exists "$IUNIT"; then pkg=0; fi
+  havenew=0
+  if [ "$rr" != 2 ]; then
+    if [ -f "$IFILE" ]; then ipt_merge "$IFILE" > "$tmpd/pnew"; havenew=1
+    elif [ "$rr" = 0 ]; then ipt_merge /dev/null > "$tmpd/pnew"; havenew=1; fi
+  fi
+  if [ "$pm" != check ] && [ "$havenew" = 1 ] && { [ "$pkg" = 1 ] || [ -f "$IFILE" ]; }; then
+    if ! replace_file "$IFILE" "$tmpd/pnew" 600; then
+      pwarn write_failed "could not write $IFILE"; presult not_persisted none error; exit 4
+    fi
+    if [ "$rr" = 0 ]; then info "SEGMENTRA chains merged into $IFILE"; else info "SEGMENTRA lines removed from $IFILE"; fi
+  fi
+  if [ "$rr" = 2 ]; then
+    pnote log_only_active "a log-only Firewall Learning / policy test policy is active; it is not persisted, the boot configuration keeps the last enforced policy"
+    if [ -f "$IFILE" ] && grep -q "^:$IN " "$IFILE"; then state=learning; else state=missing; fi
+  elif [ "$havenew" = 0 ]; then state=none
+  elif same_file "$IFILE" "$tmpd/pnew"; then state=in_sync
+  elif [ -f "$IFILE" ]; then state=differs
+  else state=missing; fi
+  if [ "$rr" = 1 ] && [ "$pm" != check ]; then presult removed none none; return 0; fi
+  if [ "$rr" = 1 ] && [ "$state" = in_sync ]; then state=none; fi
+  if [ "$P_DISTRO" = debian ] && unit_enabled nftables.service && grep -q '^[[:space:]]*flush[[:space:]][[:space:]]*ruleset' /etc/nftables.conf 2>/dev/null; then
+    pnote nftables_flush_conflict "nftables.service is also enabled and /etc/nftables.conf contains flush ruleset; depending on boot order it can remove the restored iptables rules (disable nftables.service or remove flush ruleset)"
+  fi
+  if [ -f "$IFILE" ] && awk '
+      substr($0, 1, 1) == "*" { inf = ($0 == "*filter"); next }
+      inf && /^-A INPUT -j (REJECT|DROP)/ { f = 1 }
+      END { exit !f }' "$IFILE"; then
+    pnote saved_rules_final_reject "$IFILE ends INPUT with a catch-all REJECT/DROP of its own: after a reboot it also drops traffic Segmentra allows (Segmentra allows with RETURN, so later rules still apply)"
+  fi
+  st=not_persisted; meth=none
+  if [ "$pkg" = 0 ]; then
+    if [ "$P_DISTRO" = debian ]; then
+      pwarn iptables_persistent_missing "the iptables-persistent package (netfilter-persistent) is not installed and Segmentra does not install packages: install iptables-persistent to make the $ipt rules survive a reboot"
+    else
+      pwarn iptables_services_missing "the iptables-services package ($IUNIT) is not installed and Segmentra does not install packages: install iptables-services to make the $ipt rules survive a reboot"
+    fi
+  elif firewalld_on; then
+    pwarn firewalld_active "firewalld is active or enabled and conflicts with $IUNIT, which Segmentra therefore does not enable: the $ipt rules will not survive a reboot while firewalld manages the firewall (disable firewalld and enable $IUNIT to persist them)"
+  elif [ "$pm" = persist ] && ! enable_unit "$IUNIT"; then
+    :
+  elif unit_enabled "$IUNIT"; then
+    st=persisted; meth=$IMETH
+  else
+    meth=$IMETH
+    pwarn service_disabled "$IUNIT is not enabled; Segmentra enables it on the next deployment"
+  fi
+  if [ "$st" = persisted ]; then
+    case "$state" in in_sync|learning|none) ;; *) st=not_persisted ;; esac
+  fi
+  if [ "$state" = none ]; then st=removed; fi
+  presult "$st" "$meth" "$state"
+}
+
 case "$mode" in
   apply) apply_chains; legacy_cleanup ;;
   apply-audit) apply_chains ;;
   remove) remove_chains; legacy_cleanup ;;
   backup) backup_state ;;
   restore) restore_backup ;;
+  persist|unpersist|check) ipt_persist "$mode" ;;
 esac
 exit 0

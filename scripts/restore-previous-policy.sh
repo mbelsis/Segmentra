@@ -151,6 +151,22 @@ while IFS= read -r HOST <&3 || [ -n "$HOST" ]; do
   TOTAL=$((TOTAL + 1))
   echo "--- [$TOTAL] $HOST ---"
 
+  # The script runs everything with `sudo -n` (no password prompt); report a missing
+  # NOPASSWD rule clearly instead of as "no backup found".
+  RC=0
+  remote "$HOST" "sudo -n true" >/dev/null 2>&1 || RC=$?
+  if [ "$RC" -eq 255 ]; then
+    echo "  ✗ SSH connection failed (exit $RC)"
+    FAILED=$((FAILED + 1))
+    echo ""
+    continue
+  elif [ "$RC" -ne 0 ]; then
+    echo "  ✗ sudo -n failed for $SSH_USER: this script needs passwordless sudo on the host"
+    FAILED=$((FAILED + 1))
+    echo ""
+    continue
+  fi
+
   # Determine backup file (and with it the backend). Only deployment / removal backups
   # are considered:  nft.ruleset.<timestamp>  /  iptables.<timestamp>
   # (audit backups "*.audit-backup.*", "*.full" reference dumps and other files are excluded).
@@ -229,6 +245,13 @@ while IFS= read -r HOST <&3 || [ -n "$HOST" ]; do
   fi
 
   if [ "$RC" -eq 0 ]; then
+    # Reboot persistence follows the restored state (distribution's own service; never fails the restore).
+    if [ "$BACKEND" = "nft" ]; then
+      remote_script "$HOST" "$NFT_SH" persist 2>&1 | sed 's/^/  /' || true
+    else
+      remote_script "$HOST" "$IPT_SH" persist iptables 2>&1 | sed 's/^/  /' || true
+      if [ "${HAS_V6:-no}" = "yes" ]; then remote_script "$HOST" "$IPT_SH" persist ip6tables 2>&1 | sed 's/^/  /' || true; fi
+    fi
     echo "  ✓ Restored successfully"
     SUCCEEDED=$((SUCCEEDED + 1))
   else

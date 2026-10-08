@@ -18,9 +18,24 @@ Write-Host " Segmentra Installer ($Mode)"
 Write-Host "========================================"
 Write-Host ""
 
+# Run a native command and only look at its exit code. With $ErrorActionPreference = "Stop",
+# Windows PowerShell 5.1 turns any redirected stderr line (e.g. a docker warning) into a
+# terminating error, while PowerShell 7 never does; checking $LASTEXITCODE works in both.
+function Test-NativeSuccess([scriptblock]$block) {
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { & $block 2>&1 | Out-Null; return ($LASTEXITCODE -eq 0) }
+    catch { return $false }
+    finally { $ErrorActionPreference = $prevEap }
+}
+function Invoke-Checked([string]$what, [scriptblock]$block) {
+    & $block
+    if ($LASTEXITCODE -ne 0) { throw "$what failed (exit $LASTEXITCODE)" }
+}
+
 # Check Docker
 Write-Host "[1/6] Checking Docker..."
-try { docker info 2>&1 | Out-Null } catch {
+if (-not (Test-NativeSuccess { docker info })) {
     Write-Host "ERROR: Docker is not running. Please start Docker Desktop and try again." -ForegroundColor Red
     exit 1
 }
@@ -42,29 +57,32 @@ if ($Mode -eq "development") {
 
     # Install npm dependencies
     Write-Host "[3/6] Installing npm dependencies..."
-    npm install
+    Invoke-Checked "npm install" { npm install }
 
     # Start PostgreSQL
     Write-Host "[4/6] Starting PostgreSQL..."
-    docker compose up -d segmentra-db
+    Invoke-Checked "docker compose up" { docker compose up -d segmentra-db }
     Write-Host "  Waiting for PostgreSQL..."
-    Start-Sleep -Seconds 5
-    for ($i = 0; $i -lt 20; $i++) {
-        $result = docker compose exec -T segmentra-db pg_isready -U segmentra 2>&1
-        if ($LASTEXITCODE -eq 0) { break }
+    $dbReady = $false
+    for ($i = 0; $i -lt 30; $i++) {
+        if (Test-NativeSuccess { docker compose exec -T segmentra-db pg_isready -U segmentra }) { $dbReady = $true; break }
         Start-Sleep -Seconds 1
+    }
+    if (-not $dbReady) {
+        Write-Host "ERROR: PostgreSQL did not become ready in time (docker compose logs segmentra-db)" -ForegroundColor Red
+        exit 1
     }
     Write-Host "  PostgreSQL ready on port 15432"
 
     # Build
     Write-Host "[5/6] Building workspaces..."
-    npm run build
+    Invoke-Checked "build" { npm run build }
 
     # Migrate and seed
     Write-Host "[6/6] Setting up database..."
     $env:DATABASE_URL = "postgres://segmentra:segmentra@127.0.0.1:15432/segmentra"
-    npm run db:migrate
-    npm run db:seed
+    Invoke-Checked "db:migrate" { npm run db:migrate }
+    Invoke-Checked "db:seed" { npm run db:seed }
 
     Write-Host ""
     Write-Host "========================================"

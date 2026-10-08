@@ -60,20 +60,101 @@ export function sshAuthFields(cred: MaterializedSshCredential): {
   };
 }
 
+export type CredentialResolvedVia = 'ASSIGNED' | 'HOST' | 'TAG' | 'VLAN' | 'GLOBAL';
+
 /**
- * Load the SSH credential to use for a host. A HOST-scoped credential wins over
- * the newest GLOBAL credential. Returns null when no credential is configured.
+ * LATERAL subquery picking the effective credential for the host row aliased `h`.
+ * Order: explicit assignment (hosts.ssh_credential_id) -> HOST -> TAG (any tag of the host)
+ * -> VLAN (the host's VLAN) -> GLOBAL; within a level the highest priority, then the newest.
+ * NONE-scoped credentials are only reachable through an explicit assignment.
+ * Columns: cred_id, resolved_via, resolved_scope_name (tag name / "VLAN <tag> (<name>)").
+ */
+export const EFFECTIVE_CREDENTIAL_LATERAL = `
+  SELECT x.cred_id, x.via AS resolved_via, x.scope_name AS resolved_scope_name
+    FROM (
+      SELECT h.ssh_credential_id AS cred_id, 0 AS rank, 'ASSIGNED'::text AS via, NULL::text AS scope_name
+       WHERE h.ssh_credential_id IS NOT NULL
+      UNION ALL
+      SELECT c.id, 1, 'HOST', NULL FROM ssh_credentials c WHERE c.scope_type = 'HOST' AND c.scope_id = h.id
+      UNION ALL
+      SELECT c.id, 2, 'TAG', t.name
+        FROM host_tags ht
+        JOIN tags t ON t.id = ht.tag_id
+        JOIN ssh_credentials c ON c.scope_type = 'TAG' AND c.scope_id = ht.tag_id
+       WHERE ht.host_id = h.id
+      UNION ALL
+      SELECT c.id, 3, 'VLAN', 'VLAN ' || v.vlan_tag || ' (' || v.name || ')'
+        FROM ssh_credentials c JOIN vlans v ON v.id = c.scope_id
+       WHERE c.scope_type = 'VLAN' AND c.scope_id = h.vlan_id
+      UNION ALL
+      SELECT c.id, 4, 'GLOBAL', NULL FROM ssh_credentials c WHERE c.scope_type = 'GLOBAL'
+    ) x
+    JOIN ssh_credentials rc ON rc.id = x.cred_id
+   ORDER BY x.rank, rc.priority DESC, rc.created_at DESC, rc.id
+   LIMIT 1`;
+
+/** Non-secret summary of the credential a host would use (safe for every role). */
+export type EffectiveCredential = {
+  id: string;
+  name: string;
+  authMethod: string;
+  sudoMode: string;
+  scopeType: string;
+  /** Why it was chosen: explicit assignment or the scope level that matched. */
+  via: CredentialResolvedVia;
+  /** Tag name or "VLAN <tag> (<name>)" for TAG/VLAN matches. */
+  scopeName: string | null;
+};
+
+/** Effective credential per host id, in one query. Hosts without any usable credential are absent. */
+export async function effectiveCredentialsForHosts(hostIds: string[]): Promise<Map<string, EffectiveCredential>> {
+  const out = new Map<string, EffectiveCredential>();
+  if (hostIds.length === 0) return out;
+  const { rows } = await pool.query(
+    `SELECT h.id AS host_id, c.id, c.name, c.auth_method, c.sudo_mode, c.scope_type, ec.resolved_via, ec.resolved_scope_name
+       FROM hosts h
+       CROSS JOIN LATERAL (${EFFECTIVE_CREDENTIAL_LATERAL}) ec
+       JOIN ssh_credentials c ON c.id = ec.cred_id
+      WHERE h.id = ANY($1::uuid[])`,
+    [hostIds]
+  );
+  for (const r of rows) {
+    out.set(String(r.host_id), {
+      id: String(r.id),
+      name: r.name,
+      authMethod: r.auth_method,
+      sudoMode: r.sudo_mode ?? 'NOPASSWD',
+      scopeType: r.scope_type,
+      via: r.resolved_via,
+      scopeName: r.resolved_scope_name ?? null
+    });
+  }
+  return out;
+}
+
+/**
+ * Load the SSH credential row to use for a host (see EFFECTIVE_CREDENTIAL_LATERAL for the
+ * order). Without a host id only GLOBAL credentials are considered. The row carries two extra
+ * columns, resolved_via and resolved_scope_name. Returns null when nothing applies.
  */
 export async function loadSshCredential(hostId?: string | null): Promise<any | null> {
   if (hostId) {
-    const hostRes = await pool.query(
-      `SELECT * FROM ssh_credentials WHERE scope_type='HOST' AND scope_id=$1 ORDER BY created_at DESC LIMIT 1`,
+    const { rows } = await pool.query(
+      `SELECT c.*, ec.resolved_via, ec.resolved_scope_name
+         FROM hosts h
+         CROSS JOIN LATERAL (${EFFECTIVE_CREDENTIAL_LATERAL}) ec
+         JOIN ssh_credentials c ON c.id = ec.cred_id
+        WHERE h.id = $1`,
       [hostId]
     );
-    if (hostRes.rows[0]) return hostRes.rows[0];
+    if (rows[0]) return rows[0];
+    // Unknown host id: fall through to the global default (previous behaviour).
+    const { rows: known } = await pool.query(`SELECT 1 FROM hosts WHERE id = $1`, [hostId]);
+    if (known[0]) return null;
   }
   const globalRes = await pool.query(
-    `SELECT * FROM ssh_credentials WHERE scope_type='GLOBAL' ORDER BY created_at DESC LIMIT 1`
+    `SELECT *, 'GLOBAL'::text AS resolved_via, NULL::text AS resolved_scope_name
+       FROM ssh_credentials WHERE scope_type='GLOBAL' ORDER BY priority DESC, created_at DESC, id LIMIT 1`
   );
   return globalRes.rows[0] ?? null;
 }

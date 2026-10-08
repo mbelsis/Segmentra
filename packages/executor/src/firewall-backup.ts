@@ -91,3 +91,31 @@ export function scopedRestoreSnippet(
     `(exit $seg_rc)`
   ].join('\n');
 }
+
+/**
+ * Shell snippet (root) syncing reboot persistence with the distribution's own service to the
+ * LIVE Segmentra state (see persist-scripts.ts): `persist` writes/merges it (or removes it when
+ * no Segmentra state is live), `unpersist` removes it, `check` only reports. iptables runs for
+ * IPv4 and, when ip6tables-save exists, IPv6. Never fails the calling script: its output
+ * (SEGMENTRA_PERSIST* lines, parsePersistenceOutput) reports the outcome.
+ */
+export function persistSnippet(
+  backend: 'nftables' | 'iptables',
+  mode: 'persist' | 'unpersist' | 'check',
+  src: ScriptSource = 'inline'
+): string {
+  if (backend === 'nftables') return `${nftCmd([mode], src)} || :`;
+  const v6 = 'if command -v ip6tables-save >/dev/null 2>&1; then';
+  if (src === 'installed') {
+    return [`${iptCmd([mode, 'iptables'], src)} || :`, `${v6} ${iptCmd([mode, 'ip6tables'], src)} || :; fi`].join('\n');
+  }
+  // Inline: the script is embedded ONCE (a temp file used for both families) so the command
+  // line stays far below the 128 KiB single-argument limit of ssh/sudo on Linux.
+  return [
+    `seg_ps=$(mktemp 2>/dev/null) && printf '%s' ${shq(SEGMENTRA_IPTABLES_SH)} > "$seg_ps" && {`,
+    `  /bin/sh "$seg_ps" ${mode} iptables || :`,
+    `  ${v6} /bin/sh "$seg_ps" ${mode} ip6tables || :; fi`,
+    '  rm -f "$seg_ps"',
+    '}'
+  ].join('\n');
+}

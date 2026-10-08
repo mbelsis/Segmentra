@@ -2,6 +2,17 @@ import { useEffect, useRef, useState } from 'react';
 
 import { api } from '../lib/api';
 import { useAuth, hasRole } from '../lib/auth-context';
+
+/** "web-creds (tag web)", "demo-boxes (global)", ... for a host's effective_credential. */
+function effectiveCredentialLabel(ec: any): string {
+  if (!ec) return 'none';
+  const why = ec.via === 'ASSIGNED' ? 'assigned to this host'
+    : ec.via === 'HOST' ? 'host-scoped'
+    : ec.via === 'TAG' ? `tag ${ec.scopeName}`
+    : ec.via === 'VLAN' ? ec.scopeName
+    : 'global';
+  return `${ec.name} (${why})`;
+}
 import { HostPolicyVisualization } from '../components/HostPolicyVisualization';
 import { DiscoveryTab } from '../components/DiscoveryTab';
 
@@ -11,6 +22,7 @@ export function InventoryPage() {
   const { roles } = useAuth();
   // Inventory mutations, compliance and readiness checks are operator/admin only in the API
   const canEdit = hasRole(roles, 'operator', 'admin');
+  const isAdmin = hasRole(roles, 'admin');
   const [activeTab, setActiveTab] = useState<Tab>('hosts');
   
   // Hosts state
@@ -21,6 +33,11 @@ export function InventoryPage() {
   const [hostVlanId, setHostVlanId] = useState<string>('');
   const [hostTagIds, setHostTagIds] = useState<string[]>([]);
   const [hostFirewallBackend, setHostFirewallBackend] = useState<string>('auto');
+  const [hostEnvironment, setHostEnvironment] = useState('');
+  const [hostOsFamily, setHostOsFamily] = useState('');
+  // '' = automatic (by credential scope); otherwise an explicitly assigned credential id (admin only)
+  const [hostCredentialId, setHostCredentialId] = useState<string>('');
+  const [sshCreds, setSshCreds] = useState<any[]>([]);
   const [editingHost, setEditingHost] = useState<string | null>(null);
   // Original values of the host being edited, so we only send changed fields (and null when cleared)
   const [editingHostOriginal, setEditingHostOriginal] = useState<any>(null);
@@ -86,6 +103,12 @@ export function InventoryPage() {
   useEffect(() => {
     loadData();
   }, []);
+
+  // Credential list for the host form's "SSH credential" select (admins only; roles may load late).
+  useEffect(() => {
+    if (!isAdmin) return;
+    api.sshCredentials().then((r) => setSshCreds(r.sshCredentials || []), () => setSshCreds([]));
+  }, [isAdmin]);
 
   // Debounce the free-text search so we don't fire a request per keystroke
   useEffect(() => {
@@ -350,6 +373,9 @@ export function InventoryPage() {
     setHostVlanId('');
     setHostTagIds([]);
     setHostFirewallBackend('auto');
+    setHostEnvironment('');
+    setHostOsFamily('');
+    setHostCredentialId('');
     setEditingHost(null);
     setEditingHostOriginal(null);
     setError(null);
@@ -379,6 +405,9 @@ export function InventoryPage() {
         if ((hostVlanId || '') !== (orig.vlan_id ?? '')) payload.vlanId = hostVlanId ? hostVlanId : null;
         const newBackend = hostFirewallBackend || 'auto';
         if (newBackend !== (orig.firewall_backend ?? 'auto')) payload.firewallBackend = newBackend;
+        if (hostEnvironment.trim() !== (orig.environment ?? '')) payload.environment = hostEnvironment.trim();
+        if (hostOsFamily.trim() !== (orig.os_family ?? '')) payload.osFamily = hostOsFamily.trim();
+        if (isAdmin && (hostCredentialId || '') !== (orig.ssh_credential_id ?? '')) payload.sshCredentialId = hostCredentialId || null;
         const r = await api.updateHost(editingHost, payload);
         setHosts((prev) => prev.map(h => h.id === editingHost ? r.host : h));
       } else {
@@ -388,7 +417,10 @@ export function InventoryPage() {
           sshPort: sshPortNum,
           vlanId: hostVlanId || undefined,
           tagIds: hostTagIds,
-          firewallBackend: hostFirewallBackend || 'auto'
+          firewallBackend: hostFirewallBackend || 'auto',
+          ...(hostEnvironment.trim() ? { environment: hostEnvironment.trim() } : {}),
+          ...(hostOsFamily.trim() ? { osFamily: hostOsFamily.trim() } : {}),
+          ...(isAdmin && hostCredentialId ? { sshCredentialId: hostCredentialId } : {})
         };
         const r = await api.createHost(payload);
         setHosts((prev) => [...prev, r.host]);
@@ -407,6 +439,9 @@ export function InventoryPage() {
     setHostVlanId(host.vlan_id || '');
     setHostTagIds((host.tags || []).map((t: any) => t.id));
     setHostFirewallBackend(host.firewall_backend || 'auto');
+    setHostEnvironment(host.environment || '');
+    setHostOsFamily(host.os_family || '');
+    setHostCredentialId(host.ssh_credential_id || '');
     setEditingHostOriginal(host);
     setEditingHost(host.id);
   }
@@ -746,6 +781,37 @@ export function InventoryPage() {
                 </select>
                 <small>Firewall backend to use for policy compilation. Auto defaults to nftables.</small>
               </div>
+              <div className="form-group">
+                <label>Environment</label>
+                <input value={hostEnvironment} onChange={(e) => setHostEnvironment(e.target.value)} placeholder="e.g., prod, staging, dev" />
+                <small>Optional. Can be used by auto-tagging rules (field "Environment").</small>
+              </div>
+              <div className="form-group">
+                <label>OS family</label>
+                <input value={hostOsFamily} onChange={(e) => setHostOsFamily(e.target.value)} placeholder="e.g., debian, ubuntu, rhel" />
+                <small>Optional. Filled in automatically by discovery; used by auto-tagging rules.</small>
+              </div>
+              {isAdmin ? (
+                <div className="form-group">
+                  <label>SSH credential</label>
+                  <select value={hostCredentialId} onChange={(e) => setHostCredentialId(e.target.value)}>
+                    <option value="">Automatic (by credential scope)</option>
+                    {sshCreds.map((c) => (
+                      <option key={c.id} value={c.id}>{c.name} ({c.username})</option>
+                    ))}
+                  </select>
+                  <small>
+                    Automatic: host-scoped, then tag, then VLAN, then global credential (Admin → SSH Credentials).
+                    {editingHostOriginal && <> Currently used: <strong>{effectiveCredentialLabel(editingHostOriginal.effective_credential)}</strong>.</>}
+                  </small>
+                </div>
+              ) : editingHostOriginal ? (
+                <div className="form-group">
+                  <label>SSH credential</label>
+                  <div style={{ padding: '6px 0' }}>{effectiveCredentialLabel(editingHostOriginal.effective_credential)}</div>
+                  <small>Credentials and their assignment are managed by admins.</small>
+                </div>
+              ) : null}
             </div>
             <div className="form-group">
               <label>Tags</label>
@@ -968,6 +1034,7 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                   <th>VLAN</th>
                   <th>Tags</th>
                   <th>Backend</th>
+                  <th>SSH credential</th>
                   <th>Compliance</th>
                   <th>Enabled</th>
                   <th>Actions</th>
@@ -1007,6 +1074,9 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                       )}
                     </td>
                     <td><code>{h.firewall_backend || 'auto'}</code></td>
+                    <td style={{ fontSize: '0.85em', color: h.effective_credential ? undefined : '#c62828' }}>
+                      {effectiveCredentialLabel(h.effective_credential)}
+                    </td>
                     <td>
                       {complianceStatuses.has(h.id) ? (
                         (() => {
@@ -1080,6 +1150,14 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                                 {result.backend !== 'unknown' && (
                                   <div>Backend: {result.backend}</div>
                                 )}
+                                {result.persistence && (
+                                  <div title={[...result.persistence.warnings, ...result.persistence.notes].join('\n')}>
+                                    Survives reboot:{' '}
+                                    {result.persistence.available
+                                      ? `✓ via ${result.persistence.method ?? 'distribution service'} (${result.persistence.distro === 'rhel' ? 'RHEL family' : result.persistence.distro === 'debian' ? 'Debian/Ubuntu' : 'unknown distro'})`
+                                      : `⚠ no (${result.persistence.distro === 'unsupported' ? 'unsupported distribution' : 'see warnings'})`}
+                                  </div>
+                                )}
                                 {result.errors.length > 0 && (
                                   <div style={{ color: '#d32f2f', marginTop: 4 }}>
                                     {result.errors.map((e: string, i: number) => (
@@ -1104,7 +1182,7 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                 ))}
                 {hosts.length === 0 && (
                   <tr>
-                    <td colSpan={10} className="empty-state">
+                    <td colSpan={11} className="empty-state">
                       No hosts found. {searchQuery || filterTag || filterVlan || filterEnabled !== 'all' ? 'Try adjusting your filters.' : 'Add a host above.'}
                     </td>
                   </tr>

@@ -15,6 +15,7 @@
  *   node -e "import('./packages/executor/dist/nft-scripts.js').then(m=>require('fs').writeFileSync('infra/ansible-runner/playbooks/files/segmentra-nft.sh', m.SEGMENTRA_NFT_SH))"
  */
 import { shq } from './ssh-options.js';
+import { PERSIST_COMMON_SH } from './persist-scripts.js';
 
 /** First line of a scoped nft backup; `${NFT_BACKUP_V2_HEADER}: absent` = the table did not exist. */
 export const NFT_BACKUP_V2_HEADER = '# segmentra-backup v2 nft';
@@ -34,6 +35,18 @@ export const NFT_BACKUP_V2_HEADER = '# segmentra-backup v2 nft';
  *          are accepted: only their `table inet segmentra { ... }` block is used (brace
  *          matching), and if they contain none the table is just deleted.
  *          Exit codes: 3 = backup missing, 4 = restore failed (nothing changed), 6 = no nft.
+ *   sh -c "$SCRIPT" segmentra-nft persist | unpersist | check
+ * persist:   reboot persistence with the distribution's own nftables.service (see
+ *            persist-scripts.ts): the LIVE table inet segmentra (`nft -s list table`) is written to
+ *            /etc/nftables.d/segmentra.nft (Debian/Ubuntu) or /etc/nftables/segmentra.nft (RHEL
+ *            family) behind `add table` + `delete table` (safe to load at boot and repeatedly), the
+ *            distro config (/etc/nftables.conf, /etc/sysconfig/nftables.conf) gets exactly one
+ *            include line, and nftables.service is enabled (never started) unless firewalld is
+ *            active/enabled. No live table -> same as unpersist. A live log-only (learning/test)
+ *            policy is never persisted (the boot file keeps the last enforced policy).
+ * unpersist: removes the include line and the file (nftables.service is left as it is).
+ * check:     reports what persist would do / whether the boot file matches the live table,
+ *            without changing anything. Always exits 0 unless the table cannot be read (4).
  */
 export const SEGMENTRA_NFT_SH = `#!/bin/sh
 # Managed by Segmentra. See packages/executor/src/nft-scripts.ts
@@ -41,8 +54,11 @@ set -u
 PATH="$PATH:/usr/sbin:/sbin"; export PATH
 mode=\${1:-}
 bfile=\${2:-}
-case "$mode" in backup|restore) ;; *) echo "segmentra-nft: invalid mode '$mode'" >&2; exit 2 ;; esac
-if [ -z "$bfile" ]; then echo "segmentra-nft: $mode needs a backup file argument" >&2; exit 2; fi
+case "$mode" in
+  backup|restore) if [ -z "$bfile" ]; then echo "segmentra-nft: $mode needs a backup file argument" >&2; exit 2; fi ;;
+  persist|unpersist|check) ;;
+  *) echo "segmentra-nft: invalid mode '$mode'" >&2; exit 2 ;;
+esac
 if ! command -v nft >/dev/null 2>&1; then echo "segmentra-nft: nft not found" >&2; exit 6; fi
 HDR='${NFT_BACKUP_V2_HEADER}'
 info() { echo "[segmentra:nft] $*"; }
@@ -120,9 +136,99 @@ restore_table() {
   fi
 }
 
+${PERSIST_COMMON_SH}
+nft_paths() {
+  case "$P_DISTRO" in
+    debian) NCONF=/etc/nftables.conf; NFILE=/etc/nftables.d/segmentra.nft ;;
+    rhel) NCONF=/etc/sysconfig/nftables.conf; NFILE=/etc/nftables/segmentra.nft ;;
+    *) NCONF=; NFILE= ;;
+  esac
+  NINC="include \\"$NFILE\\""
+}
+
+# Boot-time file for the live table -> $tmpd/persist.nft.
+# Returns 1 = no live table, 2 = live table is a log-only (learning/test) policy, 3 = read error.
+nft_render() {
+  nft list tables > "$tmpd/ptables" 2>/dev/null || return 3
+  grep -qx 'table inet segmentra' "$tmpd/ptables" || return 1
+  nft -s list table inet segmentra > "$tmpd/plist" 2>/dev/null || return 3
+  if ! extract_table "$tmpd/plist" > "$tmpd/pblock" || [ ! -s "$tmpd/pblock" ]; then return 3; fi
+  if grep -q 'FW-AUDIT: ALLOW: catch-all' "$tmpd/pblock"; then return 2; fi
+  {
+    echo '#!/usr/sbin/nft -f'
+    echo "# Managed by Segmentra: table inet segmentra, loaded at boot by nftables.service through"
+    echo "# the include line in $NCONF. Rewritten on every deployment; do not edit."
+    echo 'add table inet segmentra'
+    echo 'delete table inet segmentra'
+    cat "$tmpd/pblock"
+  } > "$tmpd/persist.nft"
+}
+
+nft_unpersist() {
+  if ! drop_include "$NCONF" "$NINC" || ! rm -f "$NFILE"; then
+    pwarn write_failed "could not remove the include line from $NCONF or $NFILE"; presult not_persisted none error; exit 4
+  fi
+  info "reboot persistence removed ($NFILE, include line in $NCONF)"
+  presult removed none none
+}
+
+nft_persist() {
+  pm=$1
+  P_FAMILY=nft
+  detect_distro
+  nft_paths
+  if [ -z "$NFILE" ]; then
+    pwarn unsupported_distro "reboot persistence is supported on Debian, Ubuntu and RHEL-family hosts only; table inet segmentra will not survive a reboot"
+    presult not_persisted none unsupported; return 0
+  fi
+  if [ "$pm" = unpersist ]; then nft_unpersist; return 0; fi
+  nft_render; rr=$?
+  case "$rr" in
+    3) pwarn read_failed "could not read table inet segmentra"; presult not_persisted none error; exit 4 ;;
+    1)
+      if [ "$pm" = persist ]; then nft_unpersist; return 0; fi
+      if [ -f "$NFILE" ] || grep -qxF -- "$NINC" "$NCONF" 2>/dev/null; then state=differs; else state=none; fi ;;
+    2)
+      pnote log_only_active "a log-only Firewall Learning / policy test policy is active; it is not persisted, the boot configuration keeps the last enforced policy"
+      if [ -f "$NFILE" ] && grep -qxF -- "$NINC" "$NCONF" 2>/dev/null; then state=learning; else state=missing; fi ;;
+    *)
+      if [ "$pm" = persist ]; then
+        if ! replace_file "$NFILE" "$tmpd/persist.nft" 600 || ! ensure_include "$NCONF" "$NINC"; then
+          pwarn write_failed "could not write $NFILE or the include line in $NCONF"; presult not_persisted none error; exit 4
+        fi
+        info "table inet segmentra saved to $NFILE (included from $NCONF)"
+      fi
+      if same_file "$NFILE" "$tmpd/persist.nft" && grep -qxF -- "$NINC" "$NCONF" 2>/dev/null; then state=in_sync
+      elif [ -f "$NFILE" ]; then state=differs; else state=missing; fi ;;
+  esac
+  if grep -q '^[[:space:]]*flush[[:space:]][[:space:]]*ruleset' "$NCONF" 2>/dev/null; then
+    pnote conf_flush_ruleset "$NCONF contains flush ruleset: harmless at boot (it runs before Docker / Kubernetes start), but never run systemctl restart/reload nftables on a running host, it would remove their rules"
+  fi
+  st=not_persisted; meth=none
+  if ! have_systemctl || ! unit_exists nftables.service; then
+    pwarn no_nftables_service "nftables.service (systemd) is not available on this host; table inet segmentra will not survive a reboot"
+  elif firewalld_on; then
+    pwarn firewalld_active "firewalld is active or enabled and conflicts with nftables.service, which Segmentra therefore does not enable: table inet segmentra will not survive a reboot while firewalld manages the firewall (to persist it, disable firewalld and enable nftables.service; translating the policy into firewalld is not supported)"
+  elif [ "$pm" = persist ] && ! enable_unit nftables.service; then
+    :
+  elif unit_enabled nftables.service; then
+    st=persisted; meth=nftables.service
+  else
+    meth=nftables.service
+    pwarn service_disabled "nftables.service is not enabled; Segmentra enables it on the next deployment"
+    st=not_persisted
+  fi
+  if [ "$st" = persisted ]; then
+    case "$state" in in_sync|learning) ;; *) st=not_persisted ;; esac
+  fi
+  if [ "$state" = none ]; then st=removed; fi
+  presult "$st" "$meth" "$state"
+}
+
 case "$mode" in
   backup) backup_table ;;
   restore) restore_table ;;
+  persist|unpersist|check) nft_persist "$mode" ;;
 esac
 exit 0
 `;

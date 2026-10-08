@@ -7,7 +7,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 
 import { compileHostPolicy, type RuleDirection } from '@segmentra/compiler';
-import { runAnsiblePlaybook, runSshDeployment, checkHostReadiness, checkPrivateKey, readHostFirewallRules, type AnsibleAgentKey, type SshHost, type SshHostInfo } from '@segmentra/executor';
+import { parseAnsibleRecap, runAnsiblePlaybook, runSshDeployment, checkHostReadiness, checkHostPersistence, checkPrivateKey, persistenceSummary, readHostFirewallRules, type AnsibleAgentKey, type PersistenceResult, type SshHost, type SshHostInfo } from '@segmentra/executor';
 
 import { pool } from '../db/pool.js';
 import { env } from '../lib/env.js';
@@ -17,6 +17,7 @@ import { createAuditEvent } from '../services/audit.js';
 import { getSshCredentialForHost, loadSshCredential, materializeSshCredential, sshAuthFields, type MaterializedSshCredential } from '../services/ssh-credentials.js';
 import { checkDeploymentSafety } from '../services/safety-check.js';
 import { isPolicyVersionHighRisk } from '../services/high-risk.js';
+import { notifyDeploymentEvent } from '../services/notifications.js';
 
 export const deploymentsRouter = Router();
 deploymentsRouter.use(requireAuth);
@@ -36,6 +37,35 @@ function truncateMessage(msg: string, max = 500): string {
 }
 
 /** Mark the policy version DEPLOYED once a deployment of it has fully succeeded. */
+/**
+ * When an automatic expiry REVERT deployment finishes, record the outcome on the hosts of the
+ * deployment that expired (they show REVERT_QUEUED until then).
+ */
+async function recordRevertOutcome(revertDeploymentId: string): Promise<void> {
+  try {
+    await pool.query(
+      `UPDATE deployment_hosts orig
+          SET expiry_status = CASE WHEN rev.status = 'SUCCEEDED' THEN 'REVERTED' ELSE 'FAILED' END,
+              expiry_message = CASE WHEN rev.status = 'SUCCEEDED'
+                                    THEN 'Previous version redeployed by deployment ' || d.id::text
+                                    ELSE 'Automatic revert failed: ' || COALESCE(rev.message, rev.status) END,
+              expiry_processed_at = now()
+         FROM deployments d
+         JOIN deployment_hosts rev ON rev.deployment_id = d.id
+        WHERE d.id = $1
+          AND d.revert_of_deployment_id IS NOT NULL
+          AND orig.deployment_id = d.revert_of_deployment_id
+          AND orig.host_id = rev.host_id
+          AND orig.expiry_status = 'REVERT_QUEUED'
+          AND rev.status IN ('SUCCEEDED', 'FAILED', 'SKIPPED')`,
+      [revertDeploymentId]
+    );
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error('[expiry] could not record revert outcome:', (e as Error)?.message ?? e);
+  }
+}
+
 async function markVersionDeployed(client: { query: (text: string, params?: any[]) => Promise<unknown> }, deploymentId: string) {
   await client.query(
     `UPDATE policy_versions SET status='DEPLOYED'
@@ -46,9 +76,10 @@ async function markVersionDeployed(client: { query: (text: string, params?: any[
 
 /** Fail a deployment that could not be (fully) started. Never overwrites CANCELLED/PAUSED. */
 async function failDeployment(deploymentId: string, message: string) {
-  await pool.query(
+  const upd = await pool.query(
     `UPDATE deployments SET status='FAILED', finished_at=now(), progress=$2
-     WHERE id=$1 AND status IN ('RUNNING', 'QUEUED')`,
+     WHERE id=$1 AND status IN ('RUNNING', 'QUEUED')
+     RETURNING id`,
     [deploymentId, JSON.stringify({ phase: 'failed', error: message })]
   );
   await pool.query(
@@ -56,6 +87,7 @@ async function failDeployment(deploymentId: string, message: string) {
      WHERE deployment_id=$1 AND status IN ('RUNNING', 'PENDING')`,
     [deploymentId, truncateMessage(message)]
   );
+  if (upd.rows[0]) notifyDeploymentEvent('DEPLOYMENT_FAILED', deploymentId, { error: truncateMessage(message) });
 }
 
 /**
@@ -63,8 +95,8 @@ async function failDeployment(deploymentId: string, message: string) {
  * successful run and store it as the drift baseline (same read/normalization as compliance).
  * Best-effort: on failure the baseline stays NULL and compliance reports 'unknown'.
  */
-async function recordLiveBaseline(deploymentId: string, host: any, backend?: 'nftables' | 'iptables'): Promise<void> {
-  if (!host?.mgmt_ip) return;
+async function recordLiveBaseline(deploymentId: string, host: any, backend?: 'nftables' | 'iptables'): Promise<{ unreachable?: string }> {
+  if (!host?.mgmt_ip) return {};
   let cred: MaterializedSshCredential | null = null;
   try {
     cred = await getSshCredentialForHost(host.id);
@@ -80,10 +112,48 @@ async function recordLiveBaseline(deploymentId: string, host: any, backend?: 'nf
         `UPDATE deployment_hosts SET applied_live_hash=$3 WHERE deployment_id=$1 AND host_id=$2`,
         [deploymentId, host.id, read.rulesHash]
       );
+    } else if (!read.success && /ssh: connect to host|Connection timed out|Connection refused|No route to host|kex_exchange_identification|Connection closed by/i.test(String(read.error ?? ''))) {
+      // A new SSH connection fails right after the apply: the policy most likely locked
+      // Segmentra out (the Ansible run itself reused its already-open connection).
+      return { unreachable: String(read.error).trim().split('\n').pop() };
     }
   } catch (e) {
     // eslint-disable-next-line no-console
     console.warn(`[deployments] could not record live baseline for ${host.hostname}:`, (e as Error)?.message ?? e);
+  } finally {
+    cred?.cleanup();
+  }
+  return {};
+}
+
+/** deployment_hosts.persistence_* values for a reboot persistence result (NULLs when not reported). */
+function persistenceColumns(p: PersistenceResult | undefined): [string | null, string | null, string | null] {
+  if (!p) return [null, null, null];
+  return [p.status, p.method, truncateMessage(persistenceSummary(p), 2000)];
+}
+
+/**
+ * Ansible runs the same host scripts (persist) but its output is not parsed: read the reboot
+ * persistence state of the host afterwards with a read-only check and store it. Best-effort.
+ */
+async function recordPersistence(deploymentId: string, host: any, backend?: 'nftables' | 'iptables'): Promise<void> {
+  if (!host?.mgmt_ip || !backend) return;
+  let cred: MaterializedSshCredential | null = null;
+  try {
+    cred = await getSshCredentialForHost(host.id);
+    const p = await checkHostPersistence(
+      { hostname: host.hostname, ip: String(host.mgmt_ip), port: host.ssh_port || 22, ...sshAuthFields(cred), backend },
+      backend
+    );
+    const [status, method, message] = persistenceColumns(p);
+    await pool.query(
+      `UPDATE deployment_hosts SET persistence_status=$3, persistence_method=$4, persistence_message=$5
+       WHERE deployment_id=$1 AND host_id=$2`,
+      [deploymentId, host.id, status, method, p.error ? truncateMessage(`${message ?? ''} (check failed: ${p.error})`, 2000) : message]
+    );
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn(`[deployments] could not record reboot persistence for ${host.hostname}:`, (e as Error)?.message ?? e);
   } finally {
     cred?.cleanup();
   }
@@ -110,6 +180,7 @@ export async function checkAndTimeoutStaleHosts() {
     [timeoutThreshold]
   );
 
+  const finishedViaTimeout: Array<{ id: string; status: string }> = [];
   if (staleHosts.rows.length > 0) {
     // Check if any deployments need to be updated to PARTIAL or FAILED
     const deploymentIds = [...new Set(staleHosts.rows.map((r: any) => r.deployment_id))];
@@ -233,12 +304,17 @@ export async function checkAndTimeoutStaleHosts() {
               }
             });
           }
+          finishedViaTimeout.push({ id: deploymentId, status: finalStatus });
         }
       }
     }
   }
   
   await client.query('COMMIT');
+  for (const f of finishedViaTimeout) {
+    notifyDeploymentEvent(f.status === 'SUCCEEDED' ? 'DEPLOYMENT_COMPLETED' : 'DEPLOYMENT_FAILED', f.id, { completedVia: 'timeout_check' });
+    await recordRevertOutcome(f.id);
+  }
   return staleHosts.rows.length;
   } catch (e) {
     await client.query('ROLLBACK');
@@ -1158,6 +1234,33 @@ async function executeDeploymentStartInner(
     let deployedCount = 0;
     let anyFailed = false;
 
+    // CANARY / PROGRESSIVE rollout gates. Hosts are deployed one by one in hostname order.
+    // CANARY: the first canarySize hosts (default 1) are the canary; if one of them fails, the
+    // remaining hosts are not deployed. PROGRESSIVE: hosts go in batches of batchSize (default 5);
+    // if a host fails, the rollout stops at the end of that batch. Halted hosts are SKIPPED with
+    // a "Rollout halted:" message and are picked up again by retry-failed.
+    const rolloutRes = await pool.query(
+      `SELECT d.mode, d.canary_size, d.batch_size,
+              (SELECT COUNT(*)::int FROM deployment_hosts dh WHERE dh.deployment_id = d.id AND dh.status IN ('SUCCEEDED', 'FAILED')) AS finished
+       FROM deployments d WHERE d.id=$1`,
+      [deploymentId]
+    );
+    const rolloutMode = String(rolloutRes.rows[0]?.mode ?? 'FULL');
+    const canarySize = Math.max(1, Number(rolloutRes.rows[0]?.canary_size) || 1);
+    const batchSize = Math.max(1, Number(rolloutRes.rows[0]?.batch_size) || 5);
+    let finishedTotal = Number(rolloutRes.rows[0]?.finished) || 0; // includes hosts finished by an earlier (paused) run
+    let batchHadFailure = false;
+    const haltRollout = async (reason: string) => {
+      const message = truncateMessage(`Rollout halted: ${reason}`);
+      await pool.query(
+        `UPDATE deployment_hosts SET status='SKIPPED', finished_at=now(), message=$2
+         WHERE deployment_id=$1 AND status='PENDING'`,
+        [deploymentId, message]
+      );
+      warnings.push(message);
+      allStdout.push(`=== ${message} ===\n`);
+    };
+
     try {
       for (const h of deployableHosts) {
         // Stop between hosts if the deployment was paused/stopped/cancelled
@@ -1179,7 +1282,7 @@ async function executeDeploymentStartInner(
 
         const policyFile = hostPolicyFiles.get(h.id)!;
         let cred: MaterializedSshCredential | null = null;
-        let result: { success: boolean; stdout: string; stderr: string; exitCode: number; liveRulesHash?: string; skipped?: boolean };
+        let result: { success: boolean; stdout: string; stderr: string; exitCode: number; liveRulesHash?: string; skipped?: boolean; persistence?: PersistenceResult };
         try {
           cred = await getSshCredentialForHost(h.id, bundleDir);
           const sshHost: SshHost = {
@@ -1208,13 +1311,28 @@ async function executeDeploymentStartInner(
         const lastErrLine = String(result.stderr || '').trim().split('\n').filter(Boolean).pop() ?? '';
         const message = result.success ? 'ok' : truncateMessage(`ssh_failed${lastErrLine ? `: ${lastErrLine}` : ''}`);
         // Record the real outcome for this host (even if the deployment was paused meanwhile)
+        const [persistStatus, persistMethod, persistMessage] = persistenceColumns(result.persistence);
         await pool.query(
           `UPDATE deployment_hosts
-           SET status=$2, finished_at=now(), message=$3, applied_hash=$5, applied_live_hash=$6
+           SET status=$2, finished_at=now(), message=$3, applied_hash=$5, applied_live_hash=$6,
+               persistence_status=$7, persistence_method=$8, persistence_message=$9
            WHERE deployment_id=$1 AND host_id=$4`,
-          [deploymentId, result.success ? 'SUCCEEDED' : 'FAILED', message, h.id, policyHash, liveHash]
+          [deploymentId, result.success ? 'SUCCEEDED' : 'FAILED', message, h.id, policyHash, liveHash, persistStatus, persistMethod, persistMessage]
         );
         deployedCount++;
+        finishedTotal++;
+
+        if (rolloutMode === 'CANARY' && !result.success && finishedTotal <= canarySize) {
+          await haltRollout(`canary host ${h.hostname} failed (canary size ${canarySize})`);
+        } else if (rolloutMode === 'PROGRESSIVE') {
+          if (!result.success) batchHadFailure = true;
+          if (finishedTotal % batchSize === 0) {
+            if (batchHadFailure) {
+              await haltRollout(`a host in batch ${Math.ceil(finishedTotal / batchSize)} (batch size ${batchSize}) failed`);
+            }
+            batchHadFailure = false;
+          }
+        }
       }
     } finally {
       fs.writeFileSync(stdoutPath, allStdout.join('\n'), 'utf8');
@@ -1272,24 +1390,44 @@ async function executeDeploymentStartInner(
       [executionId, exitCode, stdoutPath, stderrPath]
     );
 
+    // Per-host outcome from the PLAY RECAP: the play does not abort other hosts when one fails
+    // (any_errors_fatal: false), so a non-zero exit code alone must not fail every host.
+    let recap = new Map<string, { ok: boolean; error?: string }>();
+    try { recap = parseAnsibleRecap(fs.readFileSync(stdoutPath, 'utf8')); } catch { /* fall back to exit code */ }
+
     // Update every host that was in this run's inventory. Don't filter on status='RUNNING':
     // a long run may have been marked FAILED by the stale-host timeout or PAUSED meanwhile,
     // but the playbook result is the real outcome. Hosts SKIPPED by a stop are left alone.
     for (const hostId of bundleHostIds) {
-      if (ok) {
+      const hostname = deployableHosts.find((h: any) => h.id === hostId)?.hostname;
+      const outcome = hostname ? recap.get(String(hostname)) : undefined;
+      const hostOk = result.timedOut ? false : outcome ? outcome.ok : ok;
+      if (hostOk) {
         await pool.query(
           `UPDATE deployment_hosts
            SET status='SUCCEEDED', finished_at=now(), message='ok', applied_hash=$3
            WHERE deployment_id=$1 AND host_id=$2 AND status <> 'SKIPPED'`,
           [deploymentId, hostId, hostPolicyHashes.get(hostId) || null]
         );
-        await recordLiveBaseline(deploymentId, deployableHosts.find((h: any) => h.id === hostId), hostPolicyFiles.get(hostId)?.backend);
+        const baseline = await recordLiveBaseline(deploymentId, deployableHosts.find((h: any) => h.id === hostId), hostPolicyFiles.get(hostId)?.backend);
+        if (!baseline.unreachable) {
+          await recordPersistence(deploymentId, deployableHosts.find((h: any) => h.id === hostId), hostPolicyFiles.get(hostId)?.backend);
+        }
+        if (baseline.unreachable) {
+          // The Ansible executor has no automatic revert (see docs/guide.md): report the lockout
+          // instead of a success.
+          await pool.query(
+            `UPDATE deployment_hosts SET status='FAILED', message=$3
+             WHERE deployment_id=$1 AND host_id=$2 AND status='SUCCEEDED'`,
+            [deploymentId, hostId, truncateMessage(`Policy applied, but the host is not reachable over a new SSH connection afterwards (possible lockout; the Ansible executor has no automatic revert, restore access on the host or with scripts/restore-previous-policy.sh): ${baseline.unreachable}`)]
+          );
+        }
       } else {
         await pool.query(
           `UPDATE deployment_hosts
-           SET status='FAILED', finished_at=now(), message='ansible_failed'
+           SET status='FAILED', finished_at=now(), message=$3
            WHERE deployment_id=$1 AND host_id=$2 AND status <> 'SKIPPED'`,
-          [deploymentId, hostId]
+          [deploymentId, hostId, truncateMessage(outcome?.error ? `ansible_failed: ${outcome.error}` : result.timedOut ? `ansible_failed: ${result.error ?? 'timed out'}` : 'ansible_failed')]
         );
       }
     }
@@ -1337,6 +1475,10 @@ async function executeDeploymentStartInner(
       finalized = Boolean(upd.rows[0]);
       if (finalized && finalStatus === 'SUCCEEDED') {
         await markVersionDeployed(pool, deploymentId);
+      }
+      if (finalized) {
+        notifyDeploymentEvent(finalStatus === 'SUCCEEDED' ? 'DEPLOYMENT_COMPLETED' : 'DEPLOYMENT_FAILED', deploymentId);
+        await recordRevertOutcome(deploymentId);
       }
     }
 
@@ -1479,6 +1621,7 @@ deploymentsRouter.post('/deployments/:deploymentId/start', requireRole('operator
     entityId: deploymentId,
     ipAddress: req.ip
   });
+  notifyDeploymentEvent('DEPLOYMENT_STARTED', deploymentId, { startedBy: req.auth!.username });
 
   // Return 202 Accepted immediately — execution happens in background
   res.status(202).json({ ok: true, message: 'Deployment started. Monitor progress on the deployment detail page.', deploymentId });
@@ -1631,7 +1774,8 @@ deploymentsRouter.post('/deployments/:deploymentId/retry-failed', requireRole('o
     }
     const hosts = await client.query(
       `UPDATE deployment_hosts SET status='PENDING', started_at=NULL, finished_at=NULL, message=NULL
-       WHERE deployment_id=$1 AND status='FAILED'
+       WHERE deployment_id=$1
+         AND (status='FAILED' OR (status='SKIPPED' AND message LIKE 'Rollout halted:%'))
        RETURNING host_id`,
       [deploymentId]
     );
@@ -1670,6 +1814,7 @@ export async function processScheduledDeployments(): Promise<number> {
       'AND scheduled_at IS NOT NULL AND scheduled_at <= now()'
     );
     if (!claimed) continue; // started, cancelled or changed by someone else meanwhile
+    notifyDeploymentEvent('DEPLOYMENT_STARTED', row.id, { startedBy: 'scheduler' });
 
     try {
       const result = await executeDeploymentStart(row.id, undefined);

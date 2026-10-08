@@ -1,5 +1,7 @@
 # Segmentra
 
+> **Note:** This is the original product specification, kept for reference. The implementation differs in places (some features were built differently, some were not built, and many were added). For the current behavior see the [README](../README.md) and [Architecture.md](Architecture.md).
+
 ## Business description
 **Segmentra** is an on‑premise, web-based **fleet firewall & microsegmentation management** tool for Linux servers. It lets security/infra teams define **intent-based access policies** (allow/deny traffic) and safely deploy them at scale to **iptables or nftables** across thousands of servers. Segmentra organizes servers by **tags and VLANs**, supports **multi-NIC interface-aware enforcement** (management/data/backup), provides **policy versioning**, **maker/checker approvals**, **safe staged rollouts**, **automatic host-local backups**, and a full **audit trail** of every change and deployment.
 

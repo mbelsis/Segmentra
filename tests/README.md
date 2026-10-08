@@ -50,7 +50,7 @@ At a high level, it performs these steps:
 1. Checks that Docker and Docker Compose are available.
 2. Creates an ephemeral SSH keypair under `tests/docker-ssh-integration/.runtime/keys`.
 3. Pulls `alpine:3.20` or uses the local cached image if Docker Hub is temporarily unreachable.
-4. Builds and starts the temporary Docker stack.
+4. Builds and starts the temporary Docker stack (the API runs with `NODE_ENV=development` so the seed creates the default `admin` / `admin123` user).
 5. Runs DB migrations and seeds the default admin user plus roles.
 6. Waits for the API health endpoint to become ready.
 7. Logs into the API as `admin`.
@@ -159,8 +159,8 @@ docker compose -f tests/docker-ssh-integration/docker-compose.yml -p segmentra-i
 You should see:
 
 - `-A INPUT -j SEGMENTRA-IN` and `-A OUTPUT -j SEGMENTRA-OUT` (once each); built-in policies stay `ACCEPT`
-- a management SSH allow rule for `172.29.0.0/24` on port `22` in `SEGMENTRA-IN`, which ends with the default `DROP`
-- host-specific ICMP allow rules only where expected
+- a management SSH allow rule for `172.29.0.0/24` on port `22` in `SEGMENTRA-IN`, which ends with the default `DROP` (allow rules in Segmentra's chains use `-j RETURN`, so the packet goes back to `INPUT`, whose remaining rules and policy still apply)
+- host-specific ICMP allow rules (`-j RETURN`) only where expected
 - the fake `DOCKER-USER` / `f2b-sshd` chains and their jumps unchanged
 
 ### 4. Re-run the live ping checks manually

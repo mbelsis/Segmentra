@@ -1,5 +1,4 @@
 import { pool } from '../db/pool.js';
-import { forwardAuditToSiem } from './siem-forwarder.js';
 
 export interface AuditEventParams {
   actorUserId: string | null;
@@ -24,12 +23,6 @@ export async function createAuditEvent(params: AuditEventParams): Promise<void> 
     ]
   );
 
-  // Forward to SIEM (fire-and-forget — never blocks audit event creation)
-  forwardAuditToSiem({
-    action: params.action,
-    actorUsername: undefined, // Will be resolved by siem-forwarder if needed
-    entityType: params.entityType,
-    entityId: params.entityId,
-    metadata: params.metadata,
-  }).catch(() => {}); // Swallow errors — SIEM forwarding must never fail the audit
+  // SIEM forwarding is not done here: a trigger on audit_events notifies the API and
+  // services/siem-audit-listener.ts forwards every row exactly once, however it was inserted.
 }

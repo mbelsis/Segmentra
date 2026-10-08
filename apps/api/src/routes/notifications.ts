@@ -4,62 +4,23 @@ import { z } from 'zod';
 import { pool } from '../db/pool.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { sendTestToChannel, validateWebhookUrl } from '../services/notifications.js';
-import { maskConfigSecrets, maskUrlSecrets, mergeConfigSecrets } from '../services/secret-mask.js';
-
-const URL_KEYS = ['url', 'webhookUrl'] as const;
-
-function parseConfig(raw: unknown): Record<string, any> {
-  if (!raw) return {};
-  if (typeof raw === 'string') {
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return {};
-    }
-  }
-  return raw as Record<string, any>;
-}
-
-/** Mask authHeader / tokens and secrets embedded in webhook URLs. */
-function redactChannelConfig(config: unknown): Record<string, any> {
-  const c = maskConfigSecrets(parseConfig(config));
-  for (const k of URL_KEYS) {
-    if (typeof c[k] === 'string') c[k] = maskUrlSecrets(c[k]);
-  }
-  if (c.customHeaders && typeof c.customHeaders === 'object') {
-    c.customHeaders = Object.fromEntries(
-      Object.entries(c.customHeaders).map(([k, v]) => [k, typeof v === 'string' && v.length > 0 ? `••••${v.slice(-4)}` : v])
-    );
-  }
-  return c;
-}
-
-function redactChannel<T extends { config?: unknown }>(row: T): T {
-  return row ? { ...row, config: redactChannelConfig(row.config) } : row;
-}
+import {
+  deleteConfigSecret,
+  loadFullConfig,
+  maskChannelConfig,
+  mergeChannelConfig,
+  storeFullConfig,
+} from '../services/config-secrets.js';
 
 /**
- * Apply an incoming config on top of the stored one: masked/omitted secrets keep their value,
- * and a URL equal to the masked form of the stored URL keeps the stored URL.
+ * Never return webhook URLs with tokens, auth headers or custom header values. The full config
+ * lives encrypted in secret_store (config_secret_id); the `config` column only holds a masked
+ * display copy (masked again here for rows not yet migrated).
  */
-function mergeChannelConfig(existing: Record<string, any>, incoming: Record<string, any>): Record<string, any> {
-  const merged = mergeConfigSecrets(existing, incoming) as Record<string, any>;
-  for (const k of URL_KEYS) {
-    if (typeof incoming[k] === 'string' && typeof existing[k] === 'string' && incoming[k] !== existing[k]
-        && incoming[k] === maskUrlSecrets(existing[k])) {
-      merged[k] = existing[k];
-    }
-  }
-  if (incoming.customHeaders && typeof incoming.customHeaders === 'object' && existing.customHeaders) {
-    merged.customHeaders = Object.fromEntries(
-      Object.entries(incoming.customHeaders).map(([k, v]) =>
-        typeof v === 'string' && v.startsWith('••••') && existing.customHeaders[k] !== undefined
-          ? [k, existing.customHeaders[k]]
-          : [k, v]
-      )
-    );
-  }
-  return merged;
+function redactChannel<T extends { config?: unknown; config_secret_id?: unknown }>(row: T): T {
+  if (!row) return row;
+  const { config_secret_id: _secretId, ...rest } = row;
+  return { ...rest, config: maskChannelConfig(row.config) } as unknown as T;
 }
 
 async function validateChannelConfig(type: string, config: Record<string, any>): Promise<string | null> {
@@ -122,11 +83,19 @@ notificationsRouter.post('/channels', requireRole('admin'), async (req, res) => 
   const userRes = await pool.query(`SELECT id FROM users WHERE username=$1 LIMIT 1`, [req.auth!.username]);
   const userId = userRes.rows[0]?.id ?? null;
 
-  const { rows } = await pool.query(
-    `INSERT INTO notification_channels (name, type, config, enabled, created_by)
-     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-    [b.name, b.type, JSON.stringify(b.config), b.enabled, userId]
-  );
+  // Full config encrypted in secret_store; only a masked copy goes to the plain column.
+  const stored = await storeFullConfig('notification_channel', b.name, b.config, null);
+  let rows;
+  try {
+    ({ rows } = await pool.query(
+      `INSERT INTO notification_channels (name, type, config, config_secret_id, enabled, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [b.name, b.type, JSON.stringify(stored.displayConfig), stored.secretId, b.enabled, userId]
+    ));
+  } catch (e) {
+    await deleteConfigSecret(stored.secretId);
+    throw e;
+  }
 
   await pool.query(
     `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
@@ -143,21 +112,29 @@ notificationsRouter.put('/channels/:id', requireRole('admin'), async (req, res) 
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
   const b = parsed.data;
 
-  const existingRes = await pool.query(`SELECT type, config FROM notification_channels WHERE id = $1`, [req.params.id]);
+  const existingRes = await pool.query(`SELECT name, type, config, config_secret_id FROM notification_channels WHERE id = $1`, [req.params.id]);
   if (!existingRes.rows[0]) return res.status(404).json({ error: 'not_found' });
-  let mergedConfig: Record<string, any> | null = null;
+  let displayConfig: Record<string, any> | null = null;
+  let configSecretId: string | null = null;
   if (b.config) {
-    mergedConfig = mergeChannelConfig(parseConfig(existingRes.rows[0].config), b.config);
+    const mergedConfig = mergeChannelConfig(await loadFullConfig(existingRes.rows[0]), b.config);
     const configError = await validateChannelConfig(b.type ?? existingRes.rows[0].type, mergedConfig);
     if (configError) return res.status(400).json({ error: 'invalid_webhook_url', message: configError });
+    const stored = await storeFullConfig(
+      'notification_channel', b.name ?? existingRes.rows[0].name, mergedConfig, existingRes.rows[0].config_secret_id
+    );
+    displayConfig = stored.displayConfig;
+    configSecretId = stored.secretId;
   }
 
   const { rows } = await pool.query(
     `UPDATE notification_channels
      SET name = COALESCE($2, name), type = COALESCE($3, type),
-         config = COALESCE($4, config), enabled = COALESCE($5, enabled), updated_at = now()
+         config = COALESCE($4, config), enabled = COALESCE($5, enabled),
+         config_secret_id = COALESCE($6, config_secret_id), updated_at = now()
      WHERE id = $1 RETURNING *`,
-    [req.params.id, b.name ?? null, b.type ?? null, mergedConfig ? JSON.stringify(mergedConfig) : null, b.enabled ?? null]
+    [req.params.id, b.name ?? null, b.type ?? null, displayConfig ? JSON.stringify(displayConfig) : null, b.enabled ?? null,
+     configSecretId]
   );
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
   res.json({ channel: redactChannel(rows[0]) });
@@ -165,8 +142,9 @@ notificationsRouter.put('/channels/:id', requireRole('admin'), async (req, res) 
 
 // Delete channel
 notificationsRouter.delete('/channels/:id', requireRole('admin'), async (req, res) => {
-  const { rowCount } = await pool.query(`DELETE FROM notification_channels WHERE id = $1`, [req.params.id]);
-  if (!rowCount) return res.status(404).json({ error: 'not_found' });
+  const { rows: deleted } = await pool.query(`DELETE FROM notification_channels WHERE id = $1 RETURNING config_secret_id`, [req.params.id]);
+  if (!deleted[0]) return res.status(404).json({ error: 'not_found' });
+  await deleteConfigSecret(deleted[0].config_secret_id);
   res.json({ ok: true });
 });
 
@@ -235,7 +213,7 @@ notificationsRouter.post('/channels/:id/test', requireRole('admin'), async (req,
     await sendTestToChannel({
       id: rows[0].id,
       type: rows[0].type,
-      config: rows[0].config,
+      config: await loadFullConfig(rows[0]),
       name: rows[0].name,
     });
     res.json({ success: true, message: `Test notification sent to ${rows[0].name} (${rows[0].type})` });

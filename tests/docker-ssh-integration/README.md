@@ -19,7 +19,8 @@ What it verifies:
 - the API can create hosts, policies, approvals, and deployments
 - the SSH-direct executor can deploy via password auth
 - the SSH-direct executor can deploy via key auth
-- `iptables` inside each target matches the expected ACL
+- `iptables` inside each target matches the expected ACL (Segmentra's `SEGMENTRA-IN` / `SEGMENTRA-OUT` chains, with pre-existing Docker and fail2ban chains left untouched)
+- drift detection reports `compliant` after deployment and after unrelated Docker chain changes, and `drifted` once a Segmentra jump is removed
 - real container-to-container `ping` traffic is allowed or blocked according to the deployed ACL
 
 Notes:
