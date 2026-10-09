@@ -1,6 +1,14 @@
 # Tests
 
-This directory contains the Docker-based integration test flow for Segmentra's SSH deployment path.
+This directory contains security regression checks and the Docker-based integration test flow for Segmentra's SSH deployment path.
+
+## Security Regression Checks
+
+Run `npm run test:security` from the repository root. This builds the API and its dependencies, then uses Node's built-in test runner without Docker or a database.
+
+The checks cover production encryption-key validation, CORS defaults and origin validation, and bootstrap password hashing and initialization guards. Bootstrap route checks use a mocked database client and verify that the table lock precedes the first-user check; they do not exercise concurrent transactions against PostgreSQL.
+
+Bootstrap requests now require a `password` of at least 12 characters and at most 72 UTF-8 bytes alongside the bootstrap `token`. The resulting admin can log in with that password after its initial JWT expires. Existing users are unaffected; an existing bootstrap account without a password needs an admin password reset.
 
 ## What This Integration Test Does
 

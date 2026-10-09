@@ -367,16 +367,16 @@ For detailed technical documentation, see [Architecture.md](docs/Architecture.md
 |----------|----------|---------|-------------|
 | `DATABASE_URL` | Yes | — | PostgreSQL connection string |
 | `JWT_SECRET` | Yes | — | JWT signing secret. Min. 32 chars when `NODE_ENV=production` (16 in dev); known placeholder values are refused in production |
-| `SEGMENTRA_KEK_B64` | Prod: yes | — | 32 random bytes, base64 (`openssl rand -base64 32`): key for AES-256-GCM secret encryption. If unset, the key is **derived from `JWT_SECRET`**, so rotating `JWT_SECRET` makes stored secrets undecryptable. Set it explicitly in production and **before** storing any secrets; changing it later requires re-entering secrets. The Docker image refuses to start without it |
+| `SEGMENTRA_KEK_B64` | Prod: yes | — | 32 random bytes, canonical base64 (`openssl rand -base64 32`): key for AES-256-GCM secret encryption. In development, if unset, the key is **derived from `JWT_SECRET`**, so rotating `JWT_SECRET` makes stored secrets undecryptable. Set it explicitly in production and **before** storing any secrets; changing it later requires re-entering secrets. The API validates it at startup and refuses to start without it in production |
 | `NODE_ENV` | No | — | `production` enables strict checks (JWT length, KEK required in Docker, no default admin password) |
 | `PORT` | No | `8080` | API server port |
 | `BUNDLES_DIR` | No | `./data/bundles` | Deployment bundle directory (`/bundles` in Docker, shared with the Ansible runner) |
 | `ANSIBLE_RUNNER_CONTAINER` | No | `segmentra-ansible-runner` | Ansible runner container name used with `docker exec` |
-| `CORS_ORIGIN` | No | — (allow all) | Comma-separated allowed browser origins; set in production |
+| `CORS_ORIGIN` | No | Same-origin only in production; allow all in development | Comma-separated HTTP(S) browser origins without paths or wildcards; set for cross-origin UI access |
 | `TRUST_PROXY` | No | — | Express `trust proxy` value (`1`, `loopback`, CIDR, `true`) when the API is behind a reverse proxy, so client IPs (login rate limiting, audit) are correct. docker-compose sets `1` (nginx) |
 | `SEGMENTRA_KNOWN_HOSTS` | No | `~/.ssh/known_hosts` | known_hosts file for SSH executor / readiness / audit connections. Unknown hosts are trusted on first use (`StrictHostKeyChecking=accept-new`); changed host keys are rejected |
 | `SEGMENTRA_ALLOW_PRIVATE_WEBHOOKS` | No | `false` | Set `true` to allow notification webhooks to loopback, link-local and cloud-metadata addresses (blocked by default to prevent SSRF; RFC1918 private ranges are always allowed) |
-| `SEGMENTRA_BOOTSTRAP_TOKEN` | No | — | Enables the one-time `POST /api/admin/bootstrap` endpoint (only while no users exist) |
+| `SEGMENTRA_BOOTSTRAP_TOKEN` | No | — | Enables the one-time `POST /api/admin/bootstrap` endpoint (only while no users exist); requires `token`, optional `username`, and `password` (12+ characters, at most 72 UTF-8 bytes) |
 | `SEGMENTRA_ADMIN_PASSWORD` | Prod: yes | `admin123` in dev | Password for the initial `admin` user created by `npm run db:seed` (min. 12 chars in production) |
 | `SEGMENTRA_SSH_COMMAND_TIMEOUT_MS` | No | `300000` | Per-command SSH timeout |
 | `SEGMENTRA_ASKPASS_DIR` | No | OS temp dir | Directory for the `SSH_ASKPASS` helper script used for passphrase-protected keys (the script contains no secret) |

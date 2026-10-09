@@ -11,7 +11,8 @@
     "db:migrate": "npm run migrate:up -w @segmentra/db",
     "db:seed": "npm run seed -w @segmentra/db",
     "lint": "npm run lint --workspaces --if-present",
-    "test:integration:ssh-docker": "node ./tests/run-docker-ssh-integration.mjs"
+    "test:integration:ssh-docker": "node ./tests/run-docker-ssh-integration.mjs",
+    "test:security": "npm run build -w @segmentra/api && node --test tests/security-regressions.test.mjs"
   },
   "engines": {
     "node": ">=20"

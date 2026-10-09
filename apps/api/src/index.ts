@@ -7,6 +7,7 @@ import express from 'express';
 import { ZodError } from 'zod';
 
 import { env, parseTrustProxy } from './lib/env.js';
+import { corsOptions } from './lib/cors.js';
 import { warnIfKekDerivedFromJwtSecret } from './services/crypto.js';
 import { authRouter } from './routes/auth.js';
 import { adminRouter } from './routes/admin.js';
@@ -37,9 +38,8 @@ const app = express();
 // Behind a reverse proxy, set TRUST_PROXY so req.ip (used by the login rate limiter) is the client IP.
 const trustProxy = parseTrustProxy(env.TRUST_PROXY);
 if (trustProxy !== undefined) app.set('trust proxy', trustProxy);
-// CORS: restrict origins in production via CORS_ORIGIN env var
-const corsOrigin = env.CORS_ORIGIN;
-app.use(cors(corsOrigin ? { origin: corsOrigin.split(',').map(s => s.trim()), credentials: true } : {}));
+// Same-origin nginx requests work without CORS; cross-origin clients require an allowlist in production.
+app.use(cors(corsOptions(env.NODE_ENV, env.CORS_ORIGIN)));
 app.use(express.json({ limit: '1mb' }));
 
 app.use('/api/health', healthRouter);
@@ -293,5 +293,4 @@ app.listen(env.PORT, () => {
     }
   }, 60 * 1000); // Check every 1 minute
 });
-
 

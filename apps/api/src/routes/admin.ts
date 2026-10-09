@@ -1,12 +1,14 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import bcrypt from 'bcrypt';
+import { timingSafeEqual } from 'node:crypto';
 
 import { env } from '../lib/env.js';
 import { pool } from '../db/pool.js';
 import { signJwt } from '../services/jwt.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { createSecret } from '../services/secrets.js';
+import { hashPassword } from '../services/password.js';
 
 export const adminRouter = Router();
 
@@ -17,13 +19,20 @@ adminRouter.get('/roles', requireAuth, requireRole('admin'), async (_req, res) =
 
 const bootstrapSchema = z.object({
   token: z.string().min(1),
-  username: z.string().min(1).default('bootstrap_admin')
+  username: z.string().min(1).default('bootstrap_admin'),
+  password: z.string().min(12).refine(value => Buffer.byteLength(value, 'utf8') <= 72, 'Password must be at most 72 UTF-8 bytes')
 });
 
 // One-time bootstrap for fresh installs: creates a local admin user record so LDAP settings
 // and group mappings can be configured. Disable by omitting SEGMENTRA_BOOTSTRAP_TOKEN.
 // Rate limited: 3 attempts per IP per 15 minutes to prevent brute-force of the token.
 const bootstrapAttempts = new Map<string, { count: number; resetAt: number }>();
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of bootstrapAttempts) {
+    if (entry.resetAt <= now) bootstrapAttempts.delete(ip);
+  }
+}, 5 * 60 * 1000).unref();
 adminRouter.post('/bootstrap', async (req, res) => {
   if (!env.SEGMENTRA_BOOTSTRAP_TOKEN) return res.status(404).json({ error: 'not_enabled' });
 
@@ -42,13 +51,18 @@ adminRouter.post('/bootstrap', async (req, res) => {
 
   const parsed = bootstrapSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
-  if (parsed.data.token !== env.SEGMENTRA_BOOTSTRAP_TOKEN) {
+  const suppliedToken = Buffer.from(parsed.data.token);
+  const expectedToken = Buffer.from(env.SEGMENTRA_BOOTSTRAP_TOKEN);
+  if (suppliedToken.length !== expectedToken.length || !timingSafeEqual(suppliedToken, expectedToken)) {
     return res.status(403).json({ error: 'forbidden' });
   }
 
+  const passwordHash = await hashPassword(parsed.data.password);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    // Serialize first-user creation across API processes before checking initialization.
+    await client.query('LOCK TABLE users IN EXCLUSIVE MODE');
     const existingUsers = await client.query('SELECT COUNT(*)::int AS c FROM users');
     if (existingUsers.rows[0]?.c > 0) {
       await client.query('ROLLBACK');
@@ -56,10 +70,10 @@ adminRouter.post('/bootstrap', async (req, res) => {
     }
 
     const userRes = await client.query(
-      `INSERT INTO users (username, display_name, is_active)
-       VALUES ($1, $2, true)
+      `INSERT INTO users (username, display_name, is_active, password_hash)
+       VALUES ($1, $2, true, $3)
        RETURNING id, username`,
-      [parsed.data.username, 'Bootstrap Admin']
+      [parsed.data.username, 'Bootstrap Admin', passwordHash]
     );
 
     const roleRes = await client.query(`SELECT id FROM roles WHERE name='admin' LIMIT 1`);

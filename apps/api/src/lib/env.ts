@@ -8,12 +8,31 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
   // Production requires a long secret; shorter secrets are tolerated for local dev only.
   JWT_SECRET: z.string().min(isProduction ? 32 : 16),
-  SEGMENTRA_KEK_B64: z.string().optional().default(''),
+  SEGMENTRA_KEK_B64: z.string().optional().default('').superRefine((value, ctx) => {
+    if (!value) {
+      if (isProduction) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'SEGMENTRA_KEK_B64 is required in production' });
+      return;
+    }
+    const decoded = Buffer.from(value, 'base64');
+    if (decoded.length !== 32 || decoded.toString('base64') !== value) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'SEGMENTRA_KEK_B64 must encode exactly 32 bytes in canonical base64' });
+    }
+  }),
   BUNDLES_DIR: z.string().optional().default('./data/bundles'),
   ANSIBLE_RUNNER_CONTAINER: z.string().optional().default('segmentra-ansible-runner'),
   SEGMENTRA_BOOTSTRAP_TOKEN: z.string().optional().default(''),
-  // Comma-separated list of allowed CORS origins (empty = allow all; set in production).
-  CORS_ORIGIN: z.string().optional().default(''),
+  // Empty allows all in development, but grants no cross-origin access in production.
+  CORS_ORIGIN: z.string().optional().default('').superRefine((value, ctx) => {
+    if (!value) return;
+    for (const origin of value.split(',').map(s => s.trim())) {
+      try {
+        const url = new URL(origin);
+        if (!['http:', 'https:'].includes(url.protocol) || url.origin !== origin) throw new Error('invalid origin');
+      } catch {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'CORS_ORIGIN must contain comma-separated HTTP(S) origins without paths or wildcards' });
+      }
+    }
+  }),
   // Express 'trust proxy' setting. Set when running behind a reverse proxy so req.ip
   // reflects the client address (e.g. "1", "loopback", "10.0.0.0/8", "true").
   TRUST_PROXY: z.string().optional().default('')

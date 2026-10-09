@@ -161,7 +161,7 @@ Routers are mounted in `apps/api/src/index.ts` (inventory and policy sub-routers
 
 ### Admin (`admin`)
 
-- `POST /admin/bootstrap` — one-time creation of the first admin; no JWT, enabled only when `SEGMENTRA_BOOTSTRAP_TOKEN` is set (404 otherwise), 3 attempts per IP per 15 minutes
+- `POST /admin/bootstrap` — one-time creation of the first local admin; requires `token`, optional `username`, and `password` (12+ characters, at most 72 UTF-8 bytes). Stores a bcrypt hash so the account can log in again. No JWT required, enabled only when `SEGMENTRA_BOOTSTRAP_TOKEN` is set (404 otherwise), 3 attempts per IP per 15 minutes. First-user creation is serialized with a database table lock.
 - `GET /admin/roles`
 - `GET /admin/ldap-settings` / `PUT /admin/ldap-settings` — the bind password is never returned; an empty password on save keeps the stored one
 - `GET /admin/ad-group-role-map` / `POST /admin/ad-group-role-map` / `DELETE /admin/ad-group-role-map/:id`
@@ -2228,11 +2228,11 @@ The API validates these in `apps/api/src/lib/env.ts`:
 - `PORT` (default `8080`) — API server port
 - `DATABASE_URL` (**required**) — PostgreSQL connection string
 - `JWT_SECRET` (**required**; min 32 chars when `NODE_ENV=production`, 16 otherwise; known placeholder values are refused in production) — Secret for JWT token signing
-- `SEGMENTRA_KEK_B64` (required in production by the container entrypoint) — Base64 of a 32-byte key for AES-256-GCM secret encryption. If not provided, the key is derived from `JWT_SECRET`, so rotating `JWT_SECRET` breaks stored secrets. Set it before storing secrets.
+- `SEGMENTRA_KEK_B64` (required in production by the API and container entrypoint) — Canonical base64 of a 32-byte key for AES-256-GCM secret encryption, validated at API startup. In development, if not provided, the key is derived from `JWT_SECRET`, so rotating `JWT_SECRET` breaks stored secrets. Set it before storing secrets.
 - `SEGMENTRA_BOOTSTRAP_TOKEN` (optional) — Enables `POST /api/admin/bootstrap` for one-time admin creation
 - `BUNDLES_DIR` (default `./data/bundles`; `/bundles` in Docker) — Directory where deployment bundles/logs are written
 - `ANSIBLE_RUNNER_CONTAINER` (default `segmentra-ansible-runner`) — Name of the Ansible runner container
-- `CORS_ORIGIN` (optional) — Comma-separated allowed browser origins (empty = allow all)
+- `CORS_ORIGIN` (optional) — Comma-separated HTTP(S) browser origins without paths or wildcards. Empty grants no cross-origin access in production (same-origin nginx access works); development allows all origins.
 - `TRUST_PROXY` (optional; `1` in docker-compose) — Express `trust proxy` value when running behind a reverse proxy
 
 Read elsewhere:

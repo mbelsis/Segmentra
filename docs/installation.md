@@ -375,11 +375,11 @@ docker compose up -d        # production: the API re-runs migrations + seed on s
 | `PORT` | No | `8080` | API server port |
 | `BUNDLES_DIR` | No | `./data/bundles` | Directory for deployment bundles (`/bundles` in Docker, shared with the Ansible runner) |
 | `ANSIBLE_RUNNER_CONTAINER` | No | `segmentra-ansible-runner` | Container used with `docker exec` by the Ansible executor |
-| `CORS_ORIGIN` | No | — (allow all) | Comma-separated list of allowed browser origins; set in production |
+| `CORS_ORIGIN` | No | Same-origin only in production; allow all in development | Comma-separated HTTP(S) browser origins without paths or wildcards; set for cross-origin UI access |
 | `TRUST_PROXY` | No | — | Express `trust proxy` setting (`1`, `loopback`, CIDR, `true`) when behind a reverse proxy, so client IPs are correct for login rate limiting and audit |
 | `SEGMENTRA_KNOWN_HOSTS` | No | `~/.ssh/known_hosts` | known_hosts file for SSH connections (SSH executor, readiness checks, firewall learning). New hosts are trusted on first use (`StrictHostKeyChecking=accept-new`); a changed host key is rejected |
 | `SEGMENTRA_ALLOW_PRIVATE_WEBHOOKS` | No | `false` | `true` allows notification webhooks to loopback, link-local and cloud-metadata addresses (blocked by default; RFC1918 ranges are always allowed) |
-| `SEGMENTRA_BOOTSTRAP_TOKEN` | No | — | Enables one-time `POST /api/admin/bootstrap` while no users exist |
+| `SEGMENTRA_BOOTSTRAP_TOKEN` | No | — | Enables one-time `POST /api/admin/bootstrap` while no users exist; requires `token`, optional `username`, and `password` (12+ characters, at most 72 UTF-8 bytes) |
 | `SEGMENTRA_ADMIN_PASSWORD` | Prod: yes | `admin123` (dev only) | Password for the initial `admin` user created by the seed (min. 12 chars in production) |
 | `SEGMENTRA_SSH_COMMAND_TIMEOUT_MS` | No | `300000` | Per-command SSH timeout |
 | `SEGMENTRA_ASKPASS_DIR` | No | OS temp dir | Directory for the short-lived `SSH_ASKPASS` helper used with passphrase-protected keys (the helper never contains a secret) |
