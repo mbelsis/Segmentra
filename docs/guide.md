@@ -411,7 +411,7 @@ Go to **Approvals** in the sidebar (a number next to it counts the versions wait
 
 ### The audit trail
 
-Every submission, approval and rejection is an Audit Log entry with the complete picture: policy set and version, who created it, **who requested** and **when**, the author's **reason**, **who decided**, **when**, the decision and, for a rejection, the **rejection reason** (`POLICY_SUBMIT`, `POLICY_APPROVE`, `POLICY_REJECT`).
+Every submission, approval and rejection is an Audit Log entry with the complete picture: policy set and version, who created it, **who requested** and **when**, the author's **reason**, **who decided**, **when**, the decision and, for a rejection, the **rejection reason** (`POLICY_SUBMIT`, `POLICY_APPROVE`, `POLICY_REJECT`). The **Audit Log** page shows them as readable lines (filter by Action to list only approvals); the raw JSON is under *Raw details*.
 
 ### Approval Constraints
 

@@ -242,6 +242,7 @@ export const api = {
     search?: string;
     mode?: string;
     status?: string;
+    createdBy?: string;
     tag?: string;
     vlan?: string;
     fromDate?: string;
@@ -255,6 +256,7 @@ export const api = {
     if (params?.search) query.append('search', params.search);
     if (params?.mode) query.append('mode', params.mode);
     if (params?.status) query.append('status', params.status);
+    if (params?.createdBy) query.append('createdBy', params.createdBy);
     if (params?.tag) query.append('tag', params.tag);
     if (params?.vlan) query.append('vlan', params.vlan);
     if (params?.fromDate) query.append('fromDate', params.fromDate);

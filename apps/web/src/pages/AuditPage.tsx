@@ -121,7 +121,33 @@ export function AuditPage() {
     return '#666';
   }
 
+  const fmtTime = (t: any) => (t ? new Date(t).toLocaleString() : '');
+
+  /** Submit / approve / reject of a policy version, as readable lines (the raw JSON stays under "Raw details"). */
+  function renderApprovalMetadata(metadata: any, action: string) {
+    const approved = action === 'POLICY_APPROVE';
+    const rejected = action === 'POLICY_REJECT';
+    return (
+      <div style={{ fontSize: '0.85em' }}>
+        <div><strong>Policy:</strong> {metadata.policySet ?? 'Unknown'}{metadata.versionNumber ? ` v${metadata.versionNumber}` : ''}{metadata.isHighRisk ? ' (high risk)' : ''}</div>
+        <div><strong>Requested by:</strong> {metadata.requestedBy ?? metadata.by ?? 'unknown'}{metadata.requestedAt ? ` on ${fmtTime(metadata.requestedAt)}` : ''}</div>
+        {metadata.reason && <div><strong>Reason given:</strong> <span style={{ whiteSpace: 'pre-wrap' }}>{metadata.reason}</span></div>}
+        {(approved || rejected) && (
+          <div style={{ marginTop: 4, color: approved ? '#3f6b2a' : '#a63d2f' }}>
+            <strong>{approved ? 'Approved' : 'Rejected'} by:</strong> {metadata.decidedBy ?? metadata.by}{metadata.decidedAt ? ` on ${fmtTime(metadata.decidedAt)}` : ''}
+          </div>
+        )}
+        {rejected && metadata.rejectionReason && <div style={{ color: '#a63d2f' }}><strong>Rejection reason:</strong> {metadata.rejectionReason}</div>}
+        <details style={{ marginTop: 4 }}>
+          <summary style={{ cursor: 'pointer', color: '#646cff' }}>Raw details</summary>
+          <pre style={{ marginTop: 6, padding: 8, background: '#f5f5f5', borderRadius: 4, fontSize: '0.8em', overflow: 'auto', maxWidth: '400px' }}>{JSON.stringify(metadata, null, 2)}</pre>
+        </details>
+      </div>
+    );
+  }
+
   function renderDeploymentMetadata(metadata: any, entityType: string, action: string) {
+    if (metadata && ['POLICY_SUBMIT', 'POLICY_APPROVE', 'POLICY_REJECT'].includes(action)) return renderApprovalMetadata(metadata, action);
     // Only render deployment metadata for deployment events
     if (entityType !== 'DEPLOYMENT' || !metadata) {
       return (
