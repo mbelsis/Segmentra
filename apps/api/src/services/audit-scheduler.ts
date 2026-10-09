@@ -5,6 +5,7 @@ import { firewallBackend } from '@segmentra/compiler';
 
 import { restoreAuditSession, retrieveAuditLogs, type AuditSshHost } from '@segmentra/executor';
 
+import { acquireHostLock, deploymentSucceededSince } from './host-lock.js';
 import { pool } from '../db/pool.js';
 import { groupCommunicationFlows, parseFirewallLogs } from './log-parser.js';
 import { sendNotification } from './notifications.js';
@@ -135,21 +136,28 @@ async function claimSession(sessionId: string, opts: { onlyIfDue: boolean }): Pr
  */
 export async function restoreAuditSessionById(
   sessionId: string,
-  opts: { finalStatus: 'COMPLETED' | 'CANCELLED'; collectLogs: boolean; onlyIfDue?: boolean }
+  opts: { finalStatus: 'COMPLETED' | 'CANCELLED'; collectLogs: boolean; onlyIfDue?: boolean; hostLockHeld?: boolean }
 ): Promise<RestoreOutcome | null> {
   const session = await claimSession(sessionId, { onlyIfDue: opts.onlyIfDue ?? false });
   if (!session) return null;
 
+  // Firewall changes on one host are serialized with deployments and other sessions (see host-lock.ts).
+  const releaseHostLock = opts.hostLockHeld ? async () => {} : await acquireHostLock(session.host_id);
   let cred: MaterializedSshCredential | null = null;
   try {
     cred = await getSshCredentialForHost(session.host_id);
     const host = buildAuditHost(session, cred);
 
-    const restoreResult = await restoreAuditSession(host, session.backup_path);
-    if (!restoreResult.success) {
-      const error = (restoreResult.stderr || restoreResult.stdout || 'restore failed').trim();
-      const f = await recordRestoreFailure(session, error);
-      return { success: false, error, ...f };
+    // The backup is the state from before this session started. If a deployment succeeded on the host since,
+    // that deployment already replaced the log-only rules; putting the backup back would silently undo it.
+    const replacedByDeployment = await deploymentSucceededSince(session.host_id, session.started_at);
+    if (!replacedByDeployment) {
+      const restoreResult = await restoreAuditSession(host, session.backup_path);
+      if (!restoreResult.success) {
+        const error = (restoreResult.stderr || restoreResult.stdout || 'restore failed').trim();
+        const f = await recordRestoreFailure(session, error);
+        return { success: false, error, ...f };
+      }
     }
 
     let logContent = '';
@@ -185,6 +193,7 @@ export async function restoreAuditSessionById(
         JSON.stringify({
           entries: parsedEntries,
           flows,
+          ...(replacedByDeployment ? { restoreSkipped: 'A deployment succeeded on this host after the session started and replaced the audit rules; the original rules were not restored over it.' } : {}),
           ...(prev.attempts > 0 ? { restore: { attempts: prev.attempts + 1, succeededAt: new Date().toISOString() } } : {})
         }),
         session.id,
@@ -199,6 +208,7 @@ export async function restoreAuditSessionById(
     return { success: false, error, ...f };
   } finally {
     cred?.cleanup();
+    await releaseHostLock();
   }
 }
 

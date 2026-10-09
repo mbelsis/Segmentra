@@ -260,6 +260,10 @@ Inside the policy set, click **+ New Version**. The new version starts as DRAFT.
 
 Individual rules can override the interface scope.
 
+**New versions start with "All interfaces".** Hosts found by Discovery have no interfaces recorded, and an interface-role scope can only be evaluated on a host that has interfaces with that role. Choose "Interface Role" or "Interface Name" only for hosts whose interfaces you have recorded. (Versions created before this default changed may still carry the old role `data`; on a host without interfaces they now fail with the message below until you create a new version with "All interfaces" or record the host's interfaces.)
+
+**A scope must match something.** For a role scope, the host needs an *enabled* interface with that role; for a name scope the names must be listed. If a scope matches no interface on a host, compiling for that host **fails with a clear error** instead of widening the rule to all interfaces (which would silently make an interface-restricted rule apply everywhere). Fix the host's interfaces or the scope, then deploy again.
+
 ### Step 3: Add Rules
 
 Add firewall rules to the version. Each rule specifies:
@@ -802,7 +806,7 @@ Detect when hosts have been manually modified after a deployment.
 
 1. Right after a successful deployment, Segmentra reads Segmentra's own live state from the host and stores its hash (`v2:` fingerprint)
 2. The compliance check SSHes into the host and reads the same state again: `table inet segmentra` (nftables) or the `SEGMENTRA-IN/OUT` chains and their jumps (iptables). Rules of other tools (Docker, Kubernetes, fail2ban) are not part of the hash
-3. It hashes the current state and compares it to the stored hash
+3. It hashes the current state and compares it to the stored hash. The jumps from `INPUT`/`OUTPUT`/`FORWARD` must be exactly the unconditional jump Segmentra installs: a jump with a match condition (source, interface, protocol, ...) filters only part of the traffic and is reported as drift, as is an unconditional `ACCEPT`/`DROP`/`REJECT` placed ahead of the jump (the jump would never run). Other tools' conditional rules ahead of it (fail2ban, Docker) are not drift
 4. Status: **compliant** (match), **drifted** (mismatch), **unknown** (never deployed, or last deployed by an older version that hashed the whole ruleset — redeploy once), or **error** (SSH failure)
 
 ### Using Compliance Checks

@@ -15,6 +15,7 @@ import { env } from '../lib/env.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { addDestinationSets, compilerDestination, getProtectedDestinations } from '../services/forward-rules.js';
 import { getDockerCompileInput } from '../services/swarm.js';
+import { acquireHostLock, acquireHostLocks } from '../services/host-lock.js';
 import { createAuditEvent } from '../services/audit.js';
 import { getSshCredentialForHost, loadSshCredential, materializeSshCredential, sshAuthFields, type MaterializedSshCredential } from '../services/ssh-credentials.js';
 import { checkDeploymentSafety } from '../services/safety-check.js';
@@ -1288,9 +1289,13 @@ async function executeDeploymentStartInner(
 
         await updateProgress(deploymentId, { phase: 'deploying', checked: deployHostCount, totalToCheck: deployHostCount, deployed: deployedCount, totalToDeploy: deployHostCount, currentHost: h.hostname, warnings });
 
+        // Serialize with other firewall changes on this host (audit/test sessions, other deployments). Held until the
+        // outcome is recorded, so a session restoring an older backup can tell whether this deployment succeeded.
+        const releaseHostLock = await acquireHostLock(h.id);
+        let result: { success: boolean; stdout: string; stderr: string; exitCode: number; liveRulesHash?: string; skipped?: boolean; persistence?: PersistenceResult };
+        try {
         const policyFile = hostPolicyFiles.get(h.id)!;
         let cred: MaterializedSshCredential | null = null;
-        let result: { success: boolean; stdout: string; stderr: string; exitCode: number; liveRulesHash?: string; skipped?: boolean; persistence?: PersistenceResult };
         try {
           cred = await getSshCredentialForHost(h.id, bundleDir);
           const sshHost: SshHost = {
@@ -1327,6 +1332,9 @@ async function executeDeploymentStartInner(
            WHERE deployment_id=$1 AND host_id=$4`,
           [deploymentId, result.success ? 'SUCCEEDED' : 'FAILED', message, h.id, policyHash, liveHash, persistStatus, persistMethod, persistMessage]
         );
+        } finally {
+          await releaseHostLock();
+        }
         deployedCount++;
         finishedTotal++;
 
@@ -1373,7 +1381,11 @@ async function executeDeploymentStartInner(
       [deploymentId, bundleHostIds]
     );
 
+    // Serialize with other firewall changes on every host of this run (audit/test sessions, other deployments), until the
+    // outcome of each host is recorded (see services/host-lock.ts).
+    const releaseHostLocks = await acquireHostLocks(bundleHostIds);
     let result: Awaited<ReturnType<typeof runAnsiblePlaybook>>;
+    try {
     try {
       result = await runAnsiblePlaybook({
         runnerContainer: env.ANSIBLE_RUNNER_CONTAINER,
@@ -1438,6 +1450,9 @@ async function executeDeploymentStartInner(
           [deploymentId, hostId, truncateMessage(outcome?.error ? `ansible_failed: ${outcome.error}` : result.timedOut ? `ansible_failed: ${result.error ?? 'timed out'}` : 'ansible_failed')]
         );
       }
+    }
+    } finally {
+      await releaseHostLocks();
     }
     }
 

@@ -110,8 +110,10 @@ export function HostPolicyVisualization({ hostId, hostname, onClose }: HostPolic
         const sourceDisplayName = resolveSourceName(rule.sourceType, rule.sourceValue);
         
         // Check if we already have this source
+        // Rules of different protocols from the same source (for example TCP 80,443 and ICMP) stay separate:
+        // merging them would hide one of the protocols.
         const existing = allRules.find(
-          r => r.sourceType === rule.sourceType && r.sourceValue === rule.sourceValue
+          r => r.sourceType === rule.sourceType && r.sourceValue === rule.sourceValue && r.protocol === rule.protocol
         );
 
         if (existing) {
@@ -334,39 +336,40 @@ export function HostPolicyVisualization({ hostId, hostname, onClose }: HostPolic
                     strokeWidth={2}
                     markerEnd={`url(#${markerId})`}
                   />
-                  {/* Port label */}
-                  {source.ports && (
-                    <text
-                      x={(source.x + endX) / 2}
-                      y={(source.y + endY) / 2 - 8}
-                      fill={arrowColor}
-                      fontSize="11"
-                      fontWeight="bold"
-                      textAnchor="middle"
-                      style={{ pointerEvents: 'none' }}
-                    >
-                      {formatPorts(source.ports)}
-                    </text>
-                  )}
-                  {/* Protocol badge */}
-                  <circle
-                    cx={(source.x + endX) / 2 + 15}
-                    cy={(source.y + endY) / 2 - 8}
-                    r="8"
-                    fill={arrowColor}
-                    opacity="0.8"
-                  />
-                  <text
-                    x={(source.x + endX) / 2 + 15}
-                    y={(source.y + endY) / 2 - 4}
-                    fill="white"
-                    fontSize="8"
-                    fontWeight="bold"
-                    textAnchor="middle"
-                    style={{ pointerEvents: 'none' }}
-                  >
-                    {getProtocolBadge(source.protocol)}
-                  </text>
+                  {/* Port label and protocol badge: beside the arrow, closer to the host, so they never sit on the source label */}
+                  {(() => {
+                    const lx = source.x + (endX - source.x) * 0.62;
+                    const ly = source.y + (endY - source.y) * 0.62;
+                    return (
+                      <>
+                        <circle cx={lx - 14} cy={ly} r="8" fill={arrowColor} opacity="0.8" />
+                        <text
+                          x={lx - 14}
+                          y={ly + 3}
+                          fill="white"
+                          fontSize="8"
+                          fontWeight="bold"
+                          textAnchor="middle"
+                          style={{ pointerEvents: 'none' }}
+                        >
+                          {getProtocolBadge(source.protocol)}
+                        </text>
+                        {source.ports && (
+                          <text
+                            x={lx + 10}
+                            y={ly + 4}
+                            fill={arrowColor}
+                            fontSize="11"
+                            fontWeight="bold"
+                            textAnchor="start"
+                            style={{ pointerEvents: 'none' }}
+                          >
+                            {formatPorts(source.ports)}
+                          </text>
+                        )}
+                      </>
+                    );
+                  })()}
                 </g>
               );
             })}

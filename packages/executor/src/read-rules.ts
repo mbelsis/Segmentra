@@ -125,6 +125,8 @@ function iptablesSegmentraLines(section: string): {
   jumpDu: boolean;
   /** The rules cover Docker-published ports (segmentra:published_default), so the DOCKER-USER jump is required. */
   wantsDu: boolean;
+  /** A built-in chain has an unconditional ACCEPT/DROP/REJECT ahead of our jump, so the jump is never reached. */
+  shadowed: string[];
 } {
   const all = section.split(/\r?\n/).map((l) => l.trim());
   // Only the filter table section
@@ -137,19 +139,31 @@ function iptablesSegmentraLines(section: string): {
   let jumpFwd = false;
   let jumpDu = false;
   let wantsDu = false;
+  const shadowed: string[] = [];
+  // Built-in chains in which an unconditional terminal verdict was seen before our jump (the jump is exact, see below).
+  const terminal = new Set<string>();
   for (const l of all) {
     if (l.startsWith('*')) { inFilter = l === '*filter'; continue; }
     if (!inFilter) continue;
+    const verdict = /^-A (INPUT|OUTPUT|FORWARD) -j (ACCEPT|DROP|REJECT)(?: --reject-with \S+)?$/.exec(l);
+    if (verdict) terminal.add(verdict[1]);
     if (/^:SEGMENTRA-IN\s/.test(l)) chain = true;
     if (/^:SEGMENTRA-FWD\s/.test(l)) chainFwd = true;
     if (/^-A (SEGMENTRA-IN|SEGMENTRA-OUT|SEGMENTRA-FWD) /.test(l)) lines.push(l.replace(/\s+/g, ' '));
-    if (/^-A INPUT (.* )?-j SEGMENTRA-IN$/.test(l)) jumpIn = true;
-    if (/^-A OUTPUT (.* )?-j SEGMENTRA-OUT$/.test(l)) jumpOut = true;
-    if (/^-A FORWARD (.* )?-j SEGMENTRA-FWD$/.test(l)) jumpFwd = true;
-    if (/^-A DOCKER-USER (.* )?-j SEGMENTRA-FWD$/.test(l)) jumpDu = true;
+    // The jumps must be exactly what Segmentra installs (`-A INPUT -j SEGMENTRA-IN`). A jump with any match
+    // condition (source, interface, protocol, ...) only filters part of the traffic, so it does not count.
+    const jump = /^-A (INPUT|OUTPUT|FORWARD|DOCKER-USER) -j (SEGMENTRA-IN|SEGMENTRA-OUT|SEGMENTRA-FWD)$/.exec(l);
+    if (jump) {
+      const [, from, to] = jump;
+      if (from === 'INPUT' && to === 'SEGMENTRA-IN') jumpIn = true;
+      if (from === 'OUTPUT' && to === 'SEGMENTRA-OUT') jumpOut = true;
+      if (from === 'FORWARD' && to === 'SEGMENTRA-FWD') jumpFwd = true;
+      if (from === 'DOCKER-USER' && to === 'SEGMENTRA-FWD') jumpDu = true;
+      if (terminal.has(from) && !shadowed.includes(from)) shadowed.push(from);
+    }
     if (/^-A SEGMENTRA-FWD .*segmentra:published_default/.test(l)) wantsDu = true;
   }
-  return { lines, chain, jumpIn, jumpOut, chainFwd, jumpFwd, jumpDu, wantsDu };
+  return { lines, chain, jumpIn, jumpOut, chainFwd, jumpFwd, jumpDu, wantsDu, shadowed };
 }
 
 /**
@@ -188,8 +202,11 @@ export function extractSegmentraState(backend: FirewallBackend, text: string): {
     // A SEGMENTRA-FWD chain without its FORWARD jump does not filter anything: not "present".
     // When the rules cover Docker-published ports the DOCKER-USER jump is required too: without it Docker's
     // own jumps (re-inserted at the top of FORWARD) can accept published ports before SEGMENTRA-FWD runs.
-    if (fam === 'v4') present = st.chain && st.jumpIn && st.jumpOut && (!st.chainFwd || st.jumpFwd) && (!st.wantsDu || st.jumpDu);
-    const fwd = (st.chainFwd || st.jumpFwd ? ` chain_fwd=${st.chainFwd ? 1 : 0} jump_fwd=${st.jumpFwd ? 1 : 0}` : '') + (st.jumpDu ? ' jump_du=1' : '');
+    if (fam === 'v4') present = st.chain && st.jumpIn && st.jumpOut && (!st.chainFwd || st.jumpFwd) && (!st.wantsDu || st.jumpDu) && st.shadowed.length === 0;
+    const fwd =
+      (st.chainFwd || st.jumpFwd ? ` chain_fwd=${st.chainFwd ? 1 : 0} jump_fwd=${st.jumpFwd ? 1 : 0}` : '') +
+      (st.jumpDu ? ' jump_du=1' : '') +
+      (st.shadowed.length ? ` shadowed=${st.shadowed.join(',')}` : '');
     parts.push(`[${fam}] chain=${st.chain ? 1 : 0} jump_in=${st.jumpIn ? 1 : 0} jump_out=${st.jumpOut ? 1 : 0}${fwd}`, ...st.lines);
   }
   return { present, normalized: parts.join('\n') };

@@ -158,6 +158,8 @@ If you need the Ansible executor, don't apply the `segmentra-app` part of this f
 
 ### Remaining gaps
 
+- **Dependencies:** `npm audit` reports 4 findings after the non-breaking updates: `glob` (command injection only through its `-c` CLI flag) and `uuid` (buffer bounds, only when a caller passes its own buffer). They are pulled in by `node-pg-migrate` (migration tool) and `ldapts`. Segmentra does not invoke the glob CLI or pass buffers to uuid, so they are not reachable as used; the fix for glob needs a major `node-pg-migrate` upgrade, which has not been done or tested. Run `npm audit` yourself before each release. If you put the API behind a proxy, set `TRUST_PROXY` to the exact proxy hop count or addresses, not `true` (the `proxy-addr` advisory concerned trust-subnet matching).
+
 - No built-in TLS or MFA (use a reverse proxy and your identity provider).
 - No built-in rotation of `SEGMENTRA_KEK_B64`.
 - The SSH user needs full sudo rights on managed hosts (with or without a sudo password).

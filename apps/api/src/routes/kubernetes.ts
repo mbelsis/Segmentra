@@ -539,6 +539,8 @@ kubernetesRouter.post('/clusters/:id/deploy-policy', requireRole('operator', 'ad
 
 // ---- Apply / check / remove on the cluster -----------------------------------------------------
 
+const RECORD_ANNOTATION = 'segmentra.io/record-id';
+
 async function loadPolicyRow(clusterId: string, npId: string) {
   const { rows } = await pool.query(`SELECT * FROM k8s_network_policies WHERE id = $1 AND cluster_id = $2`, [npId, clusterId]);
   if (!rows[0]) return null;
@@ -579,7 +581,20 @@ kubernetesRouter.post('/clusters/:id/network-policies/:npId/apply', requireRole(
   if (!isLatest) {
     return res.status(409).json({ error: 'superseded', message: 'A newer manifest with this name exists; apply that one (applying an older one would revert the policy)' });
   }
-  const manifest = typeof row.manifest === 'string' ? JSON.parse(row.manifest) : row.manifest;
+  // The manifest was generated while its source version was approved; that may no longer be true (archived,
+  // rejected or deleted since), and applying it would enforce a policy that was withdrawn. Check again now.
+  const pv = await pool.query(`SELECT status FROM policy_versions WHERE id = $1`, [row.policy_version_id]);
+  if (!pv.rows[0] || !['APPROVED', 'DEPLOYED'].includes(pv.rows[0].status)) {
+    return res.status(409).json({
+      error: 'version_not_approved',
+      message: pv.rows[0]
+        ? `The source policy version is ${pv.rows[0].status}; only APPROVED or DEPLOYED versions can be applied. Generate a new manifest from a current version.`
+        : 'The source policy version no longer exists; generate a new manifest from a current version.',
+    });
+  }
+  const stored = typeof row.manifest === 'string' ? JSON.parse(row.manifest) : row.manifest;
+  // Stamp the record that owns the live object, so a later removal can tell whose policy it is deleting.
+  const manifest = { ...stored, metadata: { ...stored.metadata, annotations: { ...(stored.metadata?.annotations ?? {}), [RECORD_ANNOTATION]: row.id } } };
 
   try {
     const conn = await loadConnection(cluster);
@@ -644,14 +659,26 @@ kubernetesRouter.post('/clusters/:id/network-policies/:npId/remove', requireRole
   if (!cluster) return res.status(404).json({ error: 'not_found' });
   const found = await loadPolicyRow(req.params.id, req.params.npId);
   if (!found) return res.status(404).json({ error: 'policy_not_found' });
-  const { row } = found;
+  const { row, isLatest } = found;
+  // Records are keyed by namespace/name on the cluster, so only the newest record owns the live object. Removing a
+  // superseded record (or one that was never applied) by name would delete its newer replacement.
+  if (!isLatest) {
+    return res.status(409).json({ error: 'superseded', message: 'A newer manifest with this name exists, so this older record does not own the live policy; remove the newer manifest instead' });
+  }
+  if (row.status !== 'APPLIED') {
+    return res.status(409).json({ error: 'not_applied', message: `This manifest is ${row.status}, not applied; there is nothing of it to remove from the cluster` });
+  }
   try {
     const conn = await loadConnection(cluster);
     const live = await getNetworkPolicy(conn, row.namespace, row.policy_name);
     if (live && !isManagedBySegmentra(live)) {
       return res.status(409).json({ error: 'not_managed_by_segmentra', message: `NetworkPolicy ${row.namespace}/${row.policy_name} was not created by Segmentra; refusing to delete it` });
     }
-    if (live) await deleteNetworkPolicy(conn, row.namespace, row.policy_name);
+    const owner = live?.metadata?.annotations?.[RECORD_ANNOTATION];
+    if (live && owner && owner !== row.id) {
+      return res.status(409).json({ error: 'owned_by_other_record', message: `The live policy ${row.namespace}/${row.policy_name} was applied from another manifest record; refusing to delete it from this one` });
+    }
+    if (live) await deleteNetworkPolicy(conn, row.namespace, row.policy_name, { uid: live.metadata?.uid });
     await pool.query(
       `UPDATE k8s_network_policies SET status = 'REMOVED', last_error = NULL, live_state = 'MISSING', live_checked_at = now() WHERE id = $1`,
       [row.id]

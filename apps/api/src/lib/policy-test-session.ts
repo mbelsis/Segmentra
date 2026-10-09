@@ -6,6 +6,7 @@ import { firewallBackend } from '@segmentra/compiler';
 import { restoreAuditSession, retrieveAuditLogs, type AuditSshHost } from '@segmentra/executor';
 
 import { pool } from '../db/pool.js';
+import { acquireHostLock, deploymentSucceededSince } from '../services/host-lock.js';
 import { parseFirewallLogs, groupCommunicationFlows } from '../services/log-parser.js';
 import { getSshCredentialForHost, sshAuthFields, type MaterializedSshCredential } from '../services/ssh-credentials.js';
 
@@ -54,13 +55,18 @@ export type RestoreAndCollectResult =
  *
  * `session` must include host columns: host_id, hostname, mgmt_ip, ssh_port, firewall_backend.
  */
-export async function restoreAndCollectSession(session: any): Promise<RestoreAndCollectResult> {
+export async function restoreAndCollectSession(session: any, opts: { hostLockHeld?: boolean } = {}): Promise<RestoreAndCollectResult> {
+  // Serialized with deployments and audit sessions on the same host (see services/host-lock.ts).
+  const releaseHostLock = opts.hostLockHeld ? async () => {} : await acquireHostLock(session.host_id);
   let cred: MaterializedSshCredential | null = null;
   try {
     cred = await getSshCredentialForHost(session.host_id);
     const auditHost = buildAuditHost(session, cred);
 
-    if (session.backup_path) {
+    // A deployment that succeeded after the test started already replaced the test rules; the backup is older
+    // than it, so restoring would silently undo that deployment.
+    const replacedByDeployment = await deploymentSucceededSince(session.host_id, session.started_at);
+    if (session.backup_path && !replacedByDeployment) {
       const restore = await restoreAuditSession(auditHost, session.backup_path);
       if (!restore.success) {
         const msg = `Failed to restore original rules on ${session.hostname}: ${(restore.stderr || restore.stdout || `exit code ${restore.exitCode}`).trim()}`;
@@ -112,5 +118,6 @@ export async function restoreAndCollectSession(session: any): Promise<RestoreAnd
     return { ok: false, error: msg };
   } finally {
     cred?.cleanup();
+    await releaseHostLock();
   }
 }

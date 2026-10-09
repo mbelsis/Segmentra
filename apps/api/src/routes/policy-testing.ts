@@ -10,6 +10,7 @@ import { analyzePolicyTest } from '../services/policy-test-analyzer.js';
 import { compileHostPolicy, type RuleDirection } from '@segmentra/compiler';
 import { addDestinationSets, compilerDestination, getProtectedDestinations } from '../services/forward-rules.js';
 import { getDockerCompileInput } from '../services/swarm.js';
+import { acquireHostLock } from '../services/host-lock.js';
 import { startAuditSession, deployLogOnlyPolicy, restoreAuditSession, retrieveAuditLogs } from '@segmentra/executor';
 import { parseFirewallLogs, groupCommunicationFlows } from '../services/log-parser.js';
 import { getSshCredentialForHost, type MaterializedSshCredential } from '../services/ssh-credentials.js';
@@ -114,6 +115,10 @@ policyTestingRouter.post('/start', requireRole('operator', 'approver', 'admin'),
     });
   }
 
+  // Hold the host's firewall lock for the whole start (backup, log-only deploy, or the restore after a failure),
+  // so a deployment cannot land in the middle of it.
+  const releaseHostLock = await acquireHostLock(b.hostId);
+  try {
   // Create the test session record, refusing if another test is already active on this host.
   const scheduledEnd = new Date(Date.now() + b.durationMinutes * 60 * 1000);
   let session: any;
@@ -350,6 +355,9 @@ policyTestingRouter.post('/start', requireRole('operator', 'approver', 'admin'),
   } finally {
     if (policyFilePath && fs.existsSync(policyFilePath)) { try { fs.unlinkSync(policyFilePath); } catch { /* ignore */ } }
     cred?.cleanup();
+  }
+  } finally {
+    await releaseHostLock();
   }
 });
 

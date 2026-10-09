@@ -205,7 +205,11 @@ async function main() {
   const tagWeb = (await api('POST', '/tags', { token: op, body: { name: `k8s-web-${suffix}` } })).tag;
   const tagEmpty = (await api('POST', '/tags', { token: op, body: { name: `k8s-empty-${suffix}` } })).tag;
   await api('POST', '/hosts/bulk/assign-tag', { token: op, body: { hostIds: [hostE.id], tagId: tagWeb.id } });
-  const vlan = (await api('POST', '/vlans', { token: op, body: { vlanTag: 3000 + Math.floor(Math.random() * 900), name: `k8s-vlan-${suffix}`, subnet: `${ips['client-d']}/32` } })).vlan;
+  // Earlier runs leave their VLANs behind: pick a tag that is free instead of a random one that may collide.
+  const usedTags = new Set(((await api('GET', '/vlans', { token: op })).vlans ?? []).map((v) => Number(v.vlan_tag ?? v.vlanTag)));
+  let freeTag = 3000 + Math.floor(Math.random() * 900);
+  while (usedTags.has(freeTag)) freeTag = freeTag >= 3899 ? 3000 : freeTag + 1;
+  const vlan = (await api('POST', '/vlans', { token: op, body: { vlanTag: freeTag, name: `k8s-vlan-${suffix}`, subnet: `${ips['client-d']}/32` } })).vlan;
 
   const createdVersions = [];
   const rule = (orderIndex, o) => ({ orderIndex, direction: 'IN', action: 'ALLOW', logMode: 'NONE', usePolicyInterfaceScope: true, ...o });
@@ -370,6 +374,32 @@ subjects: [{ kind: ServiceAccount, name: ${name}, namespace: kube-system }]
   const supersededRow = live.find((n) => n.status === 'SUPERSEDED');
   const reapplyOld = await fetch(`${apiBase}/k8s/clusters/${cluster.id}/network-policies/${supersededRow.id}/apply`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${op}` }, body: '{}' });
   check('applying a superseded manifest is refused (409)', reapplyOld.status === 409);
+
+  // Ownership of the live object: removal must not delete a newer policy, and apply must re-check the source version.
+  console.log('\nOwnership and source-version checks:');
+  const OWN = 'segmentra-ownership', OWN_NS = 'seg-clients';
+  const post = (path) => fetch(`${apiBase}/k8s/clusters/${cluster.id}/network-policies/${path}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${op}` }, body: '{}' });
+  const own1 = await generateAndApply(vMain.id, OWN_NS, OWN);
+  const own2 = await generateAndApply(v2.id, OWN_NS, OWN);
+  const ownLive = async () => JSON.parse((await kubectl('get', 'networkpolicy', OWN, '-n', OWN_NS, '-o', 'json')).out);
+  const uidBefore = (await ownLive()).metadata.uid;
+  check('the live policy carries the id of the record that applied it', (await ownLive()).metadata.annotations['segmentra.io/record-id'] === own2.networkPolicy.id);
+  const rmOld = await post(`${own1.networkPolicy.id}/remove`);
+  check('removing a superseded record is refused (409) ...', rmOld.status === 409 && (await rmOld.json()).error === 'superseded');
+  check('... and the newer live policy is still there, unchanged', (await ownLive()).metadata.uid === uidBefore);
+  const own3 = await api('POST', `/k8s/clusters/${cluster.id}/deploy-policy`, { token: op, expect: 201, body: { policyVersionId: vMain.id, namespace: OWN_NS, policyName: OWN } });
+  const rmGen = await post(`${own3.networkPolicy.id}/remove`);
+  check('removing a generated, never-applied manifest is refused (409) ...', rmGen.status === 409 && (await rmGen.json()).error === 'not_applied');
+  check('... and the live policy is still there', (await ownLive()).metadata.uid === uidBefore);
+  await kubectl('delete', 'networkpolicy', OWN, '-n', OWN_NS);
+
+  const vArch = await approvedVersion('k8s-archived', [rule(10, { protocol: 'tcp', ports: '5432', sourceType: 'CIDR', sourceValue: `${ips['client-a']}/32`, comment: 'arch' })]);
+  const archGen = await api('POST', `/k8s/clusters/${cluster.id}/deploy-policy`, { token: op, expect: 201, body: { policyVersionId: vArch.id, namespace: OWN_NS, policyName: 'segmentra-archived' } });
+  await api('POST', `/policy-versions/${vArch.id}/archive`, { token: op, body: {} });
+  const archApply = await post(`${archGen.networkPolicy.id}/apply`);
+  check('applying a manifest whose source version was archived is refused (409)', archApply.status === 409 && (await archApply.json()).error === 'version_not_approved');
+  const archLive = await kubectl('get', 'networkpolicy', 'segmentra-archived', '-n', OWN_NS, '-o', 'name').catch(() => ({ out: '' })); // NotFound is the expected answer
+  check('... and nothing was created on the cluster', !archLive.out.includes('segmentra-archived'));
   const current = live.find((n) => n.status === 'APPLIED');
   const chk = (id) => api('POST', `/k8s/clusters/${cluster.id}/network-policies/${id}/check`, { token: op });
   check('check: applied policy is IN_SYNC with the cluster', (await chk(current.id)).state === 'IN_SYNC');

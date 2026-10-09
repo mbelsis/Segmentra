@@ -70,7 +70,7 @@ const templateSchema = z.object({
   category: z.string().optional(),
   targetTagId: z.string().uuid().optional().nullable(),
   autoApply: z.boolean().default(false),
-  interfaceScopeType: interfaceScopeTypeSchema.default('INTERFACE_ROLE'),
+  interfaceScopeType: interfaceScopeTypeSchema.default('ALL_INTERFACES'),
   interfaceScopeRoles: interfaceRolesSchema.optional(),
   interfaceScopeNames: interfaceNamesSchema.optional(),
 });

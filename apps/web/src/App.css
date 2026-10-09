@@ -337,7 +337,7 @@ button {
   flex-direction: column;
   align-items: stretch;
   gap: 6px;
-  min-width: 150px;
+  width: 150px;
 }
 
 .host-actions .btn-small,

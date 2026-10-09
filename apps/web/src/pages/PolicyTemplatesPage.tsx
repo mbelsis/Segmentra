@@ -16,7 +16,7 @@ export function PolicyTemplatesPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [selectedTemplate, setSelectedTemplate] = useState<any>(null);
   const [templateRules, setTemplateRules] = useState<any[]>([]);
-  const [form, setForm] = useState({ name: '', description: '', category: '', targetTagId: '', autoApply: false, interfaceScopeType: 'INTERFACE_ROLE' as string });
+  const [form, setForm] = useState({ name: '', description: '', category: '', targetTagId: '', autoApply: false, interfaceScopeType: 'ALL_INTERFACES' as string });
   const [ruleForm, setRuleForm] = useState(EMPTY_RULE_FORM);
   // Pickers for FORWARD rule destinations (loaded on first use)
   const [destOptions, setDestOptions] = useState<{ vlans: any[]; hosts: any[]; iotAssets: any[] } | null>(null);
@@ -58,7 +58,7 @@ export function PolicyTemplatesPage() {
         interfaceScopeType: form.interfaceScopeType,
       });
       setShowCreate(false);
-      setForm({ name: '', description: '', category: '', targetTagId: '', autoApply: false, interfaceScopeType: 'INTERFACE_ROLE' });
+      setForm({ name: '', description: '', category: '', targetTagId: '', autoApply: false, interfaceScopeType: 'ALL_INTERFACES' });
       load();
     } catch (e: any) { setError(errorMessage(e)); }
   };

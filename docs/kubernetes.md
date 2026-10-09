@@ -182,8 +182,10 @@ Each generated manifest in the **Network Policies** tab shows its status (`Gener
 - **Apply** / **Re-apply** (operator, admin; needs stored credentials): asks for confirmation (listing the generation warnings), then creates or updates the policy with server-side apply. If a policy with the same name exists that Segmentra did not create (no `app.kubernetes.io/managed-by: segmentra` label), Apply refuses and offers an explicit overwrite
 - **Dry run**: asks the API server to validate the manifest without changing anything
 - **Check**: compares the live policy with Segmentra's manifest and reports `In sync`, `Drifted` (edited on the cluster; Apply again to repair) or `Not present`
-- **Remove**: deletes the policy from the cluster, only if it carries the managed-by label
+- **Remove**: deletes the policy from the cluster, only if it carries the managed-by label, belongs to this manifest (Segmentra stamps the applying record's id on the live policy) and is still the same object (the delete carries a UID precondition). Only the newest, applied manifest of a name can be removed: an older (`Superseded`) or never-applied one is refused with `409`, so it cannot delete its replacement
 - **View**, **Copy kubectl**, **Download**: show the JSON, copy a ready-to-run `kubectl apply` command or download the manifest, to apply it yourself
+
+Apply checks again that the source policy version is still `APPROVED` or `DEPLOYED`: a manifest generated earlier from a version that has since been archived or withdrawn is refused (`409 version_not_approved`); generate a new one from a current version.
 
 Generating the same name again creates a newer manifest; once it is applied, older manifests of that name are marked `Superseded` and cannot be applied (that would revert the policy). A failed apply is recorded with the Kubernetes error (for example `forbidden`, or a namespace that does not exist). Every apply, check failure and removal is written to the audit log.
 
@@ -283,9 +285,9 @@ All endpoints require authentication.
 ### Network Policies
 - `GET /api/k8s/clusters/:id/network-policies`: list generated NetworkPolicies (all roles)
 - `POST /api/k8s/clusters/:id/deploy-policy`: generate and store a NetworkPolicy from an APPROVED or DEPLOYED policy version (`409 policy_version_not_approved` otherwise). Body: `{ policyVersionId, namespace, policyName }`. Returns `{ networkPolicy, warnings }`. Despite the name, this only generates and stores the manifest; use `apply` to put it on the cluster (operator, admin)
-- `POST /api/k8s/clusters/:id/network-policies/:npId/apply`: create or update the policy on the cluster. Body: `{ dryRun?, overwrite? }`. `409 not_managed_by_segmentra` if a same-named policy without the managed-by label exists (unless `overwrite`), `409 superseded` for an older manifest, `409 no_credentials`, `404 namespace_not_found`, `502` for Kubernetes errors such as `forbidden` (the row becomes `FAILED` with `last_error`) (operator, admin)
+- `POST /api/k8s/clusters/:id/network-policies/:npId/apply`: create or update the policy on the cluster. Body: `{ dryRun?, overwrite? }`. `409 not_managed_by_segmentra` if a same-named policy without the managed-by label exists (unless `overwrite`), `409 superseded` for an older manifest, `409 version_not_approved` when the source version is no longer approved/deployed, `409 no_credentials`, `404 namespace_not_found`, `502` for Kubernetes errors such as `forbidden` (the row becomes `FAILED` with `last_error`) (operator, admin)
 - `POST /api/k8s/clusters/:id/network-policies/:npId/check`: compare with the live policy; returns `state` `IN_SYNC`, `DRIFTED` or `MISSING` (operator, admin)
-- `POST /api/k8s/clusters/:id/network-policies/:npId/remove`: delete the policy from the cluster (only if managed-by Segmentra); `alreadyAbsent` when it was gone (operator, admin)
+- `POST /api/k8s/clusters/:id/network-policies/:npId/remove`: delete the policy from the cluster (only if managed-by Segmentra, applied from this record and unchanged since it was read); `409 superseded` / `409 not_applied` / `409 owned_by_other_record`; `alreadyAbsent` when it was gone (operator, admin)
 
 ---
 

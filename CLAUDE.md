@@ -87,6 +87,10 @@ Hosts can be Swarm nodes (`hosts.swarm_cluster/swarm_role/swarm_addr/swarm_encry
 
 `services/iot-protocols.ts` (port catalog, `servicesForRule`, `expandService` used by policy-as-code `service:`), `services/iot-coverage.ts` (`computeIotCoverage`, derived from recorded deployments; also used by the compliance report), `services/iot-discovery.ts` (neighbour-table parsing, OUI parsing) and `routes/iot-extras.ts` (mounted at `/api/iot` BEFORE `iotAssetsRouter`; discovery runs read-only SSH without sudo). Migration 038 (`oui_vendors`, `iot_asset_gateways.assigned_at`). UI: `IotCoverageTab`, `IotDiscoveryTab`, `lib/iot-services.ts`. Docs: `docs/iot.md` section 8; tests: `npm run test:integration:iot`, `npm run test:unit:iot`.
 
+### Per-host serialization
+
+`services/host-lock.ts`: `acquireHostLock(s)` (PostgreSQL advisory lock on a dedicated connection; several hosts are locked in sorted order), `tryAcquireHostLock`, and `deploymentSucceededSince`. Held by deployments (SSH per host until the outcome is recorded, Ansible for all hosts of the run), audit sessions and policy-test sessions (start and restore). Restores skip putting the backup back when a deployment succeeded on the host after the session started. Compiling with an interface scope that matches no interface throws a `CompileError` (it must never mean "all interfaces").
+
 ### Compiler
 
 `packages/compiler/src/compile.ts` takes host config + policy rules and outputs nftables or iptables rulesets with a SHA256 hash. nftables output replaces only `table inet segmentra`; iptables output only manages Segmentra's `SEGMENTRA-IN` / `SEGMENTRA-OUT` (and `SEGMENTRA-FWD` for FORWARD rules on gateways) chains, jumped to from `INPUT` / `OUTPUT` / `FORWARD`. "Allow" in those chains is `RETURN`, so the rest of the built-in chain and its policy still apply; other tools' rules (Docker, fail2ban) are left alone. Supports `logOnlyMode` for firewall learning (traffic discovery without blocking) and FORWARD rules with an explicit destination (IoT/OT gateways, protected devices).

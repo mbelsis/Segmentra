@@ -306,7 +306,17 @@ function resolveInterfaceNames(host: Host, scope: InterfaceScope): string[] {
       .filter((i) => i.enabled && scope.roles.includes(i.role))
       .map((i) => i.name);
   }
-  return Array.from(new Set(names.map(validateInterfaceName)));
+  const resolved = Array.from(new Set(names.map(validateInterfaceName)));
+  // An empty list means "all interfaces" to the callers, so a scope that matches nothing must never reach them:
+  // it would silently turn an interface-restricted rule into an unrestricted one.
+  if (resolved.length === 0) {
+    const what = scope.type === 'INTERFACE_ROLE' ? `interface role(s) ${scope.roles.join(', ') || '(none)'}` : 'the listed interface names';
+    throw new CompileError(
+      `Interface scope matches no interface on host ${sanitizeText(host.hostname, 80)}: ${what} resolved to nothing ` +
+        '(a role needs an enabled interface with that role on the host). Refusing to compile, because the rule would apply to all interfaces.'
+    );
+  }
+  return resolved;
 }
 
 // ---------------------------------------------------------------------------

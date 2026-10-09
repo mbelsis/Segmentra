@@ -1,3 +1,4 @@
+import { acquireHostLock } from './host-lock.js';
 import { removeSegmentraPolicy, type SshHostInfo } from '@segmentra/executor';
 import { firewallBackend } from '@segmentra/compiler';
 
@@ -123,6 +124,21 @@ async function notifyExpiry(dep: any, outcome: ExpiryOutcome, extra: Record<stri
   });
 }
 
+/** Id of the newest later deployment that replaced the rules of `dep` on the host, if any. */
+async function findSupersedingDeployment(dep: any, hostId: string): Promise<string | null> {
+  const { rows } = await pool.query(
+    `SELECT d2.id FROM deployment_hosts dh2
+       JOIN deployments d2 ON d2.id = dh2.deployment_id
+      WHERE dh2.host_id = $1 AND d2.id <> $3
+        AND d2.created_at > $2
+        AND d2.status IN ('SUCCEEDED', 'PARTIAL', 'RUNNING', 'PAUSED', 'EXPIRED')
+        AND dh2.status IN ('SUCCEEDED', 'RUNNING', 'PENDING')
+      ORDER BY d2.created_at DESC LIMIT 1`,
+    [hostId, dep.created_at, dep.id]
+  );
+  return rows[0]?.id ?? null;
+}
+
 async function handleRemove(dep: any, hosts: ExpiringHost[]): Promise<{ outcome: ExpiryOutcome; details: Record<string, unknown> }> {
   const counts = { removed: 0, failed: 0, skipped: 0 };
   const failures: string[] = [];
@@ -136,6 +152,17 @@ async function handleRemove(dep: any, hosts: ExpiringHost[]): Promise<{ outcome:
     if (h.superseded_by) {
       counts.skipped++;
       await setHostExpiry(dep.id, h.host_id, 'SKIPPED', `Rules were replaced by later deployment ${h.superseded_by}; not removed`);
+      continue;
+    }
+
+    // Serialize with deployments and learning/test sessions on this host (see host-lock.ts), and look again for a
+    // deployment that replaced these rules while we waited: removing the table would then remove the newer policy.
+    const releaseHostLock = await acquireHostLock(h.host_id);
+    try {
+    const supersedingNow = await findSupersedingDeployment(dep, h.host_id);
+    if (supersedingNow) {
+      counts.skipped++;
+      await setHostExpiry(dep.id, h.host_id, 'SKIPPED', `Rules were replaced by later deployment ${supersedingNow}; not removed`);
       continue;
     }
 
@@ -196,6 +223,9 @@ async function handleRemove(dep: any, hosts: ExpiringHost[]): Promise<{ outcome:
         message: truncate(message),
       },
     });
+    } finally {
+      await releaseHostLock();
+    }
   }
 
   const attempted = counts.removed + counts.failed;

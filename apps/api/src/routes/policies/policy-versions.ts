@@ -46,7 +46,7 @@ policyVersionsRouter.get('/policy-sets/:id/versions', requireRole('viewer', 'ope
 
 const createVersionSchema = z.object({
   changeSummary: z.string().max(2000).optional(),
-  interfaceScopeType: interfaceScopeTypeSchema.default('INTERFACE_ROLE'),
+  interfaceScopeType: interfaceScopeTypeSchema.default('ALL_INTERFACES'),
   interfaceScopeRoles: interfaceRolesSchema.optional(),
   interfaceScopeNames: interfaceNamesSchema.optional()
 });

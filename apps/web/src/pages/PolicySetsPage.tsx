@@ -141,8 +141,7 @@ export function PolicySetsPage() {
   async function createVersion(policySetId: string) {
     try {
       const v = await api.createVersion(policySetId, {
-        interfaceScopeType: 'INTERFACE_ROLE',
-        interfaceScopeRoles: ['data']
+        interfaceScopeType: 'ALL_INTERFACES'
       });
       navigate(`/policy-version/${v.version.id}`);
     } catch (e: any) {

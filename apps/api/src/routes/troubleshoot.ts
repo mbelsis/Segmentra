@@ -1,3 +1,4 @@
+import { acquireHostLock } from '../services/host-lock.js';
 import { Router } from 'express';
 import { z } from 'zod';
 import { pool } from '../db/pool.js';
@@ -317,21 +318,24 @@ type SimRule = {
   comment: string | null;
 };
 
-/** The policy actually enforced on a host: its most recent successful deployment
- *  (each deployment replaces the whole Segmentra table). */
+/** The policy actually enforced on a host: its most recent successful deployment (each deployment replaces the
+ *  whole Segmentra table). The version's approval status does not matter: archiving a version does not remove its
+ *  rules from the hosts. A deployment whose rules were removed by the expiry action (REMOVE) no longer enforces
+ *  anything, so the host is treated as having no deployed policy. */
 async function effectivePolicyForHost(hostId: string) {
   const { rows } = await pool.query(
-    `SELECT d.policy_version_id, d.id AS deployment_id, d.status AS deployment_status,
+    `SELECT d.policy_version_id, d.id AS deployment_id, d.status AS deployment_status, dh.expiry_status,
             pv.version_number, pv.status AS version_status, ps.name AS policy_set_name
        FROM deployments d
        JOIN deployment_hosts dh ON dh.deployment_id = d.id
        JOIN policy_versions pv ON pv.id = d.policy_version_id
        JOIN policy_sets ps ON ps.id = pv.policy_set_id
-      WHERE dh.host_id = $1 AND dh.status = 'SUCCEEDED' AND pv.status IN ('APPROVED','DEPLOYED')
+      WHERE dh.host_id = $1 AND dh.status = 'SUCCEEDED'
       ORDER BY COALESCE(dh.finished_at, d.finished_at, d.created_at) DESC
       LIMIT 1`,
     [hostId]
   );
+  if (rows[0]?.expiry_status === 'REMOVED') return null;
   if (!rows[0]) return null;
   const rulesRes = await pool.query(
     `SELECT * FROM policy_rules WHERE policy_version_id = $1 ORDER BY order_index ASC, id ASC`,
@@ -632,6 +636,9 @@ troubleshootRouter.post('/audit/start', requireRole('operator', 'admin'), async 
 
     const logFilePath = `/var/log/segmentra-audit-${host.hostname}-${Date.now()}.log`;
 
+    // Serialize with deployments and other sessions on this host for the whole start (see services/host-lock.ts).
+    const releaseHostLock = await acquireHostLock(host.id);
+
     // Create DB record FIRST so the scheduler can restore if we crash mid-way
     const sessionRes = await pool.query(
       `INSERT INTO firewall_audit_sessions
@@ -694,7 +701,7 @@ troubleshootRouter.post('/audit/start', requireRole('operator', 'admin'), async 
         // The host may already be modified: hand the session to the restore path. If the
         // immediate restore fails, the session stays RUNNING and the scheduler retries.
         await pool.query(`UPDATE firewall_audit_sessions SET status = 'RUNNING', scheduled_restore_at = now() WHERE id = $1`, [sessionId]);
-        const outcome = await restoreAuditSessionById(sessionId, { finalStatus: 'CANCELLED', collectLogs: false });
+        const outcome = await restoreAuditSessionById(sessionId, { finalStatus: 'CANCELLED', collectLogs: false, hostLockHeld: true });
         if (outcome?.success) {
           await pool.query(
             `UPDATE firewall_audit_sessions
@@ -727,6 +734,7 @@ troubleshootRouter.post('/audit/start', requireRole('operator', 'admin'), async 
       if (policyFilePath) {
         try { if (fs.existsSync(policyFilePath)) fs.unlinkSync(policyFilePath); } catch { /* ignore */ }
       }
+      await releaseHostLock();
     }
   }
 

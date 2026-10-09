@@ -294,10 +294,16 @@ export async function applyNetworkPolicy(conn: K8sConnection, manifest: any, opt
   return res.json;
 }
 
-/** Returns false when the policy was already gone. */
-export async function deleteNetworkPolicy(conn: K8sConnection, ns: string, name: string): Promise<boolean> {
-  const res = await k8sRequest(conn, 'DELETE', npPath(ns, name));
+/**
+ * Returns false when the policy was already gone. With `uid` the API server deletes only if the live object still
+ * has that UID (a delete precondition), so a policy re-created or replaced since it was read is never deleted.
+ */
+export async function deleteNetworkPolicy(conn: K8sConnection, ns: string, name: string, opts: { uid?: string } = {}): Promise<boolean> {
+  const res = await k8sRequest(conn, 'DELETE', npPath(ns, name), opts.uid ? { body: { kind: 'DeleteOptions', apiVersion: 'v1', preconditions: { uid: opts.uid } } } : {});
   if (res.status === 404) return false;
+  if (res.status === 409 && opts.uid) {
+    throw new K8sError(`NetworkPolicy ${ns}/${name} changed while it was being removed (UID precondition failed); nothing was deleted, check it and retry`, 409, 'precondition_failed');
+  }
   if (res.status !== 200 && res.status !== 202) throw statusError(res, `delete NetworkPolicy ${ns}/${name}`);
   return true;
 }

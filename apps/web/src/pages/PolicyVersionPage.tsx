@@ -44,7 +44,7 @@ export function PolicyVersionPage() {
   const [formInterfaceScopeNames, setFormInterfaceScopeNames] = useState<string[]>([]);
 
   // Interface scope for policy version
-  const [policyInterfaceScopeType, setPolicyInterfaceScopeType] = useState<'ALL_INTERFACES' | 'INTERFACE_ROLE' | 'INTERFACE_NAME'>('INTERFACE_ROLE');
+  const [policyInterfaceScopeType, setPolicyInterfaceScopeType] = useState<'ALL_INTERFACES' | 'INTERFACE_ROLE' | 'INTERFACE_NAME'>('ALL_INTERFACES');
   const [policyInterfaceScopeRoles, setPolicyInterfaceScopeRoles] = useState<string[]>([]);
   const [policyInterfaceScopeNames, setPolicyInterfaceScopeNames] = useState<string[]>([]);
 

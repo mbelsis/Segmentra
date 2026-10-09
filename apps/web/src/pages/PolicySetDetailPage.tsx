@@ -82,8 +82,7 @@ export function PolicySetDetailPage() {
     if (!policySetId) return;
     try {
       const v = await api.createVersion(policySetId, {
-        interfaceScopeType: 'INTERFACE_ROLE',
-        interfaceScopeRoles: ['data']
+        interfaceScopeType: 'ALL_INTERFACES'
       });
       navigate(`/policy-version/${v.version.id}`);
     } catch (e: any) {
