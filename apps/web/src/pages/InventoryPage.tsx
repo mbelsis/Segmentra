@@ -1040,9 +1040,6 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                   </select>
                 </div>
               </div>
-              {pagination && (
-                <Pagination page={currentPage} pageSize={hostPageSize} total={pagination.total} onPage={setCurrentPage} onPageSize={(n) => { setHostPageSize(n); setCurrentPage(1); }} noun="hosts" sizes={[25, 50, 100, 250]} />
-              )}
             </div>
 
             {/* Bulk Actions */}
@@ -1219,7 +1216,7 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
               </tbody>
             </table>
 
-            {/* Pagination (also above the table; repeated here so it is at hand after a long list) */}
+            {/* Pagination (below the table only) */}
             {pagination && pagination.total > 0 && (
               <Pagination page={currentPage} pageSize={hostPageSize} total={pagination.total} onPage={setCurrentPage} onPageSize={(n) => { setHostPageSize(n); setCurrentPage(1); }} noun="hosts" sizes={[25, 50, 100, 250]} />
             )}
