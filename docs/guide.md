@@ -827,23 +827,24 @@ Go to **Integrations** in the sidebar (admin only) and click **+ New Integration
 
 ## 18. Kubernetes Microsegmentation
 
-Generate Kubernetes NetworkPolicy manifests from Segmentra policies, to apply with `kubectl` or a CI/CD pipeline. Segmentra does not apply them to the cluster.
+Generate Kubernetes NetworkPolicy manifests from Segmentra policies and apply them to the cluster from Segmentra (with stored credentials), or apply them yourself with `kubectl` or a CI/CD pipeline.
 
 ### Step 1: Register a Cluster
 
 Go to **Kubernetes** in the sidebar:
 1. Click **+ Add Cluster** (admin)
 2. Enter the **API Server URL** (e.g., `https://k8s-api.example.com:6443`)
-3. Select **Auth Type**: Kubeconfig, Service Account, or Bearer Token
+3. Select **Auth Type**: Kubeconfig, Service Account, or Bearer Token, and the cluster's **CNI Plugin**
+4. To apply from Segmentra, paste the **kubeconfig** (with inline token or client certificate; it carries the API server URL and CA) or the **bearer token** (plus the API server CA certificate). They are stored encrypted and never shown again; an admin can replace or remove them later, here or in **Admin → Kubernetes Credentials** (next to the SSH credentials). **Test connection** verifies them. See [kubernetes.md](kubernetes.md) for the minimal RBAC the account needs
 
-Cluster sync is a placeholder: Segmentra does not call the Kubernetes API, so **Workloads** only shows workloads that were added another way (for example by the demo data). Mapping workload labels to tags is available through the API only (`POST /api/k8s/workloads/:workloadId/map-tag`).
+Workload discovery is not implemented. On the **Workloads** tab, **+ Add workload** registers a workload with its pod labels, and the **+ tag** selector maps it to a Segmentra tag. A rule whose source is that tag then selects those pods by label.
 
 ### Step 2: Generate NetworkPolicy
 
 1. Select the cluster and click **Generate NetworkPolicy**
 2. Pick an APPROVED or DEPLOYED policy version, the namespace and a policy name
 3. Segmentra builds an **Ingress-only** NetworkPolicy from the version's inbound ALLOW rules (IN/BOTH; sources are resolved to `ipBlock` CIDRs, ports are kept; outbound rules are not emitted because egress is not restricted). DENY, ICMP, FORWARD and other rules that NetworkPolicy cannot express exactly are skipped with a warning instead of being widened
-4. **Copy kubectl apply** or **Download JSON**, and apply it to the cluster yourself
+4. On the **Network Policies** tab use **Apply** (create or update on the cluster; **Dry run** validates first), **Check** (detects drift against the live policy) and **Remove**. Or use **Copy kubectl apply** / **Download JSON** and apply it yourself. Segmentra refuses to overwrite or delete a same-named policy it did not create
 
 ---
 

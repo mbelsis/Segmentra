@@ -10,6 +10,14 @@ The containers use a test-only systemctl wrapper and native boot loaders on rest
 
 Run `npm run test:integration:firewall-managers -- --keep` to leave both containers running for Docker Desktop inspection. This retains the test network and temporary SSH keys, writes results into each container's logs and `/var/backups/segmentra/test-results.log`, and redeploys the sample enforced ACL after testing removal. The runner prints the retained resource names and temporary directory; remove those resources when finished. Without `--keep`, resources are cleaned up automatically.
 
+## Kubernetes NetworkPolicy Checks
+
+Run `npm run test:integration:k8s -- <kindnet|calico|cilium> [--keep] [--recreate]` against a running Segmentra API (default `http://localhost:8080/api`, admin `admin`/`admin123`; override with `SEGMENTRA_API`, `SEGMENTRA_ADMIN_USER`, `SEGMENTRA_ADMIN_PASSWORD`). It needs Docker, `kind` and `kubectl`, plus `cilium` (cilium-cli) for the Cilium run and internet access to fetch the Calico manifest.
+
+Segmentra only generates NetworkPolicy manifests, so the test creates a 3-node kind cluster with the chosen CNI, generates policies through the real API, applies them with `kubectl` and probes real pod-to-pod TCP/UDP traffic. It covers CIDR/HOST/TAG/VLAN/`any` sources, comma-separated CIDRs, port lists and ranges, same-node and cross-node clients, selector peers for labelled workloads mapped to a TAG, skipped rules (DENY, ICMP, OUT, unresolvable sources), policy update and removal, and the per-CNI `ipBlock` warning. Run it once per CNI, because enforcement differs: Cilium does not apply `ipBlock` to in-cluster pod traffic, so the test expects those allows to be blocked there while selector peers are allowed. The cluster is deleted afterwards unless `--keep` is given.
+
+The test also drives the cluster-management API: it stores credentials (a kubeconfig with a client certificate, and service-account tokens with read-write and read-only RBAC), tests the connection, applies, drift-checks and removes policies through Segmentra, and verifies that unmanaged same-named policies are never overwritten or deleted and that no credential material is ever returned. Run it against a development or disposable Segmentra stack: it creates users, hosts, tags and policy sets, and because approved policy versions cannot be deleted it archives its versions but leaves those records behind.
+
 ## Security Regression Checks
 
 Run `npm run test:security` from the repository root. This builds the API and its dependencies, then uses Node's built-in test runner without Docker or a database.

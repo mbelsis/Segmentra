@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { api, errorMessage } from '../lib/api';
+import { K8sCredentialsPanel } from '../components/K8sCredentialsPanel';
 
 type SudoMode = 'NOPASSWD' | 'LOGIN_PASSWORD' | 'SUDO_PASSWORD';
 
@@ -1203,6 +1204,9 @@ export function AdminPage() {
           </div>
         )}
       </div>
+
+      {/* Kubernetes Credentials */}
+      <K8sCredentialsPanel />
     </div>
   );
 }

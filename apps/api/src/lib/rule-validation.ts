@@ -59,6 +59,17 @@ export function isIpOrCidr(value: string): boolean {
   return family === 4 ? p >= 0 && p <= 32 : p >= 0 && p <= 128;
 }
 
+/**
+ * Source/destination of a CIDR-type rule: a single IP/CIDR, a comma-separated list of them, or
+ * "any" / "*". This mirrors what the compiler (parseAddrList) and the source resolver accept.
+ */
+export function isCidrList(value: string): boolean {
+  const v = value.trim();
+  if (/^(any|\*)$/i.test(v)) return true;
+  const parts = v.split(',').map((p) => p.trim());
+  return parts.length > 0 && parts.every((p) => p !== '' && isIpOrCidr(p));
+}
+
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export type RuleSemanticsInput = {
@@ -88,7 +99,7 @@ export function validateRuleSemantics(rule: RuleSemanticsInput): string[] {
   if (rule.sourceType && rule.sourceValue !== undefined && rule.sourceValue !== null) {
     const value = String(rule.sourceValue).trim();
     if (rule.sourceType === 'CIDR') {
-      if (!isIpOrCidr(value)) problems.push(`Source value '${value}' is not a valid IP address or CIDR`);
+      if (!isCidrList(value)) problems.push(`Source value '${value}' is not a valid IP address, CIDR, comma-separated list of them, or 'any'`);
     } else if (['TAG', 'VLAN', 'HOST'].includes(rule.sourceType)) {
       if (!UUID_REGEX.test(value)) problems.push(`Source value for ${rule.sourceType} must be the ${rule.sourceType.toLowerCase()} id (uuid)`);
     }
@@ -100,7 +111,7 @@ export function validateRuleSemantics(rule: RuleSemanticsInput): string[] {
       if (!dType || !dValue) {
         problems.push('FORWARD rules require a destination (destinationType and destinationValue)');
       } else if (dType === 'CIDR') {
-        if (!isIpOrCidr(dValue)) problems.push(`Destination value '${dValue}' is not a valid IP address or CIDR`);
+        if (!isCidrList(dValue)) problems.push(`Destination value '${dValue}' is not a valid IP address, CIDR, comma-separated list of them, or 'any'`);
       } else if (['TAG', 'VLAN', 'HOST', 'IOT_ASSET'].includes(dType)) {
         if (!UUID_REGEX.test(dValue)) problems.push(`Destination value for ${dType} must be the ${dType === 'IOT_ASSET' ? 'IoT asset' : dType.toLowerCase()} id (uuid)`);
       } else {

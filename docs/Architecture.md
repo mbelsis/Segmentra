@@ -1552,13 +1552,13 @@ Structured pre-enforcement testing that validates a policy against real traffic 
 
 ### Kubernetes Microsegmentation
 
-Agentless Kubernetes NetworkPolicy management via K8s API.
+Kubernetes NetworkPolicy management through the K8s API (`apps/api/src/services/k8s-client.ts`, a small HTTPS client without extra dependencies).
 
 Current state (see also [kubernetes.md](kubernetes.md)):
 
-- **Clusters**: cluster records (API server URL, auth type, namespace) can be managed, but Segmentra does not call the Kubernetes API: **Sync** is a placeholder that only updates `last_sync_at` / `last_sync_status`. Workloads in `k8s_workloads` come from the demo data seed, not from a cluster
-- **Tag mapping**: workloads can be mapped to Segmentra tags (`POST /k8s/workloads/:id/map-tag`)
-- **Generate NetworkPolicy**: `POST /k8s/clusters/:id/deploy-policy` translates an `APPROVED`/`DEPLOYED` policy version into an **Ingress-only** NetworkPolicy manifest (`ipBlock` sources, ports); DENY, FORWARD, ICMP and other rules that cannot be expressed are skipped with warnings. The manifest is stored (`k8s_network_policies`, status `GENERATED`) and shown for copying; it is **not** applied to the cluster
+- **Clusters**: cluster records (API server URL, auth type, CNI, namespace) with credentials stored encrypted in `secret_store` (types `K8S_CREDENTIALS`, `TLS_CA_CERT`, AES-256-GCM like SSH/LDAP secrets; never returned by the API). A kubeconfig is parsed in memory per call; file paths, exec plugins and auth providers are refused. API server addresses in the link-local/cloud-metadata ranges are blocked. **Test connection** checks the credentials; workload **Sync** (discovery) is not implemented (`501`). Workloads are registered by hand
+- **Tag mapping**: workloads (namespace, kind, name, pod labels) are registered with `POST /k8s/clusters/:id/workloads` and mapped to Segmentra tags (`POST /k8s/workloads/:id/map-tag`). A TAG rule source yields `ipBlock` peers for the tag's hosts plus `namespaceSelector` + `podSelector` peers for its workloads
+- **Generate NetworkPolicy**: `POST /k8s/clusters/:id/deploy-policy` translates an `APPROVED`/`DEPLOYED` policy version into an **Ingress-only** NetworkPolicy manifest (`ipBlock` sources, ports); DENY, FORWARD, ICMP and other rules that cannot be expressed are skipped with warnings. The manifest (labelled `app.kubernetes.io/managed-by: segmentra`) is stored in `k8s_network_policies` with its warnings. `POST /k8s/clusters/:id/network-policies/:npId/apply` (server-side apply, optional dry run), `/check` (drift: `IN_SYNC` / `DRIFTED` / `MISSING`) and `/remove` act on the cluster; rows move through `GENERATED`, `APPLIED`, `FAILED`, `REMOVED` and `SUPERSEDED` (older rows of the same name once a newer one is applied). Apply and remove refuse to touch a same-named policy that lacks the managed-by label
 
 ### OT/IoT Microsegmentation
 

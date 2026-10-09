@@ -241,7 +241,7 @@ Log-only policies are always applied over direct SSH (`packages/executor/src/aud
 
 ### Kubernetes NetworkPolicy Deployment
 
-For Kubernetes clusters, Segmentra generates a NetworkPolicy manifest (Ingress only) from an approved policy version and stores it for you to apply with `kubectl`; it does not connect to the cluster, and **the Ansible playbook is not used**. See [kubernetes.md](kubernetes.md).
+For Kubernetes clusters, Segmentra generates a NetworkPolicy manifest (Ingress only) from an approved policy version and stores it; you apply it with `kubectl` or, with stored cluster credentials, from Segmentra through the Kubernetes API. **The Ansible playbook is not used**. See [kubernetes.md](kubernetes.md).
 
 ### OT/IoT ACL Deployment
 

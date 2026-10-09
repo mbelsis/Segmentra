@@ -620,6 +620,18 @@ export const api = {
     networkPolicies: (clusterId: string) => request<{ networkPolicies: any[] }>(`/k8s/clusters/${clusterId}/network-policies`),
     deployPolicy: (clusterId: string, b: any) =>
       request<{ networkPolicy: any }>(`/k8s/clusters/${clusterId}/deploy-policy`, { method: 'POST', body: JSON.stringify(b) }),
+    testConnection: (clusterId: string) =>
+      request<{ ok: boolean; serverVersion?: string; message?: string }>(`/k8s/clusters/${clusterId}/test-connection`, { method: 'POST', body: '{}' }),
+    applyPolicy: (clusterId: string, npId: string, b: { dryRun?: boolean; overwrite?: boolean } = {}) =>
+      request<{ ok: boolean; dryRun?: boolean; replaced?: boolean; replaces?: boolean; message?: string; networkPolicy?: any }>(`/k8s/clusters/${clusterId}/network-policies/${npId}/apply`, { method: 'POST', body: JSON.stringify(b) }),
+    checkPolicy: (clusterId: string, npId: string) =>
+      request<{ ok: boolean; state: 'IN_SYNC' | 'DRIFTED' | 'MISSING'; managedBySegmentra: boolean | null }>(`/k8s/clusters/${clusterId}/network-policies/${npId}/check`, { method: 'POST', body: '{}' }),
+    removePolicy: (clusterId: string, npId: string) =>
+      request<{ ok: boolean; alreadyAbsent: boolean }>(`/k8s/clusters/${clusterId}/network-policies/${npId}/remove`, { method: 'POST', body: '{}' }),
+    createWorkload: (clusterId: string, b: { namespace: string; name: string; kind?: string; labels?: Record<string, string> }) =>
+      request<{ workload: any }>(`/k8s/clusters/${clusterId}/workloads`, { method: 'POST', body: JSON.stringify(b) }),
+    deleteWorkload: (workloadId: string) => request<{ ok: boolean }>(`/k8s/workloads/${workloadId}`, { method: 'DELETE' }),
+    unmapWorkloadTag: (workloadId: string, tagId: string) => request<{ ok: boolean }>(`/k8s/workloads/${workloadId}/tags/${tagId}`, { method: 'DELETE' }),
   },
 
   // === Capability 8: OT/IoT ===

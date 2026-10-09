@@ -14,7 +14,8 @@
     "test:integration:ssh-docker": "node ./tests/run-docker-ssh-integration.mjs",
     "test:security": "npm run build -w @segmentra/api && node --test tests/security-regressions.test.mjs",
     "test:firewall-managers": "npm run build -w @segmentra/api && node --test tests/native-firewall.test.mjs",
-    "test:integration:firewall-managers": "npm run build -w @segmentra/api && node tests/run-native-firewall-integration.mjs"
+    "test:integration:firewall-managers": "npm run build -w @segmentra/api && node tests/run-native-firewall-integration.mjs",
+    "test:integration:k8s": "node tests/k8s-integration/run.mjs"
   },
   "engines": {
     "node": ">=20"

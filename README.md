@@ -20,7 +20,7 @@ The platform enables:
 - **Topology building**
 - **Default access rules for each policy**
 
-**Future plans** include more integration adapters (SOAR, vulnerability databases), live Kubernetes workload sync and direct NetworkPolicy apply, and a real email notification channel. See [Future Work](#future-work).
+**Future plans** include more integration adapters (SOAR, vulnerability databases), Kubernetes workload discovery from the cluster, and a real email notification channel. See [Future Work](#future-work).
 
 ---
 
@@ -158,9 +158,27 @@ Supported Linux backends are **nftables, iptables, firewalld, and UFW**. Select 
 - **Deployment Warning** — deploying to IoT gateways triggers a warning about impact on protected devices
 
 ### Kubernetes Microsegmentation
-- **Cluster Registry** — register multiple clusters (API server URL, auth details) from a single instance
-- **Workloads and Label-to-Tag Mapping** — view workloads stored for a cluster and map them to Segmentra tags. **Workload sync is not implemented**: the sync endpoint returns 501 and Segmentra does not contact the Kubernetes API, so workloads are not discovered automatically (the demo data seeds some)
-- **NetworkPolicy Generation** — **Generate NetworkPolicy** translates the ALLOW rules of an approved or deployed policy version into an Ingress-only `networking.k8s.io/v1` NetworkPolicy manifest (DENY, FORWARD and other rules that cannot be expressed exactly are skipped with a warning). Segmentra does not apply it: copy the `kubectl apply` command or download the JSON
+
+Segmentra turns approved policy versions into Kubernetes **NetworkPolicy** manifests and can apply, check and remove them on your clusters. See the [Kubernetes Guide](docs/kubernetes.md).
+
+**Capabilities**
+- **Cluster registry** — register several clusters, each with its CNI plugin (kindnet, Calico, Cilium, Antrea, Weave, kube-router, other) and default namespace.
+- **Stored credentials** — a kubeconfig with an inline token or client certificate, or a service-account/bearer token plus the API server CA. They are encrypted like the SSH and LDAP secrets, never shown again, and managed per cluster or in **Admin → Kubernetes Credentials**. **Test connection** checks them. API server addresses in the link-local/cloud-metadata range are refused.
+- **NetworkPolicy generation** — **Generate NetworkPolicy** translates the inbound ALLOW rules of an approved or deployed policy version into an Ingress-only `networking.k8s.io/v1` manifest. Sources become `ipBlock` peers (CIDR, HOST, VLAN and the hosts of a TAG; multiple CIDRs and `any` are supported). Rules NetworkPolicy cannot express (DENY, FORWARD, ICMP, outbound) are skipped with a warning, and a source that resolves to nothing is never widened to `0.0.0.0/0`.
+- **Label-based sources** — register workloads with their pod labels and map them to Segmentra tags. A rule whose source is such a tag allows those pods by `namespaceSelector` + `podSelector`, which works on every CNI. A TAG can mix host IPs and labelled workloads.
+- **Apply, Dry run, Check and Remove from Segmentra** — server-side apply creates or updates the policy; **Dry run** validates it first; **Check** compares the live policy with Segmentra's manifest (in sync, drifted, missing); **Remove** deletes it. Status, last error and drift state are tracked per manifest, and every action is audited.
+- **Safety guards** — Segmentra only touches policies carrying the `app.kubernetes.io/managed-by: segmentra` label and refuses to overwrite or delete a same-named policy it did not create. It refuses to apply an older manifest over a newer one, and apply asks for confirmation showing the generation warnings.
+- **Manual route** — you can still copy the `kubectl apply` command or download the JSON and apply it with your own pipeline.
+
+**Limitations**
+- **Cilium ignores `ipBlock` for in-cluster traffic.** IP-based sources only match clients outside the cluster there, so a policy built only from CIDR/HOST/VLAN sources blocks all in-cluster clients. Segmentra warns when the cluster CNI is Cilium or unknown; use tags mapped to labelled workloads for in-cluster clients. Calico and kindnet match `ipBlock` for pods.
+- **No workload discovery.** The sync endpoint returns `501`; workloads are registered by hand with their labels.
+- **Ingress only, allow-only.** Egress is never restricted, DENY rules cannot be expressed, and ICMP and FORWARD rules are skipped. Each policy selects **all pods in the namespace** (`podSelector: {}`); you cannot target a subset of pods.
+- **A policy denies everything else inbound.** Once applied, only traffic allowed by the policy reaches the pods in that namespace. Review the warnings and use Dry run first.
+- **Enforcement depends on the CNI.** A cluster without a NetworkPolicy-capable CNI (for example plain kubenet) accepts the policy but does not enforce it.
+- **Credential limits.** A kubeconfig must carry inline credentials: file paths, exec plugins, auth providers and proxies are rejected. Tokens expire and must be replaced before then. The API server must be reachable from the Segmentra API (inside the container in the Docker deployment) over HTTPS.
+- **Not tracked:** policies applied outside Segmentra stay `Generated`; deleting a cluster record does not remove policies already on the cluster.
+- **No unit tests** for the Kubernetes client; coverage is the kind integration test below.
 
 ### Security & Compliance
 - **Security Posture Audit** — on-demand scan of all deployed policies for excessive permissions (8 categories: sensitive port open to any, all ports open to any, very broad source CIDRs, any-protocol / any-port rules, `ALL_INTERFACES` with a broad source, duplicate rules, unmanaged hosts, stale policies)
@@ -492,13 +510,13 @@ Everything below was exercised against Docker containers. The core workflow went
   - SSRF checks.
 - **Threat intelligence:** AbuseIPDB against a mock of its API (error handling, auto-block drafts, deduplication).
 - **SIEM forwarding:** every audit event forwarded exactly once (including a second API replica and a reconnect), with no secrets in messages. Integration and notification secrets are encrypted at rest; a database dump showed none of them.
-- **Kubernetes:** generated NetworkPolicy manifests were applied to k3s v1.30 and enforced.
+- **Kubernetes:** `npm run test:integration:k8s` builds 3-node kind clusters with **kindnet**, **Calico** and **Cilium** and runs 69 checks on each against the real API: stored kubeconfig and service-account token credentials, apply, dry run, drift check and removal through Segmentra, real pod-to-pod TCP/UDP enforcement (CIDR, HOST, TAG, VLAN, `any`, port ranges, same-node and cross-node clients, selector peers, updates), refusal to overwrite or delete a policy Segmentra did not create, read-only RBAC failure, and no credential material in any API response. Earlier generated manifests were also applied to k3s v1.30 and enforced.
 - **Other:** `scripts/restore-previous-policy.sh` (`--latest` / `--timestamp`); password change and reset; and the PowerShell scripts parse under PowerShell 7 and as Windows PowerShell 5.1 would read them.
 
 ### Not yet tested or not implemented
 
 - **Email notifications are not implemented.** There is no SMTP sending; email channels report FAILED.
-- **Kubernetes workload sync is not implemented.** The sync endpoint returns `501`, so workload-to-tag mapping can't be used. Generated manifests use `podSelector: {}` (all pods in the namespace).
+- **Kubernetes workload discovery is not implemented, and only kind clusters were tested.** The sync endpoint returns `501`; workloads are registered by hand. Enforcement was verified on kindnet, Calico and Cilium; managed services (EKS, GKE, AKS), Antrea, Weave and kube-router were not tested. Generated manifests use `podSelector: {}` (all pods in the namespace).
 - **Microsoft Active Directory itself, and LDAPS with a real certificate.** Only OpenLDAP was tested.
 - **The real AbuseIPDB service**, as opposed to the mock, and real Slack workspaces.
 - **Hosts that log only to journald (no rsyslog).** Firewall Learning reads the rsyslog file, so such hosts capture no flows. FORWARD traffic on gateways is not analyzed by Learning or Policy Impact Analysis, by design.
@@ -518,12 +536,8 @@ See also [Known Limitations](#known-limitations) and the [OT/IoT guide](docs/iot
 ### Features not implemented yet
 
 - **Email notifications.** Email channels can be configured but there is no SMTP sending yet; they report FAILED with "Email delivery is not implemented yet". Plan: add an SMTP client (e.g. nodemailer) with TLS, authentication stored encrypted like other secrets, and a test-send button.
-- **Kubernetes workload sync and direct apply.** The sync endpoint returns `501 not_implemented`; Segmentra does not connect to the Kubernetes API. Plan:
-  - read namespaces, workloads and labels from the cluster;
-  - map labels to tags;
-  - generate NetworkPolicies that select the right pods (today they use `podSelector: {}`, i.e. all pods in the namespace);
-  - optionally apply them directly instead of `kubectl apply`.
-- **UI for API-only features.** These work through the API but have no screens yet: policy recommendations, enforcement points (network device ACLs), IoT baselines and observed flows, host interfaces, the per-host compiled-policy preview (`render`) and Kubernetes workload-to-tag mapping.
+- **Kubernetes workload discovery.** The sync endpoint returns `501 not_implemented`. Workloads are registered by hand; with the stored cluster credentials Segmentra could now read namespaces, workloads and pod labels from the cluster and map labels to tags automatically. Generated NetworkPolicies still select all pods in the namespace (`podSelector: {}`).
+- **UI for API-only features.** These work through the API but have no screens yet: policy recommendations, enforcement points (network device ACLs), IoT baselines and observed flows, host interfaces, and the per-host compiled-policy preview (`render`).
 - **More integrations.** SOAR and vulnerability-database integrations can be configured but don't do anything yet.
 
 ### Testing still to do
