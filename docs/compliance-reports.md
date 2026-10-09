@@ -61,6 +61,8 @@ The period is limited to three years. `audit_events` is rebuilt from the append-
 | Measurement | Status is "Attention" when |
 |---|---|
 | Enabled hosts under a deployed policy (%) | any enabled host has no successful deployment (or its policy was removed by the expiry action) |
+| IoT assets protected (%) | an enabled IoT asset is not in the `PROTECTED` coverage state (no gateway, no IP, not deployed or deploy pending) |
+| IoT assets allowing cleartext services | a protected asset is reachable on a cleartext service such as Modbus/TCP (port matching only) |
 | Hosts not deployed for more than *staleDays* (default 90) | any |
 | Policy sets approved within *reviewDays* (default 180) | any policy set has no approval in that time |
 | Versions approved in the period; high-risk versions approved | information only |

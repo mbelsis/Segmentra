@@ -80,6 +80,30 @@ Click an image to open it full size.
       <sub>Every change and deployment, with actor and details</sub>
     </td>
   </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="screehsots/10-policy-rules.png"><img src="screehsots/10-policy-rules.png" alt="Policy rules" width="100%"></a><br>
+      <b>Policy Rules</b><br>
+      <sub>Interface scope, the automatic baseline rules and the rules of a policy version</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="screehsots/11-inventory-discovery.png"><img src="screehsots/11-inventory-discovery.png" alt="Inventory Discovery" width="100%"></a><br>
+      <b>Inventory Discovery</b><br>
+      <sub>Scan networks for SSH servers and import them as hosts</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="screehsots/12-compliance-report.png"><img src="screehsots/12-compliance-report.png" alt="Compliance Report" width="100%"></a><br>
+      <b>Compliance Report</b><br>
+      <sub>Point-in-time evidence for PCI DSS, ISO 27001, SOC 2 and HIPAA, stored with a SHA-256</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="screehsots/13-admin.png"><img src="screehsots/13-admin.png" alt="Admin" width="100%"></a><br>
+      <b>Admin</b><br>
+      <sub>SSH and Kubernetes credentials, users and roles</sub>
+    </td>
+  </tr>
 </table>
 
 ---
@@ -157,6 +181,12 @@ Supported Linux backends are **nftables, iptables, firewalld, and UFW**. Select 
 - **VLANs as Zones** — OT network zones (Purdue levels) are defined as VLANs in the inventory
 - **Traffic Discovery** — run Firewall Learning on the gateway host to observe IoT traffic passively
 - **Deployment Warning** — deploying to IoT gateways triggers a warning about impact on protected devices
+- **Protocol Catalog** — about 35 OT/IoT services (Modbus/TCP, DNP3, EtherNet/IP, S7, OPC UA, BACnet, MQTT, ...) with default ports and a cleartext/encrypted flag; pick one in the rule form or write `service: modbus-tcp` in a policy document. Port matching only, no deep inspection
+- **Protection Coverage** — shows which assets are protected, by which gateway and which services are allowed to reach them (zones, cleartext warnings); it is derived from recorded deployments, not a live check
+- **Passive Discovery** — lists devices from a gateway's ARP/NDP table over SSH (nothing is sent to the devices), with vendors from an IEEE OUI list you import, and imports them as assets
+- **Compliance integration** — IoT coverage appears in the compliance reports
+
+**Not tested yet:** the full IEEE OUI file, real PLCs and cameras, IPv6-only neighbours. **Not supported yet:** deep protocol inspection, flow ingestion, active scanning. See the [OT/IoT guide](docs/iot.md#8-industrial-protocols-coverage-and-discovery).
 
 ### Kubernetes Microsegmentation
 
@@ -633,7 +663,7 @@ Everything below was exercised against Docker containers. The core workflow went
 - **Real OT protocols** beyond a TCP test listener on gateways.
 - **A full deployment through a browser with the Ansible executor.** Ansible was tested through the API.
 
-See also [Known Limitations](#known-limitations) and the [OT/IoT guide](docs/iot.md#8-limitations-and-what-is-not-tested).
+See also [Known Limitations](#known-limitations) and the [OT/IoT guide](docs/iot.md#9-limitations-and-what-is-not-tested).
 
 ---
 

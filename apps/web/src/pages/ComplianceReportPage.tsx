@@ -18,7 +18,7 @@ const STATUS_STYLE: Record<string, { color: string; bg: string; label: string }>
 };
 const CSV_LABELS: Record<string, string> = {
   controls: 'Controls', metrics: 'Measurements', hosts: 'Hosts', changes: 'Changes', deployment_failures: 'Deployment failures',
-  users_inactive: 'Inactive users', credentials: 'SSH credentials', iot_assets: 'IoT assets', audit_events: 'Audit events (full list)',
+  users_inactive: 'Inactive users', credentials: 'SSH credentials', iot_assets: 'IoT assets', iot_coverage: 'IoT protection coverage', audit_events: 'Audit events (full list)',
 };
 
 const isoDay = (d: Date) => d.toISOString().slice(0, 10);
@@ -167,7 +167,7 @@ export function ComplianceReportPage() {
               [String(ev.changes.approvedInPeriod), 'versions approved in the period', false],
               [String(ev.changes.selfApproved), 'self-approvals', ev.changes.selfApproved > 0],
               [String(ev.deployments.withFailedHosts), 'deployments with failed hosts', ev.deployments.withFailedHosts > 0],
-              [`${ev.iot.unprotected.rows.length}/${ev.iot.assets}`, 'IoT assets without a gateway', ev.iot.unprotected.rows.length > 0],
+              [`${ev.iot.coverage?.summary?.PROTECTED ?? 0}/${ev.iot.assets}`, 'IoT assets protected', (ev.iot.coverage?.summary?.PROTECTED ?? 0) < ev.iot.assets],
               [String(ev.audit.events), 'audit events', false],
             ].map(([v, l, warn], i) => (
               <div key={i} style={{ background: warn ? '#faf0ee' : '#f7f4ef', border: `1px solid ${warn ? '#e8c4bd' : '#e8e0d4'}`, borderRadius: 8, padding: '8px 12px', minWidth: 150 }}>
@@ -212,10 +212,10 @@ export function ComplianceReportPage() {
               <div style={{ fontSize: '13px' }}>{ev.inventory.hosts.rows.filter((h: any) => h.state === 'unmanaged').slice(0, 15).map((h: any) => h.hostname).join(', ')}{ev.inventory.unmanaged > 15 ? ` and ${ev.inventory.unmanaged - 15} more (see the Hosts CSV)` : ''}</div>
             </div>
           )}
-          {ev.iot.unprotected.rows.length > 0 && (
+          {(ev.iot.coverageRows?.rows ?? []).some((a: any) => a.state !== 'PROTECTED') && (
             <div style={{ marginBottom: 12 }}>
-              <h4 style={{ margin: '8px 0 4px' }}>IoT / OT assets without a protecting gateway ({ev.iot.unprotected.rows.length})</h4>
-              <div style={{ fontSize: '13px' }}>{ev.iot.unprotected.rows.slice(0, 15).map((a: any) => `${a.name} (${a.criticality})`).join(', ')}</div>
+              <h4 style={{ margin: '8px 0 4px' }}>IoT / OT assets that are not protected ({(ev.iot.coverageRows.rows as any[]).filter((a) => a.state !== 'PROTECTED').length})</h4>
+              <div style={{ fontSize: '13px' }}>{(ev.iot.coverageRows.rows as any[]).filter((a) => a.state !== 'PROTECTED').slice(0, 15).map((a) => `${a.name} (${a.criticality}, ${String(a.state).toLowerCase().replace(/_/g, ' ')})`).join(', ')}</div>
             </div>
           )}
         </div>

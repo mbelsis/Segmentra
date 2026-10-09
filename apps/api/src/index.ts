@@ -28,6 +28,7 @@ import { integrationsRouter } from './routes/integrations.js';
 import { policyTestingRouter } from './routes/policy-testing.js';
 import { kubernetesRouter } from './routes/kubernetes.js';
 import { iotAssetsRouter } from './routes/iot-assets.js';
+import { iotExtrasRouter } from './routes/iot-extras.js';
 import { flowCollectorsRouter } from './routes/flow-collectors.js';
 import { enforcementPointsRouter } from './routes/enforcement-points.js';
 import { notificationsRouter } from './routes/notifications.js';
@@ -62,6 +63,8 @@ app.use('/api/recommendations', recommendationsRouter);
 app.use('/api/integrations', integrationsRouter);
 app.use('/api/policy-test', policyTestingRouter);
 app.use('/api/k8s', kubernetesRouter);
+// IoT extras first: single-segment paths such as /protocols and /coverage must not be taken for an asset id.
+app.use('/api/iot-assets', iotExtrasRouter);
 app.use('/api/iot-assets', iotAssetsRouter);
 app.use('/api/flow-collectors', flowCollectorsRouter);
 app.use('/api/enforcement-points', enforcementPointsRouter);

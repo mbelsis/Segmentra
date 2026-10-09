@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 
 import { pool } from '../db/pool.js';
+import { computeIotCoverage } from './iot-coverage.js';
 
 /**
  * Compliance evidence reports (docs/compliance-reports.md).
@@ -169,6 +170,12 @@ export async function collectEvidence(p: ReportParams, now = new Date()) {
   const assetsByCrit: Record<string, number> = {};
   for (const a of enabledAssets) assetsByCrit[a.criticality] = (assetsByCrit[a.criticality] ?? 0) + 1;
 
+  const cov = await computeIotCoverage();
+  const covRows = cov.assets.map((a) => ({
+    name: a.name, type: a.assetType, criticality: a.criticality, zone: a.zone, ip: a.ip, state: a.state,
+    gateways: a.gateways.map((g) => g.hostname).join(';'), cleartext: a.cleartextAllowed.join('; '),
+  }));
+
   // Kubernetes
   const clusters = await q(`SELECT name, cni, (credentials_secret_id IS NOT NULL) AS has_credentials, tls_skip_verify, enabled FROM k8s_clusters ORDER BY name`);
   const k8sPolicies = await q(
@@ -211,7 +218,7 @@ export async function collectEvidence(p: ReportParams, now = new Date()) {
     audit: { events: auditTotals.events, actors: auditTotals.actors, firstAt: auditTotals.first_at, lastAt: auditTotals.last_at, privilegedEvents: privileged, byAction: auditByAction.map((r) => ({ action: r.action, count: r.n })) },
     access: { users: users.length, active: activeUsers.length, roleCounts, admins: roleCounts['admin'] ?? 0, ldapEnabled: !!ldap?.enabled, inactiveDays: p.inactiveUserDays, inactive: cap(inactiveUsers) },
     credentials: { ssh: credRows.length, maxAgeDays: p.credentialMaxAgeDays, older: cap(oldCreds), all: cap(credRows) },
-    iot: { assets: enabledAssets.length, gateways: gwCount, byCriticality: assetsByCrit, unprotected: cap(unprotectedAssets.map((a) => ({ name: a.name, type: a.asset_type, criticality: a.criticality, zone: a.zone, ip: a.ip_address }))), all: cap(assets.map((a) => ({ name: a.name, type: a.asset_type, criticality: a.criticality, zone: a.zone, ip: a.ip_address, enabled: a.enabled, gateways: a.gateways }))) },
+    iot: { assets: enabledAssets.length, gateways: gwCount, byCriticality: assetsByCrit, coverage: { summary: cov.summary, zones: cov.zones }, coverageRows: cap(covRows), unprotected: cap(unprotectedAssets.map((a) => ({ name: a.name, type: a.asset_type, criticality: a.criticality, zone: a.zone, ip: a.ip_address }))), all: cap(assets.map((a) => ({ name: a.name, type: a.asset_type, criticality: a.criticality, zone: a.zone, ip: a.ip_address, enabled: a.enabled, gateways: a.gateways }))) },
     kubernetes: { clusters: clusters.length, withCredentials: clusters.filter((c) => c.has_credentials).length, tlsNotVerified: clusters.filter((c) => c.tls_skip_verify).length, cniUnknown: clusters.filter((c) => c.cni === 'unknown').length, policiesByStatus: k8sByStatus, driftedPolicies: k8sPolicies.filter((r) => r.live_state === 'DRIFTED').length },
     swarm: { nodes: swarmHosts.length, clusters: swarmByCluster, withPublishedPortEnforcement: swarmHosts.filter((h) => h.docker_published_ports).length },
     drift,
@@ -245,6 +252,11 @@ export function buildMetrics(e: Evidence, p: ReportParams): Record<string, Metri
   add('inactive_users', `Active accounts without login for more than ${p.inactiveUserDays} days`, e.access.inactive.rows.length, e.access.inactive.rows.length === 0 ? 'ok' : 'attention');
   add('old_credentials', `SSH credentials not rotated for more than ${p.credentialMaxAgeDays} days`, e.credentials.older.rows.length, e.credentials.older.rows.length === 0 ? 'ok' : 'attention', `${e.credentials.ssh} SSH credentials`);
   add('iot_unprotected', 'Enabled IoT/OT assets without a protecting gateway', e.iot.unprotected.rows.length, e.iot.assets === 0 ? 'info' : e.iot.unprotected.rows.length === 0 ? 'ok' : 'attention', `${e.iot.assets} assets, ${e.iot.gateways} gateways`);
+  const protectedAssets = e.iot.coverage.summary.PROTECTED;
+  add('iot_coverage', 'Enabled IoT/OT assets protected by a deployed gateway (%)', pct(protectedAssets, e.iot.assets), e.iot.assets === 0 ? 'info' : protectedAssets === e.iot.assets ? 'ok' : 'attention',
+    e.iot.assets === 0 ? 'no IoT/OT assets registered' : `${protectedAssets} of ${e.iot.assets} protected; ${e.iot.coverage.summary.PENDING_DEPLOY} deploy pending, ${e.iot.coverage.summary.GATEWAY_NOT_DEPLOYED} gateway not deployed, ${e.iot.coverage.summary.NO_IP} without IP, ${e.iot.coverage.summary.NO_GATEWAY} without gateway`);
+  const cleartextAssets = e.iot.coverageRows.rows.filter((r: any) => r.cleartext).length;
+  add('iot_cleartext', 'IoT/OT assets that allow a cleartext protocol (Modbus, DNP3, MQTT, ...)', cleartextAssets, 'info', 'cleartext protocols have no encryption or authentication by design: restrict who can reach them');
   add('k8s_tls', 'Kubernetes clusters with TLS verification disabled', e.kubernetes.tlsNotVerified, e.kubernetes.tlsNotVerified === 0 ? 'ok' : 'attention', `${e.kubernetes.clusters} clusters`);
   add('k8s_drift', 'Kubernetes policies that drifted from Segmentra\'s manifest (last check)', e.kubernetes.driftedPolicies, e.kubernetes.driftedPolicies === 0 ? 'ok' : 'attention');
   add('swarm_nodes', 'Docker Swarm nodes managed', e.swarm.nodes, 'info', e.swarm.nodes ? `${e.swarm.withPublishedPortEnforcement} with published-port enforcement` : undefined);
@@ -281,7 +293,7 @@ export const FRAMEWORKS: FrameworkDef[] = [
     id: 'iso-27001-2022', name: 'ISO/IEC 27001', version: '2022 (Annex A)',
     controls: [
       { id: 'A.8.20', title: 'Networks security', note: 'Host firewall policies deployed and verified', metrics: ['coverage', 'stale_hosts', 'drift'] },
-      { id: 'A.8.22', title: 'Segregation of networks', note: 'Policies scoped by tag or VLAN; IoT/OT assets behind gateways; Kubernetes NetworkPolicies', metrics: ['coverage', 'iot_unprotected', 'k8s_drift'] },
+      { id: 'A.8.22', title: 'Segregation of networks', note: 'Policies scoped by tag or VLAN; IoT/OT assets behind gateways; Kubernetes NetworkPolicies', metrics: ['coverage', 'iot_unprotected', 'iot_coverage', 'k8s_drift'] },
       { id: 'A.8.9', title: 'Configuration management', note: 'Versioned configuration, drift detection, staleness', metrics: ['stale_hosts', 'drift', 'k8s_drift'] },
       { id: 'A.8.32', title: 'Change management', note: 'Approvals, separation of duties, deployment outcomes', metrics: ['changes_approved', 'self_approvals', 'pending_old', 'deployments_failed'] },
       { id: 'A.5.3', title: 'Segregation of duties', note: 'The author of a version cannot approve it', metrics: ['self_approvals'] },
@@ -295,7 +307,7 @@ export const FRAMEWORKS: FrameworkDef[] = [
     controls: [
       { id: 'CC6.1', title: 'Logical access security measures protect information assets', note: 'Role-based access, account hygiene, credential rotation', metrics: ['active_users', 'admins', 'inactive_users', 'old_credentials'] },
       { id: 'CC6.3', title: 'Access is granted, modified and removed using role-based, least-privilege principles', note: 'Roles viewer, operator, approver, admin; inactive accounts listed', metrics: ['active_users', 'inactive_users'] },
-      { id: 'CC6.6', title: 'Boundary protection against threats from outside the system', note: 'Default-deny host firewalls; IoT and Kubernetes segmentation', metrics: ['coverage', 'iot_unprotected', 'k8s_tls'] },
+      { id: 'CC6.6', title: 'Boundary protection against threats from outside the system', note: 'Default-deny host firewalls; IoT and Kubernetes segmentation', metrics: ['coverage', 'iot_unprotected', 'iot_coverage', 'iot_cleartext', 'k8s_tls'] },
       { id: 'CC7.2', title: 'Components are monitored for anomalies and security events', note: 'Security audit scans of the policy set and drift detection (not traffic monitoring)', metrics: ['security_scan_age', 'security_critical', 'drift'] },
       { id: 'CC8.1', title: 'Changes are authorised, designed, tested, approved and implemented', note: 'Approval workflow, impact analysis, canary deployments, rollbacks', metrics: ['changes_approved', 'self_approvals', 'high_risk_approved', 'deployments_failed'] },
     ],
@@ -380,7 +392,7 @@ export function toCsv(columns: string[], rows: Array<Record<string, unknown>>): 
   return [columns.join(','), ...rows.map((r) => columns.map((c) => csvCell(r[c])).join(','))].join('\r\n') + '\r\n';
 }
 
-export const CSV_DATASETS = ['controls', 'metrics', 'hosts', 'changes', 'deployment_failures', 'users_inactive', 'credentials', 'iot_assets', 'audit_events'] as const;
+export const CSV_DATASETS = ['controls', 'metrics', 'hosts', 'changes', 'deployment_failures', 'users_inactive', 'credentials', 'iot_assets', 'iot_coverage', 'audit_events'] as const;
 
 export async function csvDataset(content: any, dataset: string, reportRow: { period_from: Date; period_to: Date }): Promise<string | null> {
   const ev = content.evidence;
@@ -404,6 +416,8 @@ export async function csvDataset(content: any, dataset: string, reportRow: { per
       return toCsv(['name', 'auth', 'scope', 'secretAt', 'ageDays'], ev.credentials.all.rows);
     case 'iot_assets':
       return toCsv(['name', 'type', 'criticality', 'zone', 'ip', 'enabled', 'gateways'], ev.iot.all.rows);
+    case 'iot_coverage':
+      return toCsv(['name', 'type', 'criticality', 'zone', 'ip', 'state', 'gateways', 'cleartext'], ev.iot.coverageRows.rows);
     case 'audit_events': {
       // Regenerated from the append-only audit log for the report's period (the report stores aggregates only).
       const { rows } = await pool.query(
@@ -478,8 +492,11 @@ ${table([['Policy set', (c) => c.policySet], ['Ver.', (c) => c.version], ['Statu
 <h2>Deployments with failures</h2>
 <p class="muted">${ev.deployments.total} deployments in the period (${Object.entries(ev.deployments.byStatus).map(([k, v]) => `${esc(k)}: ${v}`).join(', ') || 'none'}); ${ev.deployments.rollbacks} automatic rollbacks.</p>
 ${table([['When', (d) => fmtDate(d.at)], ['Policy', (d) => `${d.policySet} v${d.version}`], ['Status', (d) => d.status], ['Failed hosts', (d) => d.failedHosts], ['Rollbacks', (d) => d.rollbacks], ['By', (d) => d.by]], ev.deployments.failures.rows, 40, 'No failed deployments in the period.')}
-<h2>IoT / OT assets without a protecting gateway</h2>
-${table([['Asset', (a) => a.name], ['Type', (a) => a.type], ['Criticality', (a) => a.criticality], ['Zone', (a) => a.zone], ['IP', (a) => a.ip]], ev.iot.unprotected.rows, 50, ev.iot.assets === 0 ? 'No IoT assets are registered.' : 'Every enabled IoT asset has a gateway.')}
+<h2>IoT / OT protection</h2>
+<p class="muted">${ev.iot.assets} enabled assets and ${ev.iot.gateways} gateways. Protected = every assigned gateway was deployed after the assignment (derived from Segmentra's records, not a live check). ${Object.entries(ev.iot.coverage.summary).map(([k, v]) => `${esc(k)}: ${v}`).join(', ')}.</p>
+${table([['Zone', (z) => z.zone], ['Assets', (z) => z.assets], ['Protected', (z) => z.PROTECTED], ['Deploy pending', (z) => z.PENDING_DEPLOY], ['Gateway not deployed', (z) => z.GATEWAY_NOT_DEPLOYED], ['No IP', (z) => z.NO_IP], ['No gateway', (z) => z.NO_GATEWAY]], ev.iot.coverage.zones, 50, 'No IoT assets are registered.')}
+${table([['Asset', (a) => a.name], ['Type', (a) => a.type], ['Criticality', (a) => a.criticality], ['Zone', (a) => a.zone], ['IP', (a) => a.ip], ['State', (a) => a.state], ['Gateways', (a) => a.gateways]], ev.iot.coverageRows.rows.filter((a: any) => a.state !== 'PROTECTED'), 50, ev.iot.assets === 0 ? '' : 'Every enabled IoT asset is protected.')}
+${ev.iot.coverageRows.rows.some((a: any) => a.cleartext) ? `<p class="muted">Assets that allow cleartext protocols (no encryption or authentication by design):</p>${table([['Asset', (a) => a.name], ['Zone', (a) => a.zone], ['Cleartext protocols allowed', (a) => a.cleartext]], ev.iot.coverageRows.rows.filter((a: any) => a.cleartext), 50)}` : ''}
 <h2>Access and credentials</h2>
 <p class="muted">${ev.access.active} active accounts (${Object.entries(ev.access.roleCounts).map(([k, v]) => `${esc(k)}: ${v}`).join(', ')}); directory login ${ev.access.ldapEnabled ? 'enabled' : 'not enabled'}; ${ev.credentials.ssh} SSH credentials.</p>
 ${table([['Account', (u) => u.username], ['Roles', (u) => (u.roles ?? []).join(', ')], ['Last login', (u) => (u.neverLoggedIn ? 'never' : fmtDate(u.lastLoginAt))], ['Days', (u) => u.ageDays]], ev.access.inactive.rows, 30, `No active account is inactive for more than ${content.parameters.inactiveUserDays} days.`)}

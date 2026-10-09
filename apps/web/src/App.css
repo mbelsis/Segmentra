@@ -312,6 +312,44 @@ button {
   min-height: 32px;
 }
 
+/* Same size as .btn-secondary, tinted so row actions (check, view) read as a different group from Edit */
+.btn-action {
+  background: #e6eef0;
+  color: #2f5560;
+  border: 1px solid #b9cfd4;
+}
+
+.btn-action:hover:not(:disabled) {
+  background: #d8e6e9;
+  color: #1f3f48;
+}
+
+.btn-action:disabled {
+  background: #f0ebe2;
+  border-color: #d4c9b8;
+  color: #97846c;
+  cursor: not-allowed;
+}
+
+/* Inventory row actions: one aligned column, every button the same size as Edit */
+.host-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  min-width: 150px;
+}
+
+.host-actions .btn-small,
+.host-actions .tooltip-wrapper {
+  width: 100%;
+}
+
+.host-actions .btn-small {
+  white-space: nowrap;
+  text-align: center;
+}
+
 .btn-danger {
   background: #a63d2f;
   color: #fdfcf9;
@@ -439,7 +477,7 @@ small {
 /* Tooltip styles */
 .tooltip-wrapper {
   position: relative;
-  display: inline-block;
+  display: inline-flex;
 }
 
 .tooltip-wrapper:hover .tooltip {

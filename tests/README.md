@@ -246,3 +246,7 @@ It does not currently validate:
 - policy testing sessions
 
 Those can be added later as separate integration scenarios rather than overloading this one.
+
+## IoT Checks
+
+Run `npm run test:integration:iot` against a running Segmentra API with Docker available (the unit tests of the parsers run with `npm run test:unit:iot`). It starts a gateway container (sshd, iptables, a real ARP table) and two device containers, then checks through the API: the protocol catalog, the `service:` shorthand in policy documents, passive discovery over SSH and the import of discovered devices, the OUI vendor list, coverage states before and after a real approved deployment, and the compliance report figures. It removes its containers, network, test vendor entry and assets, and leaves its users and policy sets in the development database. It does not cover the complete IEEE OUI file or real devices. See [OT/IoT](../docs/iot.md).

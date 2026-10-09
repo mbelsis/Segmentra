@@ -185,7 +185,39 @@ Also verified:
 
 ---
 
-## 8. Limitations and what is not tested
+## 8. Industrial protocols, coverage and discovery
+
+### Service shorthand (protocol catalog)
+
+Segmentra knows the default ports of about 35 common OT/IoT services (Modbus/TCP 502, DNP3 20000, EtherNet/IP 44818, S7/ISO-TSAP 102, OPC UA 4840/4843, BACnet/IP udp 47808, MQTT 1883/8883, CoAP, RTSP, DICOM, SNMP and others). Each has a category, a **security** flag (`cleartext`, `encrypted` or `mixed`) and a note.
+
+- **Web UI:** in the rule form, "Common service (optional)" fills protocol and ports. Rule lists show service chips; cleartext services are coloured.
+- **Policy as code:** a rule may use `service: modbus-tcp` instead of `protocol` and `ports`. A service on several transports (for example DNP3 on tcp and udp) expands into one rule per transport with consecutive order numbers. Using `service` together with `protocol`, an unknown service, or an order collision is an error.
+- **API:** `GET /api/iot/protocols` returns the catalog.
+
+This is **port matching only**. Segmentra does not inspect the traffic, so a service on a non-default port is not recognised and nothing checks that the traffic really is the named protocol.
+
+### Protection coverage
+
+The **Coverage** tab (`GET /api/iot/coverage`) answers "is something protecting each enabled asset, and what is allowed to reach it?". Every asset is in one state: `NO_GATEWAY`, `NO_IP`, `GATEWAY_NOT_DEPLOYED`, `PENDING_DEPLOY` (assignment or change newer than the gateway's last deployment) or `PROTECTED`. Per asset it lists gateways and the FORWARD rules that allow traffic to it (matched by IoT asset, tag, VLAN or CIDR destination), with service names and whether a cleartext service is allowed. Totals are also given per zone.
+
+It is derived from what Segmentra **recorded** (assignments, last successful deployment, rules). It does not log in to gateways, so a change made on a gateway by hand is not seen.
+
+### Passive discovery
+
+The **Discovery** tab (`POST /api/iot/discover`, operator/admin) reads a gateway's neighbour table (`ip neigh` and `/proc/net/arp`) over SSH with read-only commands and no sudo. Nothing is sent to the devices. Entries that are failed, incomplete, multicast or link-local are dropped. Each device is shown as `candidate`, `known` (already an asset) or `managed_host` (already in the inventory). Selected candidates are imported (`POST /api/iot/discover/import`, at most 200 per call) as assets assigned to that gateway; the vendor is looked up again on the server.
+
+**Vendors** come from the IEEE OUI list, which is not bundled: import `oui.csv` or `oui.txt` as admin (`POST /api/iot/oui`, `?replace=true` to replace). Locally administered (randomised) MAC addresses have no vendor. The suggested asset type is a guess from keywords in the vendor name and should be reviewed.
+
+Only devices that talked to the gateway recently appear; a quiet PLC may be missing and a stale entry may show a device that is gone.
+
+### Compliance reports
+
+Reports include IoT coverage: "IoT assets protected" and "cleartext services allowed" measurements (used by ISO 27001 A.8.22 and SOC 2 CC6.6), an "IoT / OT protection" section in the HTML and an `iot_coverage` CSV dataset.
+
+---
+
+## 9. Limitations and what is not tested
 
 - Changes to asset assignments, asset IPs or the enabled flag take effect only on the gateway's **next deployment**. They are not pushed automatically.
 - Disabled assets, and assets without an IP address, are **not** protected. An asset IP that is not a valid IP/CIDR makes the deployment to that gateway **fail** with a compile error rather than silently leaving the device unprotected.
@@ -196,6 +228,8 @@ Also verified:
 - Kubernetes NetworkPolicy export skips FORWARD rules with a warning.
 - Switching a host's backend does not migrate/remove the previous backend's policy. Remove it through its original backend first. Native readiness rejects remaining raw Segmentra objects to avoid double enforcement.
 - **Native firewalld/UFW:** gateway rules compile into native artifacts, but routed gateway traffic is not yet tested live. Learning/log-only sessions are unsupported; the learning workflow above applies only to raw nftables/iptables. Native removal deletes permanent Segmentra objects/blocks; the manager's unrelated forwarding rules remain effective.
+- **Not supported yet:** deep protocol inspection (function codes, read versus write), ingestion of flow data (NetFlow/sFlow/conntrack), active scanning, and discovery by DHCP, LLDP or SNMP.
+- **Catalog, coverage and discovery, not tested yet:** more than two devices behind one gateway, a gateway with IPv6-only neighbours, the complete IEEE OUI file (about 30,000 entries; only a small fixture was imported), a real PLC or camera, a bridged (switch-like) gateway whose neighbour table lacks devices, and the Coverage and Discovery tabs on a very large asset list. Tested: `npm run test:integration:iot` (a gateway container with a real ARP table, two devices, a real deployment) and a manual check of the tabs in Chrome.
 - **Not tested live:** IPv6 protected devices and IPv6 FORWARD rules (covered by compiler output only), the Ansible executor path with FORWARD rules (it uses the same host script as SSH Direct), REVERT expiry on a gateway, multiple gateways protecting the same device, and real OT protocols beyond a TCP listener on port 502.
 
 ---
@@ -236,6 +270,12 @@ Also verified:
 - `POST /api/iot-assets/:id/gateways` with `{ "gatewayIds": [] }`: assign gateways
 - `DELETE /api/iot-assets/:id/gateways/:hostId`: unassign
 - `POST /api/iot-assets/:id/tags`, `GET /api/iot-assets/:id/flows`, `POST /api/iot-assets/:id/baseline`
+
+### Catalog, coverage and discovery
+
+- `GET /api/iot/protocols`, `GET /api/iot/coverage`, `GET /api/iot/oui/status`
+- `POST /api/iot/oui` (admin; csv or text, up to 20 MB, `?replace=true`)
+- `POST /api/iot/discover` with `{ "gatewayId" }` (operator/admin; the host must be tagged `iot-gateway`), `POST /api/iot/discover/import`
 
 ### Gateways
 

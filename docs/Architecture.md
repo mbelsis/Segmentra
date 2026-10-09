@@ -382,6 +382,11 @@ Secret fields (API keys, tokens) are masked in responses (e.g. `••••abcd
 - `GET /k8s/clusters/:id/network-policies`
 - `POST /k8s/clusters/:id/deploy-policy` — Body: `{ policyVersionId, namespace, policyName }`. Generates an Ingress-only NetworkPolicy manifest from an `APPROVED`/`DEPLOYED` version, stores it with status `GENERATED` and returns it with warnings for rules that cannot be expressed (DENY, FORWARD, ICMP, ...). The manifest is **not** applied to the cluster (UI: "Generate NetworkPolicy")
 
+### OT/IoT catalog, coverage and discovery (mounted at `/iot`)
+
+- `GET /iot/protocols`, `GET /iot/coverage`, `GET /iot/oui/status`; `POST /iot/oui` (admin)
+- `POST /iot/discover` `{ gatewayId }` (operator/admin, read-only SSH), `POST /iot/discover/import`
+
 ### OT/IoT Assets (read: all roles; write: `operator`, `admin`)
 
 - `GET /iot-assets?assetType=&zone=&vlanId=`, `GET /iot-assets/:id`

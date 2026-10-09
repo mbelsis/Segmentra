@@ -639,7 +639,7 @@ export function PolicySetsPage() {
                     </div>
                   </td>
                   <td>
-                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                    <div className="host-actions">
                       {canManage && (
                         <button
                           onClick={() => createVersion(ps.id)}
@@ -649,7 +649,7 @@ export function PolicySetsPage() {
                           New Version
                         </button>
                       )}
-                      <button onClick={() => navigate(`/policy-set/${ps.id}`)} className="btn-small">View</button>
+                      <button onClick={() => navigate(`/policy-set/${ps.id}`)} className="btn-small btn-action">View</button>
                       {canManage && (ps.version_count === 0 || ps.version_count === '0') && (
                         <button onClick={() => deletePolicySet(ps.id, ps.name)} className="btn-small btn-danger">Delete</button>
                       )}

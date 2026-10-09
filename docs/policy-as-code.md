@@ -124,6 +124,10 @@ spec:
 
 **Strict validation.** Unknown keys are errors, so a typo such as `port:` instead of `ports:` is reported instead of silently ignored. All problems of a document are reported together, each with its path (`spec.rules[2].source`): schema errors, unknown or ambiguous names, duplicate `order` values, invalid CIDRs and ports, FORWARD rules without destination, and the same rule semantics the UI enforces. Documents are limited to 1 MB and 5000 rules.
 
+### `service:` shorthand
+
+Instead of `protocol` and `ports`, a rule can name a service from the OT/IoT catalog, for example `service: modbus-tcp`. A service on more than one transport (DNP3 on tcp and udp) becomes one rule per transport with consecutive order numbers, so leave room in `order`. `service` together with `protocol`, an unknown service (the error lists the known ones) or a collision in order numbers is rejected. See [OT/IoT guide](iot.md#8-industrial-protocols-coverage-and-discovery).
+
 ## What an import does
 
 | Situation | Result |

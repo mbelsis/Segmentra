@@ -1164,13 +1164,13 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                     </td>
                     <td>{h.enabled ? '✓' : '✗'}</td>
                     <td>
-                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                      <div className="host-actions">
                         {canEdit && <button onClick={() => editHost(h)} className="btn-small btn-secondary">Edit</button>}
                         {canEdit && (<>
                         <div className="tooltip-wrapper">
                           <button 
                             onClick={() => checkHostCompliance(h.id)} 
-                            className="btn-small"
+                            className="btn-small btn-action"
                             disabled={checkingCompliance.has(h.id) || !h.enabled}
                           >
                             Check Compliance
@@ -1182,7 +1182,7 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                         <div className="tooltip-wrapper">
                           <button 
                             onClick={() => checkHostReadiness(h.id)} 
-                            className="btn-small"
+                            className="btn-small btn-action"
                             disabled={checkingReadiness.has(h.id) || !h.enabled}
                           >
                             Check Readiness
@@ -1194,7 +1194,7 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                         </>)}
                         <button 
                           onClick={() => setVisualizationHost({ id: h.id, hostname: h.hostname })} 
-                          className="btn-small"
+                          className="btn-small btn-action"
                           disabled={!h.enabled}
                           title="View visual diagram of firewall policies"
                         >

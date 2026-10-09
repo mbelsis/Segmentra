@@ -10,6 +10,7 @@ import {
   ruleCommentSchema,
   validateRuleSemantics,
 } from '../lib/rule-validation.js';
+import { PROTOCOLS, expandService } from './iot-protocols.js';
 import { createDraftVersion, insertRule, loadVersionRules, lockPolicySetAndGetBase } from './policy-version-clone.js';
 
 /**
@@ -57,7 +58,9 @@ const ruleDocSchema = z
     order: z.number().int().min(0).optional(),
     direction: z.enum(['IN', 'OUT', 'BOTH', 'FORWARD']).default('IN'),
     action: z.enum(['ALLOW', 'DENY']),
-    protocol: z.enum(['tcp', 'udp', 'icmp', 'any']),
+    // Either protocol (+ ports) or a service from the IoT/OT protocol catalog (docs/iot.md), which expands to one rule per transport.
+    protocol: z.enum(['tcp', 'udp', 'icmp', 'any']).optional(),
+    service: z.string().trim().min(1).optional(),
     ports: z.union([z.string(), z.number().int()]).nullable().optional(),
     source: refSchema,
     destination: refSchema.nullable().optional(), // FORWARD rules only
@@ -265,9 +268,24 @@ export async function normalizeDocument(raw: unknown, db: Pick<PoolClient, 'quer
       continue;
     }
     const r = ruleParsed.data;
-    const orderIndex = r.order ?? (i + 1) * 10;
-    if (seenOrders.has(orderIndex)) problems.push({ path: `${p}.order`, message: `order ${orderIndex} is used more than once` });
-    seenOrders.add(orderIndex);
+    const baseOrder = r.order ?? (i + 1) * 10;
+
+    // protocol/ports, or a catalog service (one rule per transport: DNP3 is tcp and udp, so it becomes two rules)
+    const explicitPorts = r.ports === undefined || r.ports === null || String(r.ports).trim() === '' ? null : String(r.ports).replace(/\s+/g, '');
+    let variants: Array<{ protocol: string; ports: string | null }> = [];
+    if (r.service !== undefined) {
+      if (r.protocol !== undefined || explicitPorts !== null) {
+        problems.push({ path: `${p}.service`, message: 'use either "service" or "protocol"/"ports", not both' });
+      } else {
+        const ex = expandService(r.service);
+        if (!ex) problems.push({ path: `${p}.service`, message: `unknown service "${r.service}"; known services: ${PROTOCOLS.map((x) => x.id).join(', ')}` });
+        else variants = ex.map((t) => ({ protocol: t.protocol, ports: t.ports }));
+      }
+    } else if (r.protocol === undefined) {
+      problems.push({ path: `${p}.protocol`, message: 'a rule needs "protocol" (or "service")' });
+    } else {
+      variants = [{ protocol: r.protocol, ports: explicitPorts }];
+    }
 
     const source = resolveRef(`${p}.source`, r.source, refs, problems, ['CIDR', 'TAG', 'VLAN', 'HOST']);
     let destination: { type: string; value: string } | null = null;
@@ -277,23 +295,30 @@ export async function normalizeDocument(raw: unknown, db: Pick<PoolClient, 'quer
     } else if (r.destination) {
       problems.push({ path: `${p}.destination`, message: `only FORWARD rules have a destination (direction is ${r.direction})` });
     }
-    const ports = r.ports === undefined || r.ports === null || String(r.ports).trim() === '' ? null : String(r.ports).replace(/\s+/g, '');
-    if (source) {
-      const issues = validateRuleSemantics({
-        protocol: r.protocol, ports, sourceType: source.type, sourceValue: source.value, direction: r.direction,
-        destinationType: destination?.type ?? null, destinationValue: destination?.value ?? null,
-      });
-      for (const m of issues) problems.push({ path: p, message: m });
-    }
     const scoped = r.interfaceScope ? normalizeInterfaceScope(r.interfaceScope, `${p}.interfaceScope`, problems) : null;
-    rules.push({
-      orderIndex, direction: r.direction, action: r.action, protocol: r.protocol, ports,
-      source_type: source?.type ?? 'CIDR', source_value: source?.value ?? '',
-      destination_type: destination?.type ?? null, destination_value: destination?.value ?? null,
-      log_mode: r.log, comment: r.comment ? r.comment.trim() : null,
-      use_policy_interface_scope: !scoped,
-      interface_scope_type: scoped?.type ?? null, interface_scope_roles: scoped?.roles ?? null, interface_scope_names: scoped?.names ?? null,
-    });
+
+    for (const [vi, variant] of variants.entries()) {
+      const orderIndex = baseOrder + vi;
+      if (seenOrders.has(orderIndex)) {
+        problems.push({ path: `${p}.order`, message: `order ${orderIndex} is used more than once${r.service && vi > 0 ? ' (a service with several transports uses consecutive order numbers)' : ''}` });
+      }
+      seenOrders.add(orderIndex);
+      if (source) {
+        const issues = validateRuleSemantics({
+          protocol: variant.protocol, ports: variant.ports, sourceType: source.type, sourceValue: source.value, direction: r.direction,
+          destinationType: destination?.type ?? null, destinationValue: destination?.value ?? null,
+        });
+        for (const m of issues) problems.push({ path: p, message: m });
+      }
+      rules.push({
+        orderIndex, direction: r.direction, action: r.action, protocol: variant.protocol, ports: variant.ports,
+        source_type: source?.type ?? 'CIDR', source_value: source?.value ?? '',
+        destination_type: destination?.type ?? null, destination_value: destination?.value ?? null,
+        log_mode: r.log, comment: r.comment ? r.comment.trim() : null,
+        use_policy_interface_scope: !scoped,
+        interface_scope_type: scoped?.type ?? null, interface_scope_roles: scoped?.roles ?? null, interface_scope_names: scoped?.names ?? null,
+      });
+    }
   }
   if (problems.length) return { problems };
   rules.sort((a, b) => a.orderIndex - b.orderIndex);

@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 
 import { api, errorMessage } from '../lib/api';
 import { useAuth, hasRole } from '../lib/auth-context';
+import { servicesForRule, type CatalogProtocol } from '../lib/iot-services';
 
 export function PolicyVersionPage() {
   const { versionId } = useParams();
@@ -20,6 +21,7 @@ export function PolicyVersionPage() {
   const [managementVlan, setManagementVlan] = useState<any>(null);
   // undefined = not loaded / not visible to this user (setting is admin-only)
   const [managementVlanLoaded, setManagementVlanLoaded] = useState(false);
+  const [catalog, setCatalog] = useState<CatalogProtocol[]>([]);
   const [showAddRule, setShowAddRule] = useState(false);
   const [editingRule, setEditingRule] = useState<string | null>(null);
   const [error, setError] = useState<string>('');
@@ -45,6 +47,11 @@ export function PolicyVersionPage() {
   const [policyInterfaceScopeType, setPolicyInterfaceScopeType] = useState<'ALL_INTERFACES' | 'INTERFACE_ROLE' | 'INTERFACE_NAME'>('INTERFACE_ROLE');
   const [policyInterfaceScopeRoles, setPolicyInterfaceScopeRoles] = useState<string[]>([]);
   const [policyInterfaceScopeNames, setPolicyInterfaceScopeNames] = useState<string[]>([]);
+
+  useEffect(() => {
+    // Catalog of common OT/IoT services (labels in the rule table, picker in the rule form); optional, so failures are ignored
+    api.iot.protocols().then((r) => setCatalog(r.protocols as CatalogProtocol[])).catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!versionId) return;
@@ -368,6 +375,34 @@ export function PolicyVersionPage() {
                   <option value="DENY">DENY</option>
                 </select>
               </div>
+              {catalog.length > 0 && (
+                <div className="form-group">
+                  <label>Common service (optional)</label>
+                  <select
+                    value=""
+                    onChange={(e) => {
+                      const [proto, ports] = e.target.value.split('|');
+                      if (!proto) return;
+                      setFormProtocol(proto as 'tcp' | 'udp');
+                      setFormPorts(ports);
+                    }}
+                  >
+                    <option value="">Fill protocol and ports from a service...</option>
+                    {Array.from(new Set(catalog.map((c) => c.category))).map((cat) => (
+                      <optgroup key={cat} label={cat[0].toUpperCase() + cat.slice(1)}>
+                        {catalog.filter((c) => c.category === cat).flatMap((c) =>
+                          c.transports.map((t) => (
+                            <option key={`${c.id}-${t.protocol}`} value={`${t.protocol}|${t.ports}`}>
+                              {c.name} ({t.protocol} {t.ports}){c.security === 'cleartext' ? ' - cleartext' : ''}
+                            </option>
+                          ))
+                        )}
+                      </optgroup>
+                    ))}
+                  </select>
+                  <small>Default ports; a service that uses both tcp and udp needs one rule each.</small>
+                </div>
+              )}
               <div className="form-group">
                 <label>Protocol</label>
                 <select value={formProtocol} onChange={(e) => setFormProtocol(e.target.value as any)}>
@@ -648,7 +683,12 @@ export function PolicyVersionPage() {
                 <td><code>{r.direction}</code></td>
                 <td><strong className={r.action === 'ALLOW' ? 'allow' : 'deny'}>{r.action}</strong></td>
                 <td><code>{r.protocol}</code></td>
-                <td>{r.ports || '-'}</td>
+                <td>
+                  {r.ports || '-'}
+                  {servicesForRule(catalog, r.protocol, r.ports).map((s) => (
+                    <span key={s.id} title={s.note} style={{ display: 'inline-block', marginLeft: 4, padding: '0 6px', borderRadius: 4, fontSize: '11px', background: s.security === 'cleartext' ? '#fdf6ec' : '#eef4e8', color: s.security === 'cleartext' ? '#8b5a14' : '#3f5a26', border: '1px solid #e0d6c6' }}>{s.name}</span>
+                  ))}
+                </td>
                 <td>
                   <code>{r.source_type}</code>: {describeEndpoint(r.source_type, r.source_value)}
                 </td>

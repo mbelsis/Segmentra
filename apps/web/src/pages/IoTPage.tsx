@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { api } from '../lib/api';
 import { useAuth, hasRole } from '../lib/auth-context';
+import { IotCoverageTab } from '../components/IotCoverageTab';
+import { IotDiscoveryTab } from '../components/IotDiscoveryTab';
 
 const ASSET_TYPES = ['plc', 'hmi', 'sensor', 'camera', 'printer', 'hvac', 'medical', 'other'];
 const CRITICALITY_COLORS: Record<string, string> = { critical: '#a63d2f', high: '#c47a1a', medium: '#8b6914', low: '#5a7a3a' };
@@ -17,7 +19,7 @@ export function IoTPage() {
   const [allGatewayHosts, setAllGatewayHosts] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [tab, setTab] = useState<'assets' | 'gateways'>('assets');
+  const [tab, setTab] = useState<'assets' | 'coverage' | 'gateways' | 'discovery'>('assets');
   const [filterType, setFilterType] = useState('');
   const [filterGateway, setFilterGateway] = useState('');
   const [filterVlan, setFilterVlan] = useState('');
@@ -181,7 +183,9 @@ export function IoTPage() {
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
         <button onClick={() => { setTab('assets'); load(); }} className={tab === 'assets' ? 'btn-primary' : 'btn-secondary'}>Assets ({assets.length})</button>
+        <button onClick={() => setTab('coverage')} className={tab === 'coverage' ? 'btn-primary' : 'btn-secondary'}>Coverage</button>
         <button onClick={loadGateways} className={tab === 'gateways' ? 'btn-primary' : 'btn-secondary'}>Gateways ({allGatewayHosts.length})</button>
+        <button onClick={() => setTab('discovery')} className={tab === 'discovery' ? 'btn-primary' : 'btn-secondary'}>Discovery</button>
       </div>
 
       {/* ============ ASSETS TAB ============ */}
@@ -336,6 +340,9 @@ export function IoTPage() {
           </div>
         </>
       )}
+
+      {tab === 'coverage' && <IotCoverageTab />}
+      {tab === 'discovery' && <IotDiscoveryTab canEdit={canEdit} isAdmin={hasRole(roles, 'admin')} />}
 
       {/* ============ GATEWAYS TAB ============ */}
       {tab === 'gateways' && (

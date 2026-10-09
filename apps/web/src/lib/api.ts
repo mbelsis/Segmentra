@@ -688,6 +688,19 @@ export const api = {
     // Gateway views
     gateways: () => request<{ gateways: any[] }>('/iot-assets/gateways/list'),
     gateway: (hostId: string) => request<{ gateway: any; protectedAssets: any[]; recentDeployments: any[] }>(`/iot-assets/gateways/${hostId}`),
+    // Protocol catalog, protection coverage, passive discovery from a gateway, vendor list
+    protocols: () => request<{ protocols: any[] }>('/iot-assets/protocols'),
+    coverage: () => request<{ assets: any[]; summary: Record<string, number>; zones: any[] }>('/iot-assets/coverage'),
+    discover: (gatewayId: string) => request<any>('/iot-assets/discover', { method: 'POST', body: JSON.stringify({ gatewayId }) }),
+    discoverImport: (body: any) => request<{ created: any[]; skipped: any[]; note: string }>('/iot-assets/discover/import', { method: 'POST', body: JSON.stringify(body) }),
+    ouiStatus: () => request<{ entries: number }>('/iot-assets/oui/status'),
+    importOui: async (text: string, replace: boolean) => {
+      const token = getToken();
+      const resp = await fetch(`${API_BASE}/iot-assets/oui?replace=${replace}`, { method: 'POST', headers: { 'content-type': 'text/csv', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: text });
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new ApiError(body.message || body.error || `${resp.status} ${resp.statusText}`, resp.status, body);
+      return body as { imported: number; entries: number };
+    },
   },
 
   // === Notifications ===
