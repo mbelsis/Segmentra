@@ -61,14 +61,12 @@ export function AppShell() {
         {sectionLabel('Infrastructure')}
         <NavLink to="/inventory">Inventory</NavLink>
         {isOperator && <NavLink to="/topology">Topology</NavLink>}
+        <NavLink to="/kubernetes">Kubernetes</NavLink>
+        <NavLink to="/iot">OT/IoT</NavLink>
 
         {sectionLabel('Analysis')}
         <NavLink to="/troubleshoot">Troubleshoot</NavLink>
         {(isOperator || isApprover) && <NavLink to="/policy-testing">Policy Impact Analysis</NavLink>}
-
-        {sectionLabel('Extended')}
-        <NavLink to="/kubernetes">Kubernetes</NavLink>
-        <NavLink to="/iot">OT/IoT</NavLink>
 
         <NavLink to="/security-audit">Security Audit</NavLink>
         <NavLink to="/compliance-report">Compliance Report</NavLink>

@@ -6,7 +6,7 @@ import { pool } from '../db/pool.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { computeIotCoverage } from '../services/iot-coverage.js';
 import {
-  NEIGHBOR_COMMAND, isLocallyAdministered, normalizeMac, ouiPrefix, parseNeighbors, parseOuiList, suggestAssetType,
+  NEIGHBOR_COMMAND, buildSweepCommand, isLocallyAdministered, normalizeMac, ouiPrefix, parseNeighbors, parseOuiList, parseSweepCidr, suggestAssetType,
 } from '../services/iot-discovery.js';
 import { PROTOCOLS } from '../services/iot-protocols.js';
 import { getSshCredentialForHost, sshAuthFields, type MaterializedSshCredential } from '../services/ssh-credentials.js';
@@ -89,8 +89,22 @@ async function loadGateway(id: string) {
 
 // Read the gateway's neighbour (ARP/NDP) table over SSH and describe what is on it. Read-only, no sudo, nothing is scanned.
 iotExtrasRouter.post('/discover', requireRole('operator', 'admin'), async (req, res) => {
-  const parsed = z.object({ gatewayId: z.string().uuid() }).safeParse(req.body);
+  const parsed = z.object({
+    gatewayId: z.string().uuid(),
+    // Opt-in active probe of a subnet behind the gateway: it sends traffic to the devices, so it needs an explicit acknowledgement
+    sweepCidr: z.string().trim().max(32).optional(),
+    confirmActiveProbe: z.boolean().optional(),
+  }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
+  let sweep: { cidr: string; ips: string[] } | null = null;
+  if (parsed.data.sweepCidr) {
+    if (parsed.data.confirmActiveProbe !== true) {
+      return res.status(400).json({ error: 'probe_not_confirmed', message: 'An active probe sends one ICMP echo to every address of the subnet. Confirm that this is acceptable on this network (it can disturb fragile OT devices).' });
+    }
+    const sw = parseSweepCidr(parsed.data.sweepCidr);
+    if (!sw.ok) return res.status(400).json({ error: 'invalid_sweep_subnet', message: sw.error });
+    sweep = { cidr: sw.cidr, ips: sw.ips };
+  }
   const gw = await loadGateway(parsed.data.gatewayId);
   if (!gw) return res.status(404).json({ error: 'gateway_not_found', message: 'The host does not exist or does not carry the iot-gateway tag' });
   if (!gw.mgmt_ip) return res.status(409).json({ error: 'no_management_ip', message: 'The gateway has no management IP' });
@@ -98,7 +112,7 @@ iotExtrasRouter.post('/discover', requireRole('operator', 'admin'), async (req, 
   let cred: MaterializedSshCredential | null = null;
   try {
     cred = await getSshCredentialForHost(gw.id);
-    const r = await runSshCommand({ hostname: gw.hostname, ip: String(gw.mgmt_ip).split('/')[0], port: Number(gw.ssh_port) || 22, ...sshAuthFields(cred) }, NEIGHBOR_COMMAND, { timeoutMs: 30_000 });
+    const r = await runSshCommand({ hostname: gw.hostname, ip: String(gw.mgmt_ip).split('/')[0], port: Number(gw.ssh_port) || 22, ...sshAuthFields(cred) }, sweep ? buildSweepCommand(sweep.ips) : NEIGHBOR_COMMAND, { timeoutMs: sweep ? 120_000 : 30_000 });
     if (r.exitCode !== 0) {
       return res.status(502).json({ error: 'ssh_failed', message: `Could not read the neighbour table: ${(r.stderr || `exit code ${r.exitCode}`).trim().split('\n').slice(-1)[0].slice(0, 300)}` });
     }
@@ -121,10 +135,11 @@ iotExtrasRouter.post('/discover', requireRole('operator', 'admin'), async (req, 
     });
     await pool.query(
       `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata) VALUES ($1, 'IOT_DISCOVER', 'host', $2, $3)`,
-      [req.auth!.userId ?? null, gw.id, JSON.stringify({ gateway: gw.hostname, neighbors: neighbors.length, candidates: devices.filter((d) => d.status === 'candidate').length })]
+      [req.auth!.userId ?? null, gw.id, JSON.stringify({ gateway: gw.hostname, neighbors: neighbors.length, candidates: devices.filter((d) => d.status === 'candidate').length, ...(sweep ? { activeProbe: sweep.cidr, addressesProbed: sweep.ips.length } : {}) })]
     );
     res.json({
       gateway: { id: gw.id, hostname: gw.hostname }, scannedAt: new Date().toISOString(), ouiEntries: ouiCount, devices,
+      probe: sweep ? { cidr: sweep.cidr, addresses: sweep.ips.length } : null,
       counts: { total: devices.length, candidates: devices.filter((d) => d.status === 'candidate').length, known: devices.filter((d) => d.status === 'known').length, managedHosts: devices.filter((d) => d.status === 'managed_host').length },
     });
   } catch (e: any) {

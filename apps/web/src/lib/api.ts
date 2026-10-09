@@ -695,7 +695,8 @@ export const api = {
     // Protocol catalog, protection coverage, passive discovery from a gateway, vendor list
     protocols: () => request<{ protocols: any[] }>('/iot-assets/protocols'),
     coverage: () => request<{ assets: any[]; summary: Record<string, number>; zones: any[] }>('/iot-assets/coverage'),
-    discover: (gatewayId: string) => request<any>('/iot-assets/discover', { method: 'POST', body: JSON.stringify({ gatewayId }) }),
+    discover: (gatewayId: string, probe?: { sweepCidr: string }) =>
+      request<any>('/iot-assets/discover', { method: 'POST', body: JSON.stringify(probe ? { gatewayId, sweepCidr: probe.sweepCidr, confirmActiveProbe: true } : { gatewayId }) }),
     discoverImport: (body: any) => request<{ created: any[]; skipped: any[]; note: string }>('/iot-assets/discover/import', { method: 'POST', body: JSON.stringify(body) }),
     ouiStatus: () => request<{ entries: number }>('/iot-assets/oui/status'),
     importOui: async (text: string, replace: boolean) => {

@@ -85,7 +85,7 @@ Hosts can be Swarm nodes (`hosts.swarm_cluster/swarm_role/swarm_addr/swarm_encry
 
 ### IoT catalog, coverage and discovery
 
-`services/iot-protocols.ts` (port catalog, `servicesForRule`, `expandService` used by policy-as-code `service:`), `services/iot-coverage.ts` (`computeIotCoverage`, derived from recorded deployments; also used by the compliance report), `services/iot-discovery.ts` (neighbour-table parsing, OUI parsing) and `routes/iot-extras.ts` (mounted at `/api/iot` BEFORE `iotAssetsRouter`; discovery runs read-only SSH without sudo). Migration 038 (`oui_vendors`, `iot_asset_gateways.assigned_at`). UI: `IotCoverageTab`, `IotDiscoveryTab`, `lib/iot-services.ts`. Docs: `docs/iot.md` section 8; tests: `npm run test:integration:iot`, `npm run test:unit:iot`.
+`services/iot-protocols.ts` (port catalog, `servicesForRule`, `expandService` used by policy-as-code `service:`), `services/iot-coverage.ts` (`computeIotCoverage`, derived from recorded deployments; also used by the compliance report), `services/iot-discovery.ts` (neighbour-table parsing, OUI parsing, `parseSweepCidr`/`buildSweepCommand` for the opt-in ICMP probe, ≤/24, needs `confirmActiveProbe`) and `routes/iot-extras.ts` (mounted at `/api/iot` BEFORE `iotAssetsRouter`; discovery runs read-only SSH without sudo). Migration 038 (`oui_vendors`, `iot_asset_gateways.assigned_at`). UI: `IotCoverageTab`, `IotDiscoveryTab`, `lib/iot-services.ts`. Docs: `docs/iot.md` section 8; tests: `npm run test:integration:iot`, `npm run test:unit:iot`.
 
 ### Per-host serialization
 

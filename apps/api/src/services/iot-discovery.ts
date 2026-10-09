@@ -63,6 +63,46 @@ export function parseNeighbors(text: string): Neighbor[] {
 /** Read-only command run on the gateway (no sudo: the neighbour table is world-readable). */
 export const NEIGHBOR_COMMAND = "PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; ip -o neigh show 2>/dev/null; echo '---'; cat /proc/net/arp 2>/dev/null; true";
 
+// ---- Active probe (opt-in) ------------------------------------------------------------------------------------------
+
+/** The largest subnet a probe may cover: a /24 (254 hosts). Bigger sweeps belong in a real scanner, not in a web click. */
+export const MAX_SWEEP_PREFIX = 24;
+
+/**
+ * Validate the subnet of an active probe and list its host addresses (network and broadcast addresses left out).
+ * Only IPv4 CIDRs of /24 to /32 are accepted; the addresses are produced here, never copied from the input, so the
+ * list is safe to put into a shell command.
+ */
+export function parseSweepCidr(value: string): { ok: true; cidr: string; ips: string[] } | { ok: false; error: string } {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\/(\d{1,2}))?$/.exec(String(value ?? '').trim());
+  if (!m) return { ok: false, error: 'Enter an IPv4 subnet such as 192.168.10.0/24' };
+  const o = m.slice(1, 5).map(Number);
+  if (o.some((n) => n > 255)) return { ok: false, error: 'Not a valid IPv4 address' };
+  const prefix = m[5] === undefined ? 32 : Number(m[5]);
+  if (prefix > 32) return { ok: false, error: 'The prefix length must be between 24 and 32' };
+  if (prefix < MAX_SWEEP_PREFIX) return { ok: false, error: `A probe covers at most a /${MAX_SWEEP_PREFIX} (254 addresses); ${value} is larger` };
+  const base = (((o[0] * 256 + o[1]) * 256 + o[2]) * 256 + o[3]) >>> 0;
+  const size = 2 ** (32 - prefix);
+  const first = Math.floor(base / size) * size;
+  const ips: string[] = [];
+  for (let i = 0; i < size; i += 1) {
+    if (prefix < 31 && (i === 0 || i === size - 1)) continue; // network and broadcast address
+    const n = first + i;
+    ips.push([(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.'));
+  }
+  const n0 = first;
+  return { ok: true, cidr: `${[(n0 >>> 24) & 255, (n0 >>> 16) & 255, (n0 >>> 8) & 255, n0 & 255].join('.')}/${prefix}`, ips };
+}
+
+/**
+ * Shell command for the gateway: one ICMP echo per address (32 at a time, 1 second each), then the neighbour table. Even a
+ * device that does not answer ping is learned through the ARP request the gateway sends; unused addresses stay out of the table.
+ */
+export function buildSweepCommand(ips: string[]): string {
+  if (!ips.every((ip) => /^\d{1,3}(\.\d{1,3}){3}$/.test(ip))) throw new Error('invalid address in the sweep list');
+  return `PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; n=0; for ip in ${ips.join(' ')}; do (ping -c 1 -W 1 $ip >/dev/null 2>&1) & n=$((n+1)); if [ $((n % 32)) -eq 0 ]; then wait; fi; done; wait; ${NEIGHBOR_COMMAND}`;
+}
+
 // ---- OUI vendor list ----------------------------------------------------------------------------------------------
 
 function csvRows(text: string): string[][] {

@@ -123,7 +123,7 @@ export function IoTPage() {
         <strong> gateway firewalls</strong> — Linux servers from the <a href="/inventory" style={{ color: '#8b6914' }}>Inventory</a> tagged <code>iot-gateway</code>.
         Firewall policies are deployed to the gateways using the normal policy pipeline (Policy Sets &#8594; Approve &#8594; Deploy).
         Use <a href="/inventory" style={{ color: '#8b6914' }}>VLANs</a> to define OT/IoT network zones (e.g., "OT Level 1", "Building Systems").
-        To discover what IoT devices actually communicate, run <a href="/troubleshoot" style={{ color: '#8b6914' }}>Firewall Learning</a> on the gateway host.
+        To find the devices behind a gateway, use the Discovery tab. To discover what they actually communicate, run <a href="/troubleshoot" style={{ color: '#8b6914' }}>Firewall Learning</a> on the gateway host.
       </p>
 
       {/* Workflow steps */}

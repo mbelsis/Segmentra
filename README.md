@@ -18,9 +18,46 @@ The platform enables:
 - **Audit trails**
 - **Compliance monitoring**
 - **Topology building**
+- **OT/IoT protection** through gateway firewalls, with device discovery
+- **Notifications** to Slack and webhooks on approvals, deployments and expiry
 - **Default access rules for each policy**
 
 **Future plans** include more integration adapters (SOAR, vulnerability databases), Kubernetes workload discovery from the cluster, and a real email notification channel. See [Future Work](#future-work).
+
+---
+
+## How it works: the whole flow
+
+Segmentra never changes a firewall on its own. Every change goes through the same path, and **nothing is deployed automatically after an approval**: a person has to create and start the deployment (or schedule it).
+
+```
+1 Build the inventory  ->  2 Policy set + scope  ->  3 Version + rules  ->  4 Approval  ->  5 Deployment  ->  6 Verify & operate
+```
+
+**1. Build your inventory** (*Inventory*, *OT/IoT*, *Kubernetes*)
+- **Linux servers:** add hosts by hand, **Bulk Import** a CSV, or let **Discovery** scan your networks for SSH and import what it finds. Group them with **tags** (also automatic, with **Auto-Tagging** rules) and **VLANs**. **Check Readiness** confirms Segmentra can log in, use sudo and find the firewall tool.
+- **OT/IoT devices:** pick a Linux host that sits in front of the devices, tag it `iot-gateway`, then open **OT/IoT**: register the devices by hand, or use the **Discovery** tab to list what the gateway sees (its ARP table, optionally an active ping probe of a subnet) and import the devices. Assign each device to its gateway. The devices themselves are never touched; the gateway firewall protects them. See [docs/iot.md](docs/iot.md).
+- **Kubernetes:** register each cluster under **Kubernetes** with its CNI and credentials, and optionally map workloads (pod labels) to tags. See [docs/kubernetes.md](docs/kubernetes.md).
+
+**2. Create a policy set and choose its scope** (*Policy Sets*)
+A policy set decides **where** its rules apply: all hosts with certain **tags**, hosts in a **VLAN**, or a **specific list of hosts**. You can start from scratch, from a **Template** (a reusable rule set such as "Web Server"; a template with auto-apply creates a DRAFT policy when its tag is first assigned), from the **Topology** page (draw flows between groups and generate a draft policy from them), from recommendations after **Firewall Learning**, or from a YAML file ([Policy as Code](#policy-as-code)). All of these only ever produce a `DRAFT`.
+
+**3. Add rules to a version** (*Policy Sets → New Version*)
+Each change is a new version. Add allow/deny rules (direction, protocol, ports, source; on gateways also FORWARD rules with a destination or IoT device). Before asking for approval you can check the effect with **Policy Impact Analysis**, **Troubleshoot** (would this traffic be allowed?) and the **Security Audit** for risky rules.
+
+**4. Request approval** (*Submit for Approval*, then *Approvals*)
+The author submits the version with an optional reason; it becomes `PENDING_APPROVAL` and read-only. A second person with the `approver` or `admin` role (never the author) reviews the rules and either approves or rejects with a reason. A rejected version is fixed and resubmitted; the author sees the outcome on the Dashboard and next to the policy set. Everything is written to the audit log, and the **notification channels** (Slack or webhook) can alert reviewers and authors.
+
+**5. Deploy it: a separate, manual step** (*Deployments*)
+After approval the version is only `APPROVED`; no rule is on any host yet. An operator or admin then:
+1. opens **Deployments → + Create Deployment** and selects the approved version, the target hosts and a mode (**Full**, **Canary** to try a few hosts first, or **Progressive** in batches);
+2. optionally **schedules** it for a maintenance window (it then starts by itself at that time) and sets an **expiry** (notify only, remove the rules, or revert to the previous version);
+3. clicks **Start** (high-risk deployments first need a second person's deployment approval).
+
+Segmentra backs up each host, applies the rules over SSH or Ansible, checks it can still reach the host (and rolls back if not), and records the result per host. The version then becomes `DEPLOYED`. For **IoT gateways** this is the same flow: their policy set is deployed to the gateway. For **Kubernetes**, open the approved version and **Generate NetworkPolicy**, then **Apply** it to a cluster (also a manual step); Segmentra can check and remove what it applied.
+
+**6. Verify and operate**
+**Check Compliance** finds rules changed by hand on a host (drift), **View Visualization** shows what a host allows, **Firewall Learning** and **Policy Impact Analysis** observe real traffic, and the **Audit Log**, **Compliance Report**, **Notifications** and **Integrations** (SIEM) give you the trail and the alerts. Details of every step, with roles, are in the [User Journey](#user-journey).
 
 ---
 
@@ -183,10 +220,10 @@ Supported Linux backends are **nftables, iptables, firewalld, and UFW**. Select 
 - **Deployment Warning** — deploying to IoT gateways triggers a warning about impact on protected devices
 - **Protocol Catalog** — about 35 OT/IoT services (Modbus/TCP, DNP3, EtherNet/IP, S7, OPC UA, BACnet, MQTT, ...) with default ports and a cleartext/encrypted flag; pick one in the rule form or write `service: modbus-tcp` in a policy document. Port matching only, no deep inspection
 - **Protection Coverage** — shows which assets are protected, by which gateway and which services are allowed to reach them (zones, cleartext warnings); it is derived from recorded deployments, not a live check
-- **Passive Discovery** — lists devices from a gateway's ARP/NDP table over SSH (nothing is sent to the devices), with vendors from an IEEE OUI list you import, and imports them as assets
+- **Discovery** — lists devices from a gateway's ARP/NDP table over SSH (passive: nothing is sent to the devices) and, as an explicit opt-in with a warning, probes a subnet of up to a /24 from the gateway with one ICMP echo per address to find quiet devices, with vendors from an IEEE OUI list you import, and imports them as assets
 - **Compliance integration** — IoT coverage appears in the compliance reports
 
-**Not tested yet:** the full IEEE OUI file, real PLCs and cameras, IPv6-only neighbours. **Not supported yet:** deep protocol inspection, flow ingestion, active scanning. See the [OT/IoT guide](docs/iot.md#8-industrial-protocols-coverage-and-discovery).
+**Not tested yet:** the full IEEE OUI file, real PLCs and cameras, IPv6-only neighbours. **Not supported yet:** deep protocol inspection, flow ingestion, port scanning or fingerprinting of devices. The active probe was only tested on a Docker bridge. See the [OT/IoT guide](docs/iot.md#8-industrial-protocols-coverage-and-discovery).
 
 ### Kubernetes Microsegmentation
 
@@ -311,7 +348,7 @@ A Swarm node is an ordinary Linux server, so Segmentra manages its **host firewa
 ### Security & Compliance
 - **Security Posture Audit** — on-demand scan of all deployed policies for excessive permissions (8 categories: sensitive port open to any, all ports open to any, very broad source CIDRs, any-protocol / any-port rules, `ALL_INTERFACES` with a broad source, duplicate rules, unmanaged hosts, stale policies)
 - **Comprehensive Audit Trail** — changes logged with actor, timestamp, entity, and rich metadata
-- **Notification System** — Slack webhooks and generic HTTP webhooks (email channels are not implemented: there is no SMTP support and sends are logged as failed); subscribe channels to 11 event types (policy submitted/approved/rejected, deployment started/completed/failed, policy expiring soon/expired, excessive rules detected, firewall-learning restore failed, compliance drift). The compliance-drift event can be selected but is not emitted yet, and the optional per-rule `filter` is stored but not applied
+- **Notification System** (*Notifications* page, admin to configure) — create a channel (Slack incoming webhook or generic HTTP webhook), choose which events it receives, and use **Send Test** to send a sample. Approval events carry the approval trail (who requested, the author's reason, when, who decided, the rejection reason), so a reviewer or author can be alerted without opening the app. Webhook targets on loopback or link-local/cloud-metadata addresses are refused unless `SEGMENTRA_ALLOW_PRIVATE_WEBHOOKS=true`. Supported: Slack webhooks and generic HTTP webhooks (email channels are not implemented: there is no SMTP support and sends are logged as failed); subscribe channels to 11 event types (policy submitted/approved/rejected, deployment started/completed/failed, policy expiring soon/expired, excessive rules detected, firewall-learning restore failed, compliance drift). The compliance-drift event can be selected but is not emitted yet, and the optional per-rule `filter` is stored but not applied
 - **Encrypted Secret Storage** — SSH keys, key passphrases, SSH and sudo passwords and LDAP passwords encrypted with AES-256-GCM (key: `SEGMENTRA_KEK_B64`); see [docs/security.md](docs/security.md)
 - **Integrations** — registry for SIEM, SOAR, vulnerability databases and threat intelligence feeds. Working adapters: **SIEM** (syslog over UDP/TCP; every Audit Log entry is forwarded once, see [docs/security.md](docs/security.md)) and **AbuseIPDB** threat intelligence (sync, optional auto-block into a DRAFT version of a policy set; repeated syncs reuse the open auto-block draft and skip IPs already blocked). SOAR and vulnerability-database entries only store configuration and sync status.
 

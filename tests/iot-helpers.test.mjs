@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { PROTOCOLS, expandService, parsePortRanges, servicesForRule } from '../apps/api/dist/services/iot-protocols.js';
-import { isLocallyAdministered, normalizeMac, ouiPrefix, parseNeighbors, parseOuiList, suggestAssetType } from '../apps/api/dist/services/iot-discovery.js';
+import { buildSweepCommand, isLocallyAdministered, normalizeMac, ouiPrefix, parseNeighbors, parseOuiList, parseSweepCidr, suggestAssetType } from '../apps/api/dist/services/iot-discovery.js';
 
 test('the catalog is consistent: unique ids, valid ports, every entry documented', () => {
   assert.equal(new Set(PROTOCOLS.map((p) => p.id)).size, PROTOCOLS.length);
@@ -99,4 +99,33 @@ test('type suggestions come from the vendor name and default to "other"', () => 
   assert.equal(suggestAssetType('Johnson Controls'), 'hvac');
   assert.equal(suggestAssetType('Acme Widgets'), 'other');
   assert.equal(suggestAssetType(null), 'other');
+});
+
+test('parseSweepCidr: a /24 gives 254 host addresses without network and broadcast', () => {
+  const r = parseSweepCidr('192.168.10.77/24');
+  assert.equal(r.ok, true);
+  assert.equal(r.cidr, '192.168.10.0/24');
+  assert.equal(r.ips.length, 254);
+  assert.equal(r.ips[0], '192.168.10.1');
+  assert.equal(r.ips[253], '192.168.10.254');
+});
+
+test('parseSweepCidr: small subnets and single hosts', () => {
+  assert.deepEqual(parseSweepCidr('10.0.0.8/29').ips, ['10.0.0.9', '10.0.0.10', '10.0.0.11', '10.0.0.12', '10.0.0.13', '10.0.0.14']);
+  assert.deepEqual(parseSweepCidr('10.0.0.5').ips, ['10.0.0.5']);
+  assert.deepEqual(parseSweepCidr('10.0.0.4/31').ips, ['10.0.0.4', '10.0.0.5']);
+});
+
+test('parseSweepCidr: refuses big, malformed and hostile input', () => {
+  for (const bad of ['10.0.0.0/16', '10.0.0.0/23', '10.0.0.0/33', '300.1.1.1/24', 'not an ip', '', '10.0.0.0/24; reboot', '10.0.0.0/24 10.0.1.0/24', '$(id)', '::1']) {
+    assert.equal(parseSweepCidr(bad).ok, false, bad);
+  }
+});
+
+test('buildSweepCommand: only addresses go into the command, then the neighbour table is read', () => {
+  const cmd = buildSweepCommand(parseSweepCidr('10.0.0.0/30').ips);
+  assert.match(cmd, /for ip in 10\.0\.0\.1 10\.0\.0\.2; do/);
+  assert.match(cmd, /ping -c 1 -W 1 \$ip/);
+  assert.match(cmd, /ip -o neigh show/);
+  assert.throws(() => buildSweepCommand(['10.0.0.1; reboot']));
 });
