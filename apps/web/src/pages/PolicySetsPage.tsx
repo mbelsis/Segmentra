@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
+import { Pagination } from '../components/Pagination';
 import { api, errorMessage, isApiError } from '../lib/api';
 import { useAuth, hasRole } from '../lib/auth-context';
 
@@ -37,6 +38,10 @@ export function PolicySetsPage() {
   const [filterSearch, setFilterSearch] = useState('');
   const [filterScopeType, setFilterScopeType] = useState<string>('');
   const [filterScopeTarget, setFilterScopeTarget] = useState<string>('');
+  // Pagination (the list is loaded once and filtered in the browser, so it is paged in the browser too)
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+  useEffect(() => { setPage(1); }, [filterSearch, filterScopeType, filterScopeTarget, pageSize]);
 
   useEffect(() => {
     loadData();
@@ -498,6 +503,11 @@ export function PolicySetsPage() {
           );
         }
 
+        const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+        const currentPage = Math.min(page, totalPages);
+        const pageStart = (currentPage - 1) * pageSize;
+        const visible = filtered.slice(pageStart, pageStart + pageSize);
+
         // Build scope target options based on selected scope type
         const scopeTargetOptions: { id: string; label: string }[] = [];
         if (filterScopeType === 'TAG') {
@@ -605,7 +615,7 @@ export function PolicySetsPage() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((ps) => (
+              {visible.map((ps) => (
                 <tr key={ps.id}>
                   <td><strong>{ps.name}</strong></td>
                   <td>{ps.description || '-'}</td>
@@ -672,6 +682,8 @@ export function PolicySetsPage() {
               )}
             </tbody>
           </table>
+
+          {filtered.length > 0 && <Pagination page={currentPage} pageSize={pageSize} total={filtered.length} onPage={setPage} onPageSize={setPageSize} noun="policy sets" />}
         </div>
         );
       })()}

@@ -149,7 +149,7 @@ Go to **Inventory → VLANs** tab and add your network VLANs:
 
 ### Step 3: Add Hosts
 
-Go to **Inventory → Hosts** tab:
+Go to **Inventory → Hosts** tab. Long lists are paged: a bar above and below the table shows the range ("Showing 51 to 100 of 203 hosts"), First/Previous/Next/Last, and **Rows per page** (25, 50, 100 or 250; the server pages the hosts, so filters apply to the whole inventory). The **VLANs** tab and the **Policy Sets** page have the same bar (10, 25, 50 or 100 rows).
 
 **Individual hosts:**
 - Click **+ Add Host**

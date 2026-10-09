@@ -13,6 +13,7 @@ function effectiveCredentialLabel(ec: any): string {
     : 'global';
   return `${ec.name} (${why})`;
 }
+import { Pagination } from '../components/Pagination';
 import { HostPolicyVisualization } from '../components/HostPolicyVisualization';
 import { ReadinessSummary } from '../components/ReadinessSummary';
 import { DiscoveryTab } from '../components/DiscoveryTab';
@@ -58,6 +59,10 @@ export function InventoryPage() {
   const [filterEnabled, setFilterEnabled] = useState<string>('all'); // 'all', 'true', 'false'
   const [selectedHostIds, setSelectedHostIds] = useState<Set<string>>(new Set());
   const [currentPage, setCurrentPage] = useState(1);
+  const [hostPageSize, setHostPageSize] = useState(50);
+  // VLANs are loaded in full and paged in the browser
+  const [vlanPage, setVlanPage] = useState(1);
+  const [vlanPageSize, setVlanPageSize] = useState(25);
   const [pagination, setPagination] = useState<{ page: number; limit: number; total: number; totalPages: number } | null>(null);
   const [bulkVlanId, setBulkVlanId] = useState<string>('');
   const [bulkTagId, setBulkTagId] = useState<string>('');
@@ -128,7 +133,7 @@ export function InventoryPage() {
       loadHosts();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, currentPage, debouncedSearch, filterTag, filterVlan, filterEnabled]);
+  }, [activeTab, currentPage, hostPageSize, debouncedSearch, filterTag, filterVlan, filterEnabled]);
 
   async function loadData() {
     try {
@@ -346,7 +351,7 @@ export function InventoryPage() {
     try {
       const params: any = {
         page: currentPage,
-        limit: 50
+        limit: hostPageSize
       };
       const q = debouncedSearch.trim();
       if (q) {
@@ -1036,9 +1041,7 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                 </div>
               </div>
               {pagination && (
-                <div style={{ fontSize: '0.9em', color: '#666' }}>
-                  Showing {((currentPage - 1) * (pagination.limit || 50)) + 1} to {Math.min(currentPage * (pagination.limit || 50), pagination.total)} of {pagination.total} hosts
-                </div>
+                <Pagination page={currentPage} pageSize={hostPageSize} total={pagination.total} onPage={setCurrentPage} onPageSize={(n) => { setHostPageSize(n); setCurrentPage(1); }} noun="hosts" sizes={[25, 50, 100, 250]} />
               )}
             </div>
 
@@ -1216,27 +1219,9 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
               </tbody>
             </table>
 
-            {/* Pagination */}
-            {pagination && pagination.totalPages > 1 && (
-              <div style={{ marginTop: 16, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8 }}>
-                <button
-                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-                  disabled={currentPage === 1}
-                  className="btn-small"
-                >
-                  Previous
-                </button>
-                <span style={{ padding: '0 16px' }}>
-                  Page {pagination.page} of {pagination.totalPages}
-                </span>
-                <button
-                  onClick={() => setCurrentPage(p => Math.min(pagination.totalPages, p + 1))}
-                  disabled={currentPage === pagination.totalPages}
-                  className="btn-small"
-                >
-                  Next
-                </button>
-              </div>
+            {/* Pagination (also above the table; repeated here so it is at hand after a long list) */}
+            {pagination && pagination.total > 0 && (
+              <Pagination page={currentPage} pageSize={hostPageSize} total={pagination.total} onPage={setCurrentPage} onPageSize={(n) => { setHostPageSize(n); setCurrentPage(1); }} noun="hosts" sizes={[25, 50, 100, 250]} />
             )}
           </div>
         </>
@@ -1401,7 +1386,7 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                 </tr>
               </thead>
               <tbody>
-                {vlans.map((v) => (
+                {vlans.slice((Math.min(vlanPage, Math.max(1, Math.ceil(vlans.length / vlanPageSize))) - 1) * vlanPageSize).slice(0, vlanPageSize).map((v) => (
                   <tr key={v.id}>
                     <td><code>{v.vlan_tag}</code></td>
                     <td><strong>{v.name}</strong></td>
@@ -1422,6 +1407,9 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                 )}
               </tbody>
             </table>
+            {vlans.length > 0 && (
+              <Pagination page={vlanPage} pageSize={vlanPageSize} total={vlans.length} onPage={setVlanPage} onPageSize={(n) => { setVlanPageSize(n); setVlanPage(1); }} noun="VLANs" />
+            )}
           </div>
         </>
       )}
