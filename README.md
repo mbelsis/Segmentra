@@ -163,7 +163,8 @@ Segmentra turns approved policy versions into Kubernetes **NetworkPolicy** manif
 
 **Capabilities**
 - **Cluster registry** — register several clusters, each with its CNI plugin (kindnet, Calico, Cilium, Antrea, Weave, kube-router, other) and default namespace.
-- **Stored credentials** — a kubeconfig with an inline token or client certificate, or a service-account/bearer token plus the API server CA. They are encrypted like the SSH and LDAP secrets, never shown again, and managed per cluster or in **Admin → Kubernetes Credentials**. **Test connection** checks them. API server addresses in the link-local/cloud-metadata range are refused.
+- **Stored credentials** — a kubeconfig with an inline token or client certificate, a service-account/bearer token plus the API server CA, or a **cloud login** for managed clusters (see below). They are encrypted like the SSH and LDAP secrets, never shown again, and managed per cluster or in **Admin → Kubernetes Credentials**. **Test connection** checks them. API server addresses in the link-local/cloud-metadata range are refused.
+- **Cloud logins (implemented, not yet tested against real clouds)** — **Amazon EKS** (AWS access key, secret key and optional session token; Segmentra mints the same token as `aws eks get-token`), **Google GKE** (service-account JSON key, exchanged for an access token) and **Azure AKS** (Entra ID service principal). Nothing is executed: no AWS CLI, `gke-gcloud-auth-plugin` or `kubelogin` is needed, and kubeconfigs that rely on those exec plugins are still rejected. You also supply the cluster's API endpoint and CA certificate. See [Not tested yet](#kubernetes-not-tested-yet).
 - **NetworkPolicy generation** — **Generate NetworkPolicy** translates the inbound ALLOW rules of an approved or deployed policy version into an Ingress-only `networking.k8s.io/v1` manifest. Sources become `ipBlock` peers (CIDR, HOST, VLAN and the hosts of a TAG; multiple CIDRs and `any` are supported). Rules NetworkPolicy cannot express (DENY, FORWARD, ICMP, outbound) are skipped with a warning, and a source that resolves to nothing is never widened to `0.0.0.0/0`.
 - **Label-based sources** — register workloads with their pod labels and map them to Segmentra tags. A rule whose source is such a tag allows those pods by `namespaceSelector` + `podSelector`, which works on every CNI. A TAG can mix host IPs and labelled workloads.
 - **Apply, Dry run, Check and Remove from Segmentra** — server-side apply creates or updates the policy; **Dry run** validates it first; **Check** compares the live policy with Segmentra's manifest (in sync, drifted, missing); **Remove** deletes it. Status, last error and drift state are tracked per manifest, and every action is audited.
@@ -172,13 +173,27 @@ Segmentra turns approved policy versions into Kubernetes **NetworkPolicy** manif
 
 **Limitations**
 - **Cilium ignores `ipBlock` for in-cluster traffic.** IP-based sources only match clients outside the cluster there, so a policy built only from CIDR/HOST/VLAN sources blocks all in-cluster clients. Segmentra warns when the cluster CNI is Cilium or unknown; use tags mapped to labelled workloads for in-cluster clients. Calico and kindnet match `ipBlock` for pods.
-- **No workload discovery.** The sync endpoint returns `501`; workloads are registered by hand with their labels.
-- **Ingress only, allow-only.** Egress is never restricted, DENY rules cannot be expressed, and ICMP and FORWARD rules are skipped. Each policy selects **all pods in the namespace** (`podSelector: {}`); you cannot target a subset of pods.
+- **Ingress only, allow-only.** DENY rules cannot be expressed in a NetworkPolicy, and ICMP and FORWARD rules are skipped.
 - **A policy denies everything else inbound.** Once applied, only traffic allowed by the policy reaches the pods in that namespace. Review the warnings and use Dry run first.
 - **Enforcement depends on the CNI.** A cluster without a NetworkPolicy-capable CNI (for example plain kubenet) accepts the policy but does not enforce it.
-- **Credential limits.** A kubeconfig must carry inline credentials: file paths, exec plugins, auth providers and proxies are rejected. Tokens expire and must be replaced before then. The API server must be reachable from the Segmentra API (inside the container in the Docker deployment) over HTTPS.
+- **Credential limits.** A kubeconfig must carry inline credentials: file paths, exec plugins, auth providers and proxies are rejected (use a cloud login or a token instead). Static tokens expire and must be replaced before then; cloud logins mint a fresh short-lived token on every call. The API server must be reachable from the Segmentra API (inside the container in the Docker deployment) over HTTPS.
 - **Not tracked:** policies applied outside Segmentra stay `Generated`; deleting a cluster record does not remove policies already on the cluster.
-- **No unit tests** for the Kubernetes client; coverage is the kind integration test below.
+- **Tested only on kind**, plus unit tests for the cloud token minting; see below.
+
+<a id="kubernetes-not-tested-yet"></a>
+**Not tested yet** (the code or documentation exists, but it has not been verified)
+- **Amazon EKS, Google GKE and Azure AKS clusters.** The cloud logins are implemented and checked offline: the SigV4 signing reproduces AWS's published example signature, the GKE JWT signature is verified with the public key, the AKS request is checked against a mock token endpoint, and the whole path was exercised against a kind API server (the token is minted and sent, and the 401 is reported). They have **never been run against a real AWS, Google or Azure account**. On those services the network-policy feature must also be switched on (AWS VPC CNI network policy agent, GKE Dataplane V2 or Calico, AKS network policy).
+- **OpenShift and Rancher.**
+- **Antrea, Weave Net and kube-router** CNIs (only kindnet, Calico and Cilium were tested).
+- **IPv6-only and dual-stack clusters.**
+- **Windows nodes.**
+
+**Not supported yet**
+- **Egress rules.** Egress is never restricted.
+- **Vendor policy types:** `CiliumNetworkPolicy`, Calico `GlobalNetworkPolicy` and `AdminNetworkPolicy`.
+- **Selecting a subset of pods.** Each policy covers the whole namespace (`podSelector: {}`).
+- **Discovering workloads from the cluster.** The sync endpoint returns `501`; workloads are registered by hand with their labels.
+- **Other exec-plugin / OIDC logins** (kubeconfigs that run a program or read a token file) and API servers reachable only through a proxy or over plain `http`.
 
 ### Security & Compliance
 - **Security Posture Audit** — on-demand scan of all deployed policies for excessive permissions (8 categories: sensitive port open to any, all ports open to any, very broad source CIDRs, any-protocol / any-port rules, `ALL_INTERFACES` with a broad source, duplicate rules, unmanaged hosts, stale policies)
@@ -510,13 +525,13 @@ Everything below was exercised against Docker containers. The core workflow went
   - SSRF checks.
 - **Threat intelligence:** AbuseIPDB against a mock of its API (error handling, auto-block drafts, deduplication).
 - **SIEM forwarding:** every audit event forwarded exactly once (including a second API replica and a reconnect), with no secrets in messages. Integration and notification secrets are encrypted at rest; a database dump showed none of them.
-- **Kubernetes:** `npm run test:integration:k8s` builds 3-node kind clusters with **kindnet**, **Calico** and **Cilium** and runs 69 checks on each against the real API: stored kubeconfig and service-account token credentials, apply, dry run, drift check and removal through Segmentra, real pod-to-pod TCP/UDP enforcement (CIDR, HOST, TAG, VLAN, `any`, port ranges, same-node and cross-node clients, selector peers, updates), refusal to overwrite or delete a policy Segmentra did not create, read-only RBAC failure, and no credential material in any API response. Earlier generated manifests were also applied to k3s v1.30 and enforced.
+- **Kubernetes:** `npm run test:integration:k8s` builds 3-node kind clusters with **kindnet**, **Calico** and **Cilium** and runs 69 checks on each against the real API: stored kubeconfig and service-account token credentials, apply, dry run, drift check and removal through Segmentra, real pod-to-pod TCP/UDP enforcement (CIDR, HOST, TAG, VLAN, `any`, port ranges, same-node and cross-node clients, selector peers, updates), refusal to overwrite or delete a policy Segmentra did not create, read-only RBAC failure, and no credential material in any API response. The cloud-login token minting has unit tests (`npm run test:k8s-auth`: SigV4 against AWS's documented example, JWT signature, mocked token endpoints). Earlier generated manifests were also applied to k3s v1.30 and enforced.
 - **Other:** `scripts/restore-previous-policy.sh` (`--latest` / `--timestamp`); password change and reset; and the PowerShell scripts parse under PowerShell 7 and as Windows PowerShell 5.1 would read them.
 
 ### Not yet tested or not implemented
 
 - **Email notifications are not implemented.** There is no SMTP sending; email channels report FAILED.
-- **Kubernetes workload discovery is not implemented, and only kind clusters were tested.** The sync endpoint returns `501`; workloads are registered by hand. Enforcement was verified on kindnet, Calico and Cilium; managed services (EKS, GKE, AKS), Antrea, Weave and kube-router were not tested. Generated manifests use `podSelector: {}` (all pods in the namespace).
+- **Kubernetes: see [Not tested yet / Not supported yet](#kubernetes-not-tested-yet).** Workload discovery is not implemented (the sync endpoint returns `501`), only kind clusters were tested (the EKS/GKE/AKS cloud logins never against real clouds), and generated manifests use `podSelector: {}` (all pods in the namespace).
 - **Microsoft Active Directory itself, and LDAPS with a real certificate.** Only OpenLDAP was tested.
 - **The real AbuseIPDB service**, as opposed to the mock, and real Slack workspaces.
 - **Hosts that log only to journald (no rsyslog).** Firewall Learning reads the rsyslog file, so such hosts capture no flows. FORWARD traffic on gateways is not analyzed by Learning or Policy Impact Analysis, by design.

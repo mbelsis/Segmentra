@@ -69,7 +69,7 @@ Policy version approved → deployment created → compiler generates per-host r
 
 ### Kubernetes
 
-`apps/api/src/routes/kubernetes.ts` generates NetworkPolicy manifests from approved policy versions (`ipBlock` peers; TAG sources also yield `namespaceSelector` + `podSelector` peers for workloads mapped to the tag) and, with stored cluster credentials, applies/checks/removes them through `apps/api/src/services/k8s-client.ts` (a small HTTPS client; server-side apply; only touches policies labelled `app.kubernetes.io/managed-by: segmentra`). Cilium ignores `ipBlock` for in-cluster pod traffic, so clusters record their CNI and generation warns. `npm run test:integration:k8s -- <kindnet|calico|cilium>` tests all of it on a kind cluster (needs Docker, kind, kubectl, and cilium-cli for Cilium) against a running API.
+`apps/api/src/routes/kubernetes.ts` generates NetworkPolicy manifests from approved policy versions (`ipBlock` peers; TAG sources also yield `namespaceSelector` + `podSelector` peers for workloads mapped to the tag) and, with stored cluster credentials, applies/checks/removes them through `apps/api/src/services/k8s-client.ts` (a small HTTPS client; server-side apply; kubeconfig, bearer-token and native EKS/GKE/AKS logins via `k8s-cloud-auth.ts`, which mints tokens in-process and never runs exec plugins; only touches policies labelled `app.kubernetes.io/managed-by: segmentra`). Cilium ignores `ipBlock` for in-cluster pod traffic, so clusters record their CNI and generation warns. `npm run test:integration:k8s -- <kindnet|calico|cilium>` tests all of it on a kind cluster; `npm run test:k8s-auth` unit-tests the cloud token minting (needs Docker, kind, kubectl, and cilium-cli for Cilium) against a running API.
 
 ### Compiler
 

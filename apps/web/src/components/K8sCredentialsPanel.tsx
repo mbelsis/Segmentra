@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
+import { K8S_AUTH_TYPES, K8sCredentialFields } from './K8sCredentialFields';
 
 type Form = { authType: string; apiServerUrl: string; credentials: string; caCert: string; tlsSkipVerify: boolean };
 
@@ -69,7 +70,7 @@ export function K8sCredentialsPanel() {
       <h3 style={{ marginTop: 0 }}>Kubernetes Credentials</h3>
       <p style={{ marginBottom: 20, color: '#666', fontSize: '0.9em' }}>
         Credentials Segmentra uses to apply, check and remove NetworkPolicies on a Kubernetes cluster: a kubeconfig (with an inline token or
-        client certificate) or a service-account bearer token with the API server CA. They are encrypted like the SSH credentials above, are never
+        client certificate), a service-account bearer token with the API server CA, or a cloud login for managed clusters (Amazon EKS, Google GKE, Azure AKS; not yet tested against real cloud accounts). They are encrypted like the SSH credentials above, are never
         shown again, and can only be replaced or removed. Register clusters on the <a href="/kubernetes">Kubernetes</a> page.
       </p>
       <div role="note" style={{ background: '#e3f2fd', border: '1px solid #2196F3', borderRadius: 8, padding: '10px 14px', marginBottom: 16, fontSize: '0.9em', color: '#1a4a7a' }}>
@@ -85,9 +86,7 @@ export function K8sCredentialsPanel() {
           <div className="form-group">
             <label>Auth Type</label>
             <select value={form.authType} onChange={(e) => setForm((f) => ({ ...f, authType: e.target.value }))}>
-              <option value="kubeconfig">Kubeconfig</option>
-              <option value="service_account">Service Account token</option>
-              <option value="token">Bearer token</option>
+              {K8S_AUTH_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
             </select>
           </div>
           {form.authType !== 'kubeconfig' && (
@@ -96,12 +95,7 @@ export function K8sCredentialsPanel() {
               <input value={form.apiServerUrl} onChange={(e) => setForm((f) => ({ ...f, apiServerUrl: e.target.value }))} placeholder="https://k8s-api.example.com:6443" />
             </div>
           )}
-          <div className="form-group">
-            <label>{form.authType === 'kubeconfig' ? 'Kubeconfig *' : 'Bearer token *'}</label>
-            <textarea rows={form.authType === 'kubeconfig' ? 8 : 3} value={form.credentials} onChange={(e) => setForm((f) => ({ ...f, credentials: e.target.value }))}
-              spellCheck={false} autoComplete="off" style={{ fontFamily: 'monospace', fontSize: '12px' }}
-              placeholder={form.authType === 'kubeconfig' ? 'Inline token or client-certificate-data + client-key-data; the API server URL and CA are read from it' : 'Service account token'} />
-          </div>
+          <K8sCredentialFields authType={form.authType} resetKey={editing.id} onChange={(credentials) => setForm((f) => (f.credentials === credentials ? f : { ...f, credentials }))} />
           {form.authType !== 'kubeconfig' && (
             <div className="form-group">
               <label>API server CA certificate (PEM, leave empty to keep the stored one)</label>

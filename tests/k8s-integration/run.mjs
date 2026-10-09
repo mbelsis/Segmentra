@@ -274,6 +274,16 @@ subjects: [{ kind: ServiceAccount, name: ${name}, namespace: kube-system }]
     const t = await api('POST', `/k8s/clusters/${c.id}/test-connection`, { token: op });
     check(`test-connection with ${label} credentials`, t.ok === true && /^v\d/.test(t.serverVersion), t.serverVersion);
   }
+  // Cloud login plumbing: an EKS-style credential makes Segmentra mint a token and send it. A kind
+  // API server cannot validate AWS tokens, so a clean "credentials rejected (401)" proves the whole path.
+  const eksCluster = (await api('POST', '/k8s/clusters', { token: admin, body: { name: `kind-${cni}-eks-${suffix}`, apiServerUrl: serverUrl, authType: 'eks', caCert: caPem, cni, defaultNamespace: NS,
+    credentials: JSON.stringify({ clusterName: 'demo', region: 'eu-west-1', accessKeyId: 'AKIAIOSFODNN7EXAMPLE', secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' }) } })).cluster;
+  const eksTest = await fetch(`${apiBase}/k8s/clusters/${eksCluster.id}/test-connection`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${op}` }, body: '{}' });
+  const eksBody = await eksTest.json();
+  check('EKS login: token minted and sent, API server answers 401 (reported clearly)', eksTest.status === 502 && /401|rejected/i.test(eksBody.message ?? ''), (eksBody.message ?? '').slice(0, 70));
+  const eksBad = await fetch(`${apiBase}/k8s/clusters`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${admin}` }, body: JSON.stringify({ name: `eksbad-${suffix}`, apiServerUrl: serverUrl, authType: 'eks', credentials: '{"region":"eu-west-1"}' }) });
+  check('incomplete EKS credentials are rejected (400)', eksBad.status === 400);
+  await api('DELETE', `/k8s/clusters/${eksCluster.id}`, { token: admin });
   const bad = await fetch(`${apiBase}/k8s/clusters`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${admin}` }, body: JSON.stringify({ name: `bad-${suffix}`, apiServerUrl: serverUrl, authType: 'kubeconfig', credentials: 'apiVersion: v1\nkind: Config\nclusters: []\n' }) });
   check('invalid kubeconfig is rejected (400)', bad.status === 400);
   const execCfg = kubeconfig.replace(/client-certificate-data:.*\n/, '').replace(/client-key-data:.*\n/, '') + '';

@@ -69,7 +69,7 @@ A cluster record describes a Kubernetes cluster. Each cluster has:
 
 - **Name** and optional **Description**
 - **API Server URL**, e.g. `https://k8s-api.example.com:6443`. With a kubeconfig the URL inside the kubeconfig is used and stored here
-- **Auth Type**: `kubeconfig`, `service_account` or `token`
+- **Auth Type**: `kubeconfig`, `service_account`, `token`, or a cloud login: `eks`, `gke`, `aks`
 - **CNI Plugin**: `unknown` (default), `calico`, `cilium`, `kindnet`, `antrea`, `weave`, `kube-router` or `other`. It decides which warnings Segmentra shows when generating a NetworkPolicy (see below)
 - **Default Namespace**, e.g. `default`
 
@@ -78,6 +78,11 @@ A cluster record describes a Kubernetes cluster. Each cluster has:
 To apply, check and remove policies from Segmentra, store credentials on the cluster (admin; in the UI when registering the cluster, with **Add / Replace credentials** on the Kubernetes page, or in **Admin → Kubernetes Credentials**, which lists every cluster next to the SSH credentials with Add, Replace, Remove and Test):
 
 - **Kubeconfig** (auth type `kubeconfig`): the current context is used. It must carry **inline** credentials: a `token`, or `client-certificate-data` + `client-key-data` (and normally `certificate-authority-data`). Kubeconfigs that reference files (`certificate-authority`, `client-certificate`, `client-key`, `tokenFile`), `exec` credential plugins, `auth-provider` plugins or `proxy-url` are rejected, because the API server must not read files or run programs
+- **Cloud logins** for managed clusters (auth types `eks`, `gke`, `aks`; implemented but **not yet tested against real cloud accounts**, see *Not tested yet* below). The cluster's **API server URL** and **CA certificate** are entered as for a token, and Segmentra mints a short-lived token on every call, in-process (no AWS CLI, gcloud, `gke-gcloud-auth-plugin` or `kubelogin`, nothing is executed). The stored secret is a JSON object:
+  - `eks`: `{ clusterName, region, accessKeyId, secretAccessKey, sessionToken? }`. The token is a SigV4-presigned STS `GetCallerIdentity` URL signing the cluster name (the same token as `aws eks get-token`). The IAM identity must be mapped to a Kubernetes user with NetworkPolicy permissions (EKS access entry or `aws-auth`)
+  - `gke`: the service-account JSON key file as downloaded from Google Cloud (`client_email`, `private_key`, ...). Segmentra signs a JWT and exchanges it at `oauth2.googleapis.com` for an access token with the `cloud-platform` scope. The service account needs a role such as Kubernetes Engine Developer
+  - `aks`: `{ tenantId, clientId, clientSecret }` of a Microsoft Entra ID service principal, exchanged at `login.microsoftonline.com` for a token for the AKS server application. It needs an Azure Kubernetes Service RBAC role (or Kubernetes RBAC) that allows NetworkPolicies. The UI has separate fields for these; the API takes the JSON as `credentials`
+  - The token endpoints are fixed, never taken from the stored credentials. For GKE and AKS the Segmentra API needs outbound HTTPS to those two hosts. EKS needs no outbound call from Segmentra: the token is only signed locally, and the EKS API server validates it against AWS STS
 - **Bearer token** (auth types `service_account` and `token`): the token plus, usually, the API server **CA certificate** (PEM). Without a CA, Segmentra verifies the API server against the system trust store
 
 Credentials and the CA are encrypted with AES-256-GCM in `secret_store` (types `K8S_CREDENTIALS` and `TLS_CA_CERT`), exactly like SSH and LDAP secrets, and use the same key (`SEGMENTRA_KEK_B64`). They are write-only: the API only reports `has_credentials` / `has_ca_cert`, and they are decrypted in memory for the duration of a call. Certificate verification can be disabled per cluster (`tlsSkipVerify`); this is insecure and should only be used for tests. API server addresses in the link-local range (including cloud metadata) are refused, unless `SEGMENTRA_ALLOW_PRIVATE_WEBHOOKS=true`. The API server must be reachable from where the Segmentra API runs (for the Docker deployment, from inside the `segmentra-app` container).
@@ -229,6 +234,26 @@ Segmentra's DENY rules are therefore not translated. The presence of a NetworkPo
 
 ---
 
+## Not tested yet
+
+These are implemented or should work, but have not been verified:
+
+- **Amazon EKS, Google GKE and Azure AKS clusters.** The cloud logins are checked offline (SigV4 against AWS's documented example signature, JWT signature verification, a mock token endpoint, and the full path against a kind API server, which correctly answers 401 to the foreign token), but **never against a real AWS, Google or Azure account**. On those services the network-policy feature must also be enabled (AWS VPC CNI network policy agent, GKE Dataplane V2 or Calico, AKS network policy)
+- **OpenShift and Rancher**
+- **Antrea, Weave Net and kube-router** (only kindnet, Calico and Cilium were tested)
+- **IPv6-only and dual-stack clusters**
+- **Windows nodes**
+
+## Not supported yet
+
+- **Egress rules** (egress is never restricted)
+- **Vendor policy types**: `CiliumNetworkPolicy`, Calico `GlobalNetworkPolicy` and `AdminNetworkPolicy`
+- **Selecting a subset of pods**: each policy covers the whole namespace (`podSelector: {}`)
+- **Discovering workloads from the cluster** (register them by hand)
+- **Other exec-plugin and OIDC logins** (kubeconfigs that run a program or read a token file), API servers reachable only through a proxy, and plain `http` endpoints
+
+---
+
 ## Multi-Cluster
 
 Several clusters can be registered. Workloads and generated NetworkPolicies are stored per cluster (`cluster_id`), and the UI shows a cluster list for switching between them.
@@ -242,7 +267,7 @@ All endpoints require authentication.
 ### Clusters
 - `GET /api/k8s/clusters`: list clusters (all roles)
 - `GET /api/k8s/clusters/:id`: cluster with workload counts per kind and namespace (all roles)
-- `POST /api/k8s/clusters`: add a cluster (admin). Body: `{ name, apiServerUrl?, authType?, cni?, description?, credentials?, caCert?, tlsSkipVerify?, defaultNamespace?, enabled? }`. `credentials` (kubeconfig or token) and `caCert` (PEM) are write-only and stored encrypted; `apiServerUrl` is optional with a kubeconfig. Responses include `has_credentials` / `has_ca_cert`, never the secrets
+- `POST /api/k8s/clusters`: add a cluster (admin). Body: `{ name, apiServerUrl?, authType? (`kubeconfig`, `service_account`, `token`, `eks`, `gke`, `aks`), cni?, description?, credentials?, caCert?, tlsSkipVerify?, defaultNamespace?, enabled? }`. `credentials` (kubeconfig or token) and `caCert` (PEM) are write-only and stored encrypted; `apiServerUrl` is optional with a kubeconfig. Responses include `has_credentials` / `has_ca_cert`, never the secrets
 - `PUT /api/k8s/clusters/:id`: update a cluster (admin). Omitting `credentials` / `caCert` keeps the stored ones, `null` removes them
 - `POST /api/k8s/clusters/:id/test-connection`: reads the API server version and checks that NetworkPolicies can be listed; stores the result in `last_sync_status` (operator, admin)
 - `DELETE /api/k8s/clusters/:id`: remove the cluster record, its workloads, generated policies and stored credentials. Policies already applied stay on the cluster (remove them first) (admin)
@@ -273,7 +298,7 @@ All endpoints require authentication.
 | `name` | text | Display name |
 | `description` | text | Optional description |
 | `api_server_url` | text | K8s API endpoint |
-| `auth_type` | text | `kubeconfig`, `service_account` or `token` |
+| `auth_type` | text | `kubeconfig`, `service_account`, `token`, `eks`, `gke` or `aks` |
 | `cni` | text | CNI plugin (migration 033), default `unknown`; drives the `ipBlock` warning |
 | `credentials_secret_id` | uuid FK → secret_store | Encrypted kubeconfig or bearer token (`K8S_CREDENTIALS`) |
 | `ca_cert_secret_id` | uuid FK → secret_store | Encrypted API server CA certificate (`TLS_CA_CERT`) |

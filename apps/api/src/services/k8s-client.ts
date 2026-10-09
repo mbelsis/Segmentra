@@ -5,6 +5,7 @@ import net from 'node:net';
 import { parse as parseYaml } from 'yaml';
 
 import { destinationChecksDisabled, normalizeHost } from '../lib/safe-http.js';
+import { CLOUD_AUTH_TYPES, CloudAuthError, mintCloudToken, validateCloudCredentials } from './k8s-cloud-auth.js';
 import { cidrContains } from './ip-utils.js';
 import { readSecretPlaintext } from './secrets.js';
 
@@ -137,6 +138,10 @@ export function validateCredentials(authType: string, credentials: string): { se
   const text = credentials.trim();
   if (!text) throw new K8sError('credentials are empty', undefined, 'invalid_credentials');
   if (authType === 'kubeconfig') return { serverUrl: parseKubeconfig(text).server.toString().replace(/\/$/, '') };
+  if (CLOUD_AUTH_TYPES.includes(authType)) {
+    try { validateCloudCredentials(authType, text); } catch (e: any) { throw new K8sError(e.message, undefined, 'invalid_credentials'); }
+    return {};
+  }
   if (/\s/.test(text)) throw new K8sError('a bearer token must not contain whitespace', undefined, 'invalid_credentials');
   return {};
 }
@@ -161,6 +166,17 @@ export async function loadConnection(cluster: {
       clientKey: kc.clientKey,
       insecureSkipTlsVerify: cluster.tls_skip_verify || kc.insecureSkipTlsVerify === true,
     };
+  }
+  if (CLOUD_AUTH_TYPES.includes(cluster.auth_type)) {
+    // Managed clusters: a short-lived token is minted in-process from the stored cloud credentials.
+    let token: string;
+    try {
+      token = await mintCloudToken(cluster.auth_type, secret);
+    } catch (e: any) {
+      if (e instanceof CloudAuthError) throw new K8sError(e.message, e.code === 'unauthorized' ? 401 : undefined, e.code);
+      throw e;
+    }
+    return { server: validateClusterUrl(cluster.api_server_url), ca: caPem, token, insecureSkipTlsVerify: cluster.tls_skip_verify };
   }
   return { server: validateClusterUrl(cluster.api_server_url), ca: caPem, token: secret, insecureSkipTlsVerify: cluster.tls_skip_verify };
 }

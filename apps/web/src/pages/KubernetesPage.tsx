@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../lib/api';
 import { useAuth, hasRole } from '../lib/auth-context';
+import { K8S_AUTH_TYPES, K8sCredentialFields } from '../components/K8sCredentialFields';
 
 export function KubernetesPage() {
   const { roles } = useAuth();
@@ -330,10 +331,8 @@ export function KubernetesPage() {
             <div className="form-group"><label>API Server URL{createNeedsUrl ? ' *' : ''}</label><input value={form.apiServerUrl} onChange={e => setForm(f => ({ ...f, apiServerUrl: e.target.value }))} placeholder={createNeedsUrl ? 'e.g., https://k8s-api.company.com:6443' : 'taken from the kubeconfig'} disabled={!createNeedsUrl} /></div>
             <div className="form-group"><label>Description</label><input value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))} placeholder="Optional description" /></div>
             <div className="form-group"><label>Auth Type</label>
-              <select value={form.authType} onChange={e => setForm(f => ({ ...f, authType: e.target.value }))}>
-                <option value="kubeconfig">Kubeconfig</option>
-                <option value="service_account">Service Account</option>
-                <option value="token">Bearer Token</option>
+              <select value={form.authType} onChange={e => setForm(f => ({ ...f, authType: e.target.value, credentials: '' }))}>
+                {K8S_AUTH_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
               </select>
             </div>
             <div className="form-group"><label>CNI Plugin</label>
@@ -350,12 +349,9 @@ export function KubernetesPage() {
             </div>
             <div className="form-group"><label>Default Namespace</label><input value={form.defaultNamespace} onChange={e => setForm(f => ({ ...f, defaultNamespace: e.target.value }))} /></div>
           </div>
-          <div className="form-group" style={{ marginTop: 8 }}>
-            <label>{form.authType === 'kubeconfig' ? 'Kubeconfig (optional, needed to apply from Segmentra)' : 'Bearer token (optional, needed to apply from Segmentra)'}</label>
-            <textarea rows={form.authType === 'kubeconfig' ? 6 : 2} value={form.credentials} onChange={e => setForm(f => ({ ...f, credentials: e.target.value }))} spellCheck={false} autoComplete="off"
-              placeholder={form.authType === 'kubeconfig' ? 'Paste a kubeconfig with an inline token or client certificate (certificate-authority-data, client-certificate-data, client-key-data).' : 'Service account token'}
-              style={{ fontFamily: 'monospace', fontSize: '12px' }} />
-            <div style={{ fontSize: '11.5px', color: '#97846c', marginTop: 2 }}>Stored encrypted and never shown again. The account needs get/list/create/patch/delete on <code>networkpolicies</code>; see the docs for a minimal ClusterRole.</div>
+          <div style={{ marginTop: 8 }}>
+            <K8sCredentialFields authType={form.authType} resetKey={String(showCreate)} onChange={(credentials) => setForm(f => (f.credentials === credentials ? f : { ...f, credentials }))} />
+            <div style={{ fontSize: '11.5px', color: '#97846c', marginTop: 2, marginBottom: 8 }}>Optional, needed to apply from Segmentra. Stored encrypted and never shown again. The account needs get/list/create/patch/delete on <code>networkpolicies</code>; see the docs for a minimal ClusterRole.</div>
           </div>
           {form.authType !== 'kubeconfig' && (
             <div className="form-group">
@@ -418,10 +414,7 @@ export function KubernetesPage() {
               {testResult && <div style={{ marginTop: 8, fontSize: '12.5px', color: testResult.ok ? '#5a7a3a' : '#a63d2f' }}>{testResult.text}</div>}
               {isAdmin && showCreds && (
                 <div style={{ marginTop: 12 }}>
-                  <div className="form-group">
-                    <label>{selectedCluster.auth_type === 'kubeconfig' ? 'Kubeconfig' : 'Bearer token'}</label>
-                    <textarea rows={selectedCluster.auth_type === 'kubeconfig' ? 6 : 2} value={credForm.credentials} onChange={e => setCredForm(f => ({ ...f, credentials: e.target.value }))} spellCheck={false} autoComplete="off" style={{ fontFamily: 'monospace', fontSize: '12px' }} />
-                  </div>
+                  <K8sCredentialFields authType={selectedCluster.auth_type} resetKey={`${selectedCluster.id}:${showCreds}`} onChange={(credentials) => setCredForm(f => (f.credentials === credentials ? f : { ...f, credentials }))} />
                   {selectedCluster.auth_type !== 'kubeconfig' && (
                     <div className="form-group">
                       <label>API server CA certificate (PEM, leave empty to keep the stored one)</label>

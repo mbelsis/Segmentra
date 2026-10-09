@@ -50,8 +50,10 @@ const clusterSchema = z.object({
   description: z.string().optional(),
   // Required, except when a kubeconfig is supplied (it carries the server URL).
   apiServerUrl: z.string().default(''),
-  authType: z.enum(['kubeconfig', 'service_account', 'token']).default('kubeconfig'),
-  // Write-only: a kubeconfig (authType kubeconfig) or a bearer token (service_account / token).
+  authType: z.enum(['kubeconfig', 'service_account', 'token', 'eks', 'gke', 'aks']).default('kubeconfig'),
+  // Write-only: a kubeconfig (authType kubeconfig), a bearer token (service_account / token) or the
+  // cloud login JSON (eks: region/clusterName/accessKeyId/secretAccessKey; gke: service account key;
+  // aks: tenantId/clientId/clientSecret).
   // Stored encrypted in secret_store; omitted on update = keep the stored one, null = remove it.
   credentials: z.string().max(200_000).nullable().optional(),
   // Write-only PEM CA certificate of the API server (a kubeconfig may embed its own).

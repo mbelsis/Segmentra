@@ -834,8 +834,8 @@ Generate Kubernetes NetworkPolicy manifests from Segmentra policies and apply th
 Go to **Kubernetes** in the sidebar:
 1. Click **+ Add Cluster** (admin)
 2. Enter the **API Server URL** (e.g., `https://k8s-api.example.com:6443`)
-3. Select **Auth Type**: Kubeconfig, Service Account, or Bearer Token, and the cluster's **CNI Plugin**
-4. To apply from Segmentra, paste the **kubeconfig** (with inline token or client certificate; it carries the API server URL and CA) or the **bearer token** (plus the API server CA certificate). They are stored encrypted and never shown again; an admin can replace or remove them later, here or in **Admin → Kubernetes Credentials** (next to the SSH credentials). **Test connection** verifies them. See [kubernetes.md](kubernetes.md) for the minimal RBAC the account needs
+3. Select **Auth Type**: Kubeconfig, Service Account, Bearer Token, or a cloud login (**Amazon EKS**, **Google GKE**, **Azure AKS**; implemented but not yet tested against real cloud accounts), and the cluster's **CNI Plugin**
+4. For EKS/GKE/AKS also enter the cluster's API server URL and CA certificate, and fill the cloud fields (AWS access key and region, Google service-account key, or Azure tenant/client/secret); Segmentra mints short-lived tokens itself, no cloud CLI needed. For the other types, to apply from Segmentra, paste the **kubeconfig** (with inline token or client certificate; it carries the API server URL and CA) or the **bearer token** (plus the API server CA certificate). They are stored encrypted and never shown again; an admin can replace or remove them later, here or in **Admin → Kubernetes Credentials** (next to the SSH credentials). **Test connection** verifies them. See [kubernetes.md](kubernetes.md) for the minimal RBAC the account needs
 
 Workload discovery is not implemented. On the **Workloads** tab, **+ Add workload** registers a workload with its pod labels, and the **+ tag** selector maps it to a Segmentra tag. A rule whose source is that tag then selects those pods by label.
 
