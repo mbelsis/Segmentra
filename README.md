@@ -712,4 +712,20 @@ See also [Known Limitations](#known-limitations) and the [OT/IoT guide](docs/iot
 
 ## License
 
-See [LICENSE.md](LICENSE.md) for details.
+Segmentra is licensed under the [Apache License 2.0](LICENSE). Copyright 2026 Belsis Meletis (see [NOTICE](NOTICE)). To report a vulnerability, see [SECURITY.md](SECURITY.md).
+
+### Disclaimer: provided "as is", no liability
+
+**Segmentra is provided "AS IS", without warranty of any kind**, express or implied, including merchantability, fitness for a particular purpose, security, reliability and non-infringement.
+
+**The creator and contributors accept no liability, to the maximum extent permitted by law,** for any damage, loss or claim of any kind arising from the use of, or inability to use, this software, whether in contract, tort or otherwise. This includes, without limitation:
+
+- data loss or corruption;
+- downtime, outages or loss of access to systems (including being locked out of hosts);
+- security incidents, breaches or vulnerabilities, in Segmentra or in the systems it manages;
+- misconfigured, missing or ineffective firewall rules, and traffic that is blocked or allowed by mistake;
+- financial, business, legal or regulatory loss, including failed audits (compliance reports are supporting evidence, not an audit opinion or a certification).
+
+Segmentra changes firewall rules on real hosts, clusters and gateways, and is a **work in progress** that has been tested mainly in lab environments (see [Not Yet Tested](#not-yet-tested)). **You use it entirely at your own risk and responsibility.** Test it on non-critical systems first, keep out-of-band access, keep backups, and review every policy before deploying it.
+
+Nothing in this README, the documentation or the user interface changes the terms of the [LICENSE](LICENSE), sections 7 (Disclaimer of Warranty) and 8 (Limitation of Liability).
