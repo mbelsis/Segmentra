@@ -828,7 +828,18 @@ Go to **Integrations** in the sidebar (admin only) and click **+ New Integration
 
 ## Policy as code
 
-Policy sets can be exported and imported as YAML or JSON documents (tags, VLANs and hosts by name), for Git and CI workflows. On **Policy Sets**, **Import YAML/JSON** opens a panel: paste or load a document, press **Check (dry run)** to see what would change (rules added and removed, warnings, or every validation problem with its path), then **Import as DRAFT**. The result is a normal DRAFT version: it still needs **Submit for Approval**, a different person's approval and a deployment. On a policy set's page each version has **Export YAML** and **JSON** buttons. The `scripts/segmentra-policy.mjs` command-line tool offers `export`, `plan` and `apply` for CI. See [policy-as-code.md](policy-as-code.md) for the format, semantics and limitations.
+A policy set can be exported to, and imported from, a YAML or JSON document (tags, VLANs, hosts and IoT assets by name), for Git, CI and copying policies between instances. An import only ever creates a **DRAFT** version: nothing is approved or deployed by it. The format, the rules of the comparison and the limitations are in [policy-as-code.md](policy-as-code.md).
+
+**Import a policy (operator or admin)**
+1. Open **Policy Sets** and press **Import YAML/JSON**.
+2. Paste the document or pick a `.yaml`, `.yml` or `.json` file.
+3. Press **Check (dry run)**. Green: what would happen and the rules that would be added (`+`) or removed (`-`). Red: every problem with its path; fix the document and check again. Nothing is written yet.
+4. Press **Import as DRAFT**. The policy set is created, or gets a new DRAFT version if the rules differ; if they are the same you are told that nothing changed.
+5. Open the policy set, press **Submit for Approval**, and ask a different user to approve it under **Approvals**. You cannot approve a version you imported.
+
+**Export.** Open a policy set and press **Export YAML** or **JSON** on a version.
+
+**Command line, for CI.** `node scripts/segmentra-policy.mjs export | plan | apply` (see the docs for the connection settings and exit codes). `plan --detailed-exitcode` exits 2 when something would change.
 
 ## 18. Kubernetes Microsegmentation
 

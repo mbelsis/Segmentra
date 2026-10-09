@@ -122,7 +122,7 @@ Supported Linux backends are **nftables, iptables, firewalld, and UFW**. Select 
 - **Policy Templates** — reusable blueprints (e.g., "Web Server") with one-click instantiation; optional auto-apply creates a DRAFT policy when a matching tag is first assigned to hosts
 - **Visual Topology Design** — draw network flows between groups, auto-discover from existing infrastructure, and generate policies automatically
 - **Policy Recommendations** — after firewall learning, auto-generate rules from observed traffic with confidence scoring and IP-to-tag resolution
-- **Policy as Code** — export any policy set (or one version) as a YAML/JSON document that refers to tags, VLANs, hosts and IoT assets by name, and import it back (UI, API or the `scripts/segmentra-policy.mjs` CLI). An import creates the policy set or a new **DRAFT** version, never approves or deploys, is idempotent, validates strictly and reports every problem with its path, has a dry run that shows the diff, and protects the policy set's scope. Works with Git and CI (`plan` on pull requests, `apply` on merge). See [Policy as Code](docs/policy-as-code.md)
+- **Policy as Code** — policy sets as YAML/JSON documents (tags, VLANs, hosts by name) that can be exported, reviewed in Git and imported again; imports only ever create DRAFT versions. See [Policy as Code](#policy-as-code) below
 - **Policy Impact Analysis** — semantic diff showing new/removed allows and denies per host before approval
 - **High-Risk Detection** — audit policies to flag broad rules, wide scopes, and sensitive port exposure
 - **Policy Expiry** — optional time-limited deployments with 24-hour warnings. On expiry the deployment is marked `EXPIRED`, a notification is sent and the expiry action runs: `NOTIFY_ONLY` does nothing else, `REMOVE` removes Segmentra's rules (`table inet segmentra` or the `SEGMENTRA-*` chains) from the hosts, and `REVERT` redeploys the previous successfully deployed version of the same policy set
@@ -195,6 +195,33 @@ Segmentra turns approved policy versions into Kubernetes **NetworkPolicy** manif
 - **Selecting a subset of pods.** Each policy covers the whole namespace (`podSelector: {}`).
 - **Discovering workloads from the cluster.** The sync endpoint returns `501`; workloads are registered by hand with their labels.
 - **Other exec-plugin / OIDC logins** (kubeconfigs that run a program or read a token file) and API servers reachable only through a proxy or over plain `http`.
+
+### Policy as Code
+
+Policy sets can be written, reviewed and applied as **YAML or JSON documents** instead of being typed into the web form. The document uses names for tags, VLANs, hosts and IoT assets, so it can live in Git and be applied to another Segmentra instance. See the [Policy as Code Guide](docs/policy-as-code.md).
+
+**How it works**
+1. **Export** a policy set (or one version) from the UI (**Export YAML / JSON** on each version), the API or `scripts/segmentra-policy.mjs export`. The output is deterministic, so repeated exports do not create noise in Git.
+2. **Edit** the document and keep it in a repository. The policy set is identified by `metadata.name`.
+3. **Plan.** **Import YAML/JSON** with **Check (dry run)**, `segmentra-policy plan` or `?dryRun=true` validate the document and show exactly what would change: rules added (`+`), removed (`-`) or reordered, and warnings. It writes nothing. `plan --detailed-exitcode` exits 2 when changes are pending, for CI.
+4. **Apply.** **Import as DRAFT**, `segmentra-policy apply` or the API creates the policy set, or adds a new **DRAFT** version.
+5. **Review and deploy as usual.** The draft is submitted for approval, approved by a **different** person (the importing user is recorded as an editor and cannot approve it) and deployed. High-risk detection runs on it like on any version.
+
+**Capabilities**
+- **Never approves or deploys.** An import cannot get a rule onto a host by itself; the approval and deployment workflow is unchanged.
+- **Idempotent.** Applying the same document again changes nothing, also before the draft is approved, so `apply` can run on every push.
+- **Strict validation with every problem at once.** Unknown keys are errors (a typo such as `port:` is reported, not ignored), each rule is validated on its own with the rule editor's checks, and each problem is shown with its path, for example `spec.rules[2].source`.
+- **Scope protection.** A different scope in the document (which hosts a deployment targets) is only reported as a warning unless `updateScope` is given.
+- **Roles.** Viewers can export; only operators and admins can import. Every import is written to the audit log (`POLICY_IMPORT`).
+- **Git and CI.** The CLI has `export`, `plan` and `apply`, handles directories and multi-document YAML files, and the docs include a GitHub Actions example (`plan` on pull requests, `apply` on merge).
+
+**Limitations**
+- Segmentra does not pull from Git by itself; a CI job pushes.
+- A document refers to existing tags, VLANs, hosts and IoT assets; it never creates them, and it cannot delete or rename a policy set (the name is the identity). Two policy sets with the same name make an import refuse.
+- Rules in the document replace the rules of the new version; they are not merged with the previous ones.
+- No published JSON Schema, and no atomic import of several policy sets (the CLI applies documents one by one).
+
+**Tested:** `npm run test:integration:policy-code` (48 checks through the API and CLI) and a manual run in Chrome (file picker, dry run, import, export, approval, separation of duties). **Not tested yet:** the browser's own file-download step (the content was verified), the CLI on Windows, the CI example on a real runner, and very large or concurrent imports.
 
 ### Docker Swarm and Docker-published ports
 

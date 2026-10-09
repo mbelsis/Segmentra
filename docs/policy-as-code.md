@@ -11,6 +11,66 @@ A policy set can be exported to, and imported from, a **YAML or JSON document**.
 
 Three ways to use it: the web UI (Policy Sets → **Import YAML/JSON**, and **Export YAML / JSON** per version), the API, and the command-line tool `scripts/segmentra-policy.mjs` for CI.
 
+**Why use it.** Rules edited in a web form are hard to review, to diff and to reproduce. With a document in Git you get a reviewable history, pull-request review of firewall changes, the same policy on a test and a production instance, and a fast way to copy a policy set. Segmentra stays the place where policies are approved and deployed; the document only replaces typing the rules in.
+
+## How it works
+
+```
+ Git repository / file                        Segmentra
+ ┌──────────────────┐   plan / apply     ┌─────────────────────────────────────────────┐
+ │ web-servers.yaml │ ─────────────────▶ │ 1 parse YAML/JSON, validate every rule      │
+ │  names, rules    │  (CLI, UI or API)  │ 2 resolve tag / VLAN / host names to ids    │
+ └──────────────────┘                    │ 3 compare with the base version and drafts  │
+          ▲                              │ 4 dry run: report the diff and roll back    │
+          │ export (deterministic)       │   apply: add a DRAFT version, audit it      │
+          └───────────────────────────── └──────────────────────┬──────────────────────┘
+                                                                │ still manual, by someone else
+                                                                ▼
+                                         submit for approval → approve → deploy (unchanged workflow)
+```
+
+1. **Identity is the name.** `metadata.name` finds the policy set. No policy set with that name: it is created. Exactly one: it gets a new version when the rules differ. More than one: the import refuses.
+2. **References are names.** Tags, VLANs, hosts and IoT assets are looked up by name at import time and stored as ids, exactly as if the rule had been created in the UI. An export turns the ids back into names. The entities must already exist: a document never creates a tag, VLAN or host.
+3. **Validation comes first.** Every rule is validated on its own with the same checks the rule editor applies (ports, CIDRs, protocol/port combinations, FORWARD destinations), unknown keys are errors, and all problems are listed together with their path. Nothing is written when anything is wrong.
+4. **The comparison decides what happens.** The document is compared with the *base* version (the one a new draft would build on: the latest deployed or approved version, otherwise the latest) and with existing DRAFTs, rule by rule and in order, ignoring the numbers in `order`. The same content means `unchanged`: this is what makes `apply` safe to run on every push to Git.
+5. **A dry run is the real thing, rolled back.** It runs the same code in a database transaction and rolls it back, so what it reports is what an apply would do, including warnings.
+6. **The result is a DRAFT.** The new version records the importing user as an editor, an audit event (`POLICY_IMPORT`) is written, and from there the normal workflow applies: submit for approval, approval by a different person (separation of duties applies to imported versions too, and the high-risk detection runs on them), and deployment. Nothing is deployed to a host by an import.
+
+## Using it in the web UI
+
+**Import.** Policy Sets → **Import YAML/JSON** (operators and admins; the button is not shown to other roles).
+1. Paste a document, or pick a `.yaml`, `.yml` or `.json` file: its content appears in the text box.
+2. Press **Check (dry run)**. A green panel says what would happen (`Would create "web-servers" with a DRAFT v1`, `Would add DRAFT version v3`, or `No change: ... already matches v2 (APPROVED)`) and lists every rule that would be added (`+`) or removed (`-`), or `~ rules reordered`. A red panel lists every problem with its path (for example `spec.rules[1].source: tag "x" does not exist`), and **Import as DRAFT** stays disabled until the document is valid.
+3. Press **Import as DRAFT**. The panel now says `Created ...` or `Added DRAFT version ...` and the policy set appears in (or updates in) the list.
+4. Open the policy set, **Submit for Approval** on the new version, and let a different user approve it under **Approvals**. The importer is refused with "You cannot approve a policy version that you created, edited or submitted".
+
+Tick *Also change the scope* only when the document's scope (tag, VLAN or host list) should replace the existing policy set's scope; otherwise a different scope is only reported as a warning.
+
+**Export.** Open a policy set: every version has **Export YAML** and **JSON** buttons that download that version as a document (`<policy-set-name>.yaml` or `.json`). Through the API or CLI, `version=latest` (the default) exports the version a new draft would build on.
+
+## A worked example
+
+```bash
+# 1. Start from what exists
+node scripts/segmentra-policy.mjs export web-servers -o policies/web-servers.yaml
+
+# 2. Edit the file in your editor / a Git branch: open 8443 and block telnet
+#      ports: "443,8443"          (rule 10)
+#      - action: DENY, protocol: tcp, ports: "23", source: 0.0.0.0/0   (new rule)
+
+# 3. See exactly what would happen (nothing is written; exit code 2 means "changes pending")
+node scripts/segmentra-policy.mjs plan policies/web-servers.yaml --detailed-exitcode
+#    plan : policies/web-servers.yaml (web-servers): new DRAFT version v3 (DRAFT)
+#        + ALLOW IN tcp/443,8443 from 10.0.0.0/8 (web from corp)
+#        + DENY IN tcp/23 from 0.0.0.0/0 (no telnet)
+#        - ALLOW IN tcp/443 from 10.0.0.0/8 (web from corp)
+
+# 4. Create the DRAFT; running it again changes nothing
+node scripts/segmentra-policy.mjs apply policies/web-servers.yaml
+
+# 5. In Segmentra: Submit for Approval -> a different user approves -> deploy as usual
+```
+
 ## The document
 
 ```yaml
@@ -135,9 +195,14 @@ The Segmentra server must be reachable from the runner (self-hosted runners for 
 
 An import returns `{ dryRun, action, policySetId, name, versionId, versionNumber, versionStatus, matchesVersion, diff: { added, removed, reordered, unchanged }, scopeChanged, scopeUpdated, warnings }` (`201` when something was created, `200` for a dry run or no change), or `400` with `{ error, message, problems: [{ path, message }] }`. The export is deterministic (stable key and rule order, no timestamps), so repeated exports do not create noise in Git.
 
-## Not tested yet
+## Tested, and not tested yet
 
-- Downloading an export from the browser (the UI buttons call the same endpoint the tests cover, but the file download itself was not exercised in a browser) and importing a document from a file with the file picker. The import panel was exercised in a browser with pasted text.
+**Tested.** `npm run test:integration:policy-code` (48 checks against the real API and the CLI) and a manual run in Chrome: loading a YAML and a JSON file with the file picker, **Check (dry run)** and **Import as DRAFT** for a new policy set and for a new version, the per-version **Export YAML** / **JSON** buttons (content of the generated documents checked), **Submit for Approval**, the refusal when the importing user tries to approve (with the message above), approval by a different user, and the absence of the import button for an approver.
+
+**Not tested yet**
+
+- The browser's own download step: the exported file content was verified by intercepting the download, but a file landing in the Downloads folder was not observed.
+- The red validation panel was exercised with pasted text, not with an invalid file loaded through the file picker.
 - The CLI on Windows and on Node versions other than the one used for development (24).
 - The GitHub Actions workflow above is an example and has not been run on a real runner.
 - Very large policy sets (thousands of rules) and concurrent imports of the same policy set (the policy set row is locked, which should serialise them, but this was not stress-tested).
