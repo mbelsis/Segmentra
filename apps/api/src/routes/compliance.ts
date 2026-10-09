@@ -194,4 +194,15 @@ complianceRouter.post('/hosts/bulk', async (req, res) => {
   return res.json({ results });
 });
 
+/** Live compliance check of one enabled host by id (used by compliance reports); null-safe for missing hosts. */
+export async function checkHostCompliance(hostId: string): Promise<any> {
+  const hostRes = await pool.query(
+    `SELECT h.id, h.hostname, h.mgmt_ip, h.ssh_port, h.firewall_backend FROM hosts h WHERE h.id=$1 AND h.enabled=true`,
+    [hostId]
+  );
+  if (!hostRes.rows[0]) return { hostId, hostname: hostId, status: 'error', error: 'host_not_found' };
+  const deployments = await lastDeployments([hostId]);
+  return checkHost(hostRes.rows[0], deployments.get(hostId));
+}
+
 export default complianceRouter;

@@ -175,6 +175,19 @@ export const api = {
   deleteVlan: (id: string) => request<{ ok: boolean }>(`/vlans/${id}`, { method: 'DELETE' }),
 
   policySets: () => request<{ policySets: any[] }>('/policy-sets'),
+  // === Compliance evidence reports ===
+  complianceReports: () => request<{ reports: any[] }>('/compliance/reports'),
+  complianceReport: (id: string) => request<any>(`/compliance/reports/${id}`),
+  generateComplianceReport: (body: any) => request<any>('/compliance/reports', { method: 'POST', body: JSON.stringify(body) }),
+  /** Fetch a report in another format (html, csv) with the session token; returns the text and the file name. */
+  complianceReportFile: async (id: string, format: 'html' | 'csv', dataset?: string) => {
+    const token = getToken();
+    const q = `format=${format}${dataset ? `&dataset=${encodeURIComponent(dataset)}` : ''}`;
+    const resp = await fetch(`${API_BASE}/compliance/reports/${id}?${q}`, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+    if (!resp.ok) throw new ApiError(`${resp.status} ${resp.statusText}`, resp.status, undefined);
+    const disposition = resp.headers.get('content-disposition') || '';
+    return { text: await resp.text(), filename: /filename="([^"]+)"/.exec(disposition)?.[1] ?? `report.${format}` };
+  },
   /** Download a policy set (or one version) as a policy-as-code document (YAML or JSON). */
   exportPolicySet: async (id: string, format: 'yaml' | 'json' = 'yaml', version?: number | string) => {
     const token = getToken();

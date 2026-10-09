@@ -22,6 +22,7 @@ import { PolicyTestPage } from './pages/PolicyTestPage'
 import { KubernetesPage } from './pages/KubernetesPage'
 import { IoTPage } from './pages/IoTPage'
 import { SecurityAuditPage } from './pages/SecurityAuditPage'
+import { ComplianceReportPage } from './pages/ComplianceReportPage'
 import { NotificationsPage } from './pages/NotificationsPage'
 import { AuthProvider } from './lib/auth-context'
 import { RequireRole } from './components/RequireRole'
@@ -52,6 +53,7 @@ function App() {
           <Route path="kubernetes" element={<KubernetesPage />} />
           <Route path="iot" element={<IoTPage />} />
           <Route path="security-audit" element={<SecurityAuditPage />} />
+          <Route path="compliance-report" element={<ComplianceReportPage />} />
           {/* Audit log: API allows every authenticated role to read */}
           <Route path="audit" element={<AuditPage />} />
           {/* Templates: readable by every role; create/edit gated inside the page */}

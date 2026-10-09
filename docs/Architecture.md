@@ -227,6 +227,7 @@ Routers are mounted in `apps/api/src/index.ts` (inventory and policy sub-routers
 - `GET /policy-sets/:id`
 - `PUT /policy-sets/:id`
 - `DELETE /policy-sets/:id`
+- `POST /compliance/reports` — `operator`, `approver`, `admin`. Generates and stores a compliance evidence snapshot (frameworks, period, thresholds, optional `liveDrift` for operator/admin). `GET /compliance/reports`, `GET /compliance/reports/:id?format=json|html|csv&dataset=` — all roles; reports are immutable and the SHA-256 is re-checked on every read. See [compliance-reports.md](compliance-reports.md)
 - `GET /policy-sets/:id/export?format=yaml|json&version=latest|N|<id>` — all roles. Policy as code: the policy set as a `segmentra.io/v1` `PolicySet` document (names instead of ids, deterministic output). See [policy-as-code.md](policy-as-code.md)
 - `POST /policy-sets/import?dryRun=&updateScope=` — `operator`, `admin`. Body: YAML text, the document as JSON, or `{ content }`. Creates the policy set or a DRAFT version; idempotent; never approves; `dryRun` rolls back; an existing set's scope is only changed with `updateScope`. `400` with `problems[{path,message}]` for an invalid document, `409 ambiguous_policy_set`
 

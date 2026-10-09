@@ -20,6 +20,7 @@ import { auditRouter } from './routes/audit.js';
 import { dashboardRouter } from './routes/dashboard.js';
 import { troubleshootRouter } from './routes/troubleshoot.js';
 import complianceRouter from './routes/compliance.js';
+import { complianceReportsRouter } from './routes/compliance-reports.js';
 import hostReadinessRouter from './routes/host-readiness.js';
 import { topologyRouter } from './routes/topology.js';
 import { recommendationsRouter } from './routes/recommendations.js';
@@ -52,6 +53,8 @@ app.use('/api/ssh-credentials', sshCredentialsRouter);
 app.use('/api', auditRouter);
 app.use('/api', dashboardRouter);
 app.use('/api/troubleshoot', troubleshootRouter);
+// Reports first: the host compliance router below is operator/admin only, reports are readable by every role.
+app.use('/api/compliance/reports', complianceReportsRouter);
 app.use('/api/compliance', complianceRouter);
 app.use('/api/host-readiness', hostReadinessRouter);
 app.use('/api/topology', topologyRouter);

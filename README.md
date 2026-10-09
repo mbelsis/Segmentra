@@ -223,6 +223,24 @@ Policy sets can be written, reviewed and applied as **YAML or JSON documents** i
 
 **Tested:** `npm run test:integration:policy-code` (48 checks through the API and CLI) and a manual run in Chrome (file picker, dry run, import, export, approval, separation of duties). **Not tested yet:** the browser's own file-download step (the content was verified), the CLI on Windows, the CI example on a real runner, and very large or concurrent imports.
 
+### Compliance Evidence Reports
+
+Generate a **point-in-time evidence report** for an assessor, mapped to controls of **PCI DSS v4.0, ISO/IEC 27001:2022, SOC 2 and the HIPAA Security Rule**. It is evidence from the data Segmentra holds, not an audit opinion or a certification. See the [Compliance Reports Guide](docs/compliance-reports.md).
+
+**How it works.** Compliance Report in the sidebar (or `POST /api/compliance/reports`): choose the frameworks and a period (default 90 days). Segmentra collects the evidence from its own data without touching any host, turns it into measurements, evaluates every control (**Evidence**, **Attention**, or **Not covered** with the reason), stores the snapshot with its **SHA-256**, and records the generation in the audit log. The report is read as a JSON document, a stand-alone printable HTML page (Save as PDF from the browser), or CSV datasets (controls, hosts, changes, deployment failures, inactive users, SSH credentials, IoT assets, and the full audit events of the period). Every read recomputes the hash and shows whether the stored report is intact.
+
+**What it covers**
+- **Coverage:** enabled hosts under a deployed policy, hosts without one, stale hosts, policy sets not approved recently.
+- **Change control:** versions approved in the period, approval time, high-risk approvals, approvals by someone who edited or submitted the version (Segmentra refuses these, so it should be zero), approvals waiting too long.
+- **Deployments:** outcomes, failed hosts, automatic rollbacks. **Drift:** optional live check that reads the managed hosts over SSH.
+- **Access and credentials:** accounts and roles, administrators, accounts without a recent login, SSH credentials not rotated, Kubernetes clusters with TLS verification disabled.
+- **Audit trail:** events in the period by action, administrative and credential events.
+- **IoT/OT, Kubernetes and Docker Swarm:** assets without a protecting gateway, policy status and drift, Swarm nodes.
+
+**Limitations.** A snapshot, not a history (generate regularly to show a trend; there is no scheduler). Segmentra only sees its own inventory. The hash detects alteration but is not a digital signature. Lists are capped at 500 rows (counts are exact; use the CSVs). Outbound restrictions, traffic monitoring and transmission security are shown as **Not covered**. The control references are paraphrased and have not been reviewed by an assessor.
+
+**Tested:** `npm run test:integration:compliance` (35 checks through the API, including tamper detection, a fixture of unmanaged hosts and unprotected IoT assets, period scoping, roles, HTML escaping and CSV formula neutralisation) and a manual run in Chrome. **Not tested yet:** the live drift check inside a report, large inventories, saving the HTML as PDF in different browsers, and typing in the generate form in the automated browser used for testing. **Not supported yet:** scheduled generation and delivery, server-side PDF and signed reports, other frameworks, and reports scoped to a subset of hosts (for example only the cardholder-data environment).
+
 ### Docker Swarm and Docker-published ports
 
 A Swarm node is an ordinary Linux server, so Segmentra manages its **host firewall over SSH** exactly like any other host. What it adds is awareness of two things Docker does that make a plain host policy unsafe or ineffective. There is no Swarm API integration: Segmentra does not talk to the Docker daemon, and it does not manage overlay or container-to-container traffic. See the [Docker Swarm Guide](docs/docker-swarm.md) for details.
@@ -440,7 +458,7 @@ npm run test:integration:ssh-docker
 
 This builds the current code, starts a temporary API + PostgreSQL + 3 target-container environment, deploys sample firewall ACLs through the real API using both SSH password and SSH key authentication, verifies the resulting `iptables` state, and runs live `ping` checks between the targets. For full details, see [tests/README.md](tests/README.md).
 
-Other integration tests need a running Segmentra API: `npm run test:integration:policy-code` (policy as code: export, import, validation, CLI; no Docker needed), and, with Docker Desktop or Docker, `npm run test:integration:k8s -- <kindnet|calico|cilium>` (Kubernetes enforcement on kind clusters) and `npm run test:integration:swarm` (a 3-node Docker Swarm lab). They create their own lab and remove it afterwards; run them against a development stack, because they leave users, hosts and archived policy sets behind.
+Other integration tests need a running Segmentra API: `npm run test:integration:policy-code` (policy as code: export, import, validation, CLI) and `npm run test:integration:compliance` (compliance reports; the tamper check uses `docker exec` on the database container and is skipped without it), neither of which needs a lab, and, with Docker Desktop or Docker, `npm run test:integration:k8s -- <kindnet|calico|cilium>` (Kubernetes enforcement on kind clusters) and `npm run test:integration:swarm` (a 3-node Docker Swarm lab). They create their own lab and remove it afterwards; run them against a development stack, because they leave users, hosts and archived policy sets behind.
 
 ---
 
@@ -594,6 +612,7 @@ Everything below was exercised against Docker containers. The core workflow went
   - SSRF checks.
 - **Threat intelligence:** AbuseIPDB against a mock of its API (error handling, auto-block drafts, deduplication).
 - **SIEM forwarding:** every audit event forwarded exactly once (including a second API replica and a reconnect), with no secrets in messages. Integration and notification secrets are encrypted at rest; a database dump showed none of them.
+- **Compliance reports:** `npm run test:integration:compliance` runs 35 checks against the real API (see [Compliance Evidence Reports](#compliance-evidence-reports)).
 - **Policy as code:** `npm run test:integration:policy-code` runs 48 checks against the real API and the CLI: dry run writes nothing, create, idempotency (YAML text, JSON, `{content}`), deterministic export and export-import round trip (including FORWARD rules and interface scopes), diff on change and reordering detection, the approval workflow and separation of duties on imported drafts, all validation problems reported together with their paths (typos, unknown tags, duplicate order, bad CIDR and ports, FORWARD without destination), scope protection (`updateScope`), permissions (viewer and approver cannot import), ambiguous names, and the CLI's `plan`/`apply` exit codes.
 - **Docker Swarm:** `npm run test:integration:swarm` builds a 3-node Swarm on Docker Desktop (privileged Docker-in-Docker nodes with sshd, an overlay network, a published nginx service and two client containers) and runs 35 checks through the real API and SSH executor: the allowed client reaches the published port on every node and a client the policy does not allow is blocked on every node, the overlay stays healthy without the policy mentioning any Swarm port, a port published later is blocked without a redeployment even after Docker re-ordered its `FORWARD` jumps, redeploying is idempotent, remove, backup and restore handle the `DOCKER-USER` jump and leave Docker's chain alone, the saved-rules rendering merges with existing fail2ban/Docker lines, and each feature makes a difference when switched off. `npm run test:swarm-compile` unit-tests the generated rules for both backends.
 - **Kubernetes:** `npm run test:integration:k8s` builds 3-node kind clusters with **kindnet**, **Calico** and **Cilium** and runs 69 checks on each against the real API: stored kubeconfig and service-account token credentials, apply, dry run, drift check and removal through Segmentra, real pod-to-pod TCP/UDP enforcement (CIDR, HOST, TAG, VLAN, `any`, port ranges, same-node and cross-node clients, selector peers, updates), refusal to overwrite or delete a policy Segmentra did not create, read-only RBAC failure, and no credential material in any API response. The cloud-login token minting has unit tests (`npm run test:k8s-auth`: SigV4 against AWS's documented example, JWT signature, mocked token endpoints). Earlier generated manifests were also applied to k3s v1.30 and enforced.
@@ -624,6 +643,7 @@ See also [Known Limitations](#known-limitations) and the [OT/IoT guide](docs/iot
 
 - **Email notifications.** Email channels can be configured but there is no SMTP sending yet; they report FAILED with "Email delivery is not implemented yet". Plan: add an SMTP client (e.g. nodemailer) with TLS, authentication stored encrypted like other secrets, and a test-send button.
 - **Kubernetes workload discovery.** The sync endpoint returns `501 not_implemented`. Workloads are registered by hand; with the stored cluster credentials Segmentra could now read namespaces, workloads and pod labels from the cluster and map labels to tags automatically. Generated NetworkPolicies still select all pods in the namespace (`podSelector: {}`).
+- **Compliance report follow-ups.** Scheduled generation and delivery, reports scoped by tag or VLAN (for example only the cardholder-data environment), more frameworks, signed PDF output, and continuous firewall-log evidence (see [Compliance Reports](docs/compliance-reports.md#not-supported-yet)).
 - **Policy as code follow-ups.** Segmentra pulling from Git itself, hosts/tags/VLANs/templates as code, a published JSON Schema, and atomic multi-document imports (see [Policy as Code](docs/policy-as-code.md#not-supported-yet)).
 - **Docker Swarm awareness.** Read services, stacks and published ports from the Docker API so policies can refer to services, warn when a swarm node is missing from the inventory, and cover container-to-container and overlay traffic.
 - **UI for API-only features.** These work through the API but have no screens yet: policy recommendations, enforcement points (network device ACLs), IoT baselines and observed flows, host interfaces, and the per-host compiled-policy preview (`render`).
@@ -654,6 +674,7 @@ See also [Known Limitations](#known-limitations) and the [OT/IoT guide](docs/iot
 | [Kubernetes Guide](docs/kubernetes.md) | K8s NetworkPolicy management |
 | [Docker Swarm Guide](docs/docker-swarm.md) | Swarm node profile and Docker-published ports |
 | [Policy as Code](docs/policy-as-code.md) | YAML/JSON export and import, CLI and CI workflow |
+| [Compliance Reports](docs/compliance-reports.md) | Evidence reports mapped to PCI DSS, ISO 27001, SOC 2 and HIPAA |
 | [Ansible Playbook](docs/playbook-ansible.md) | Deployment playbook documentation |
 | [Original Specification](docs/segmentra_fleet_microsegmentation_firewall_manager_full_specification.md) | The original product specification (historical; the implementation differs in places) |
 

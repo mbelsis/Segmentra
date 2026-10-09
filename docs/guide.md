@@ -826,6 +826,15 @@ Go to **Integrations** in the sidebar (admin only) and click **+ New Integration
 
 ---
 
+## Compliance reports
+
+**Compliance Report** in the sidebar produces a point-in-time evidence report for an assessor, mapped to PCI DSS v4.0, ISO/IEC 27001:2022, SOC 2 and the HIPAA Security Rule. It is evidence from Segmentra's data, not an audit opinion; see [compliance-reports.md](compliance-reports.md) for what is measured and the limitations.
+
+1. Choose the frameworks and the period (default 90 days). Under *Thresholds and live check* you can change what counts as stale, overdue or inactive, and (operator or admin) also read every managed host over SSH to compare its live rules with the last deployment (slow).
+2. Press **Generate report**. The report opens with its hash and integrity status, summary cards (red where something needs attention), a table per framework (control, status **Evidence** / **Attention** / **Not covered**, and the evidence behind it), and the hosts without a deployed policy and IoT assets without a gateway.
+3. **Open printable report** and the browser's print dialog give a PDF; **JSON** and the **CSV dataset** list (controls, hosts, changes, deployment failures, inactive users, SSH credentials, IoT assets, full audit events) are for spreadsheets and archives.
+4. Earlier reports stay under **Stored reports** and cannot be changed or deleted; opening one re-checks its integrity.
+
 ## Policy as code
 
 A policy set can be exported to, and imported from, a YAML or JSON document (tags, VLANs, hosts and IoT assets by name), for Git, CI and copying policies between instances. An import only ever creates a **DRAFT** version: nothing is approved or deployed by it. The format, the rules of the comparison and the limitations are in [policy-as-code.md](policy-as-code.md).
