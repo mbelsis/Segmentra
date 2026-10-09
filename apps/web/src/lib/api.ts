@@ -220,8 +220,10 @@ export const api = {
     request<{ rule: any }>(`/policy-rules/${ruleId}`, { method: 'PUT', body: JSON.stringify(b) }),
   deleteRule: (ruleId: string) =>
     request<{ ok: boolean }>(`/policy-rules/${ruleId}`, { method: 'DELETE' }),
-  submitApproval: (versionId: string) =>
-    request<{ version: any }>(`/policy-versions/${versionId}/submit-approval`, { method: 'POST' }),
+  submitApproval: (versionId: string, reason?: string) =>
+    request<{ version: any }>(`/policy-versions/${versionId}/submit-approval`, { method: 'POST', body: JSON.stringify(reason?.trim() ? { reason: reason.trim() } : {}) }),
+  deploymentCreators: () => request<{ creators: Array<{ username: string; display_name: string | null; deployments: number }> }>(`/deployments/creators`),
+  myApprovalRequests: () => request<{ requests: any[] }>(`/policy-versions/my-requests`),
   pendingApprovals: () => request<{ versions: any[] }>(`/policy-versions/pending-approval`),
   approve: (versionId: string) => request<{ version: any }>(`/policy-versions/${versionId}/approve`, { method: 'POST' }),
   reject: (versionId: string, reason: string) =>

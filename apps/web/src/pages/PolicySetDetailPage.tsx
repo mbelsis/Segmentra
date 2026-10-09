@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 
 import { api, errorMessage } from '../lib/api';
+import { Modal } from '../components/Modal';
 import { useAuth, hasRole } from '../lib/auth-context';
 
 export function PolicySetDetailPage() {
@@ -14,6 +15,9 @@ export function PolicySetDetailPage() {
   const [tags, setTags] = useState<any[]>([]);
   const [vlans, setVlans] = useState<any[]>([]);
   const [error, setError] = useState<string>('');
+  const [submitTarget, setSubmitTarget] = useState<any | null>(null);
+  const [submitReason, setSubmitReason] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (!policySetId) return;
@@ -90,13 +94,26 @@ export function PolicySetDetailPage() {
     }
   }
 
-  async function submitForApproval(versionId: string) {
-    if (!confirm('Submit this policy version for approval?')) return;
+  // Opens the dialog where the author says why the version is sent for approval; the approver sees it and it is
+  // written to the audit log together with who asked and when.
+  function submitForApproval(versionId: string) {
+    const v = versions.find((x) => x.id === versionId);
+    setSubmitTarget(v ?? { id: versionId });
+    setSubmitReason('');
+  }
+
+  async function confirmSubmit() {
+    if (!submitTarget) return;
+    setSubmitting(true);
     try {
-      await api.submitApproval(versionId);
+      await api.submitApproval(submitTarget.id, submitReason);
+      setSubmitTarget(null);
       loadData();
     } catch (e: any) {
       setError(errorMessage(e));
+      setSubmitTarget(null);
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -247,7 +264,12 @@ export function PolicySetDetailPage() {
                     )}
                   </td>
                   <td>
-                    {v.change_summary || '-'}
+                    {v.change_summary || (v.submission_note ? null : '-')}
+                    {v.submission_note && (
+                      <div style={{ fontSize: '0.85em', color: '#5c4633', marginTop: v.change_summary ? 4 : 0 }}>
+                        Reason for approval: {v.submission_note}
+                      </div>
+                    )}
                     {isRejected && v.rejection_reason && (
                       <div style={{ color: '#a63d2f', fontSize: '0.85em', marginTop: 4 }}>
                         Reason: {v.rejection_reason}
@@ -290,6 +312,39 @@ export function PolicySetDetailPage() {
           </tbody>
         </table>
       </div>
+      {submitTarget && (
+        <Modal
+          title={submitTarget.version_number ? `Send version ${submitTarget.version_number} for approval` : 'Send for approval'}
+          onClose={() => setSubmitTarget(null)}
+          footer={
+            <>
+              <button className="btn-secondary" onClick={() => setSubmitTarget(null)} disabled={submitting}>Cancel</button>
+              <button className="btn-primary" onClick={confirmSubmit} disabled={submitting}>{submitting ? 'Sending...' : 'Send for approval'}</button>
+            </>
+          }
+        >
+          <p style={{ marginTop: 0, color: '#5c4633' }}>
+            An approver will review this version before it can be deployed. Tell them what changed and why: the approver sees this text, and it is stored in the audit log with who asked and when.
+          </p>
+          {submitTarget.status === 'REJECTED' && submitTarget.rejection_reason && (
+            <div style={{ background: '#faf0ee', border: '1px solid #e8c4bf', borderRadius: 8, padding: '8px 12px', marginBottom: 12, fontSize: 13, color: '#a63d2f' }}>
+              Previously rejected: {submitTarget.rejection_reason}
+            </div>
+          )}
+          <label htmlFor="submit-reason" style={{ display: 'block', fontWeight: 600, marginBottom: 6 }}>Reason / description</label>
+          <textarea
+            id="submit-reason"
+            value={submitReason}
+            onChange={(e) => setSubmitReason(e.target.value)}
+            maxLength={1000}
+            rows={5}
+            placeholder="For example: open 443 for the new web tier, ticket CHG-1234. Needed before Friday's release."
+            style={{ width: '100%', boxSizing: 'border-box' }}
+            autoFocus
+          />
+          <div style={{ fontSize: 12, color: '#97846c', textAlign: 'right' }}>{submitReason.length}/1000, optional</div>
+        </Modal>
+      )}
     </div>
   );
 }

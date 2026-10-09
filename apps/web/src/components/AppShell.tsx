@@ -1,5 +1,7 @@
+import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 
+import { api } from '../lib/api';
 import { clearToken } from '../lib/auth';
 import { useAuth, hasRole } from '../lib/auth-context';
 
@@ -27,6 +29,20 @@ export function AppShell() {
   const isApprover = hasRole(roles, 'approver', 'admin');
   const isAdmin = hasRole(roles, 'admin');
 
+  // Counters in the menu: versions waiting for my decision (approvers) and my versions that were rejected (authors).
+  const [pendingCount, setPendingCount] = useState(0);
+  const [rejectedCount, setRejectedCount] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    const load = () => {
+      if (isApprover) api.pendingApprovals().then((r) => { if (alive) setPendingCount(r.versions.length); }).catch(() => {});
+      if (isOperator) api.myApprovalRequests().then((r) => { if (alive) setRejectedCount(r.requests.filter((x: any) => x.status === 'REJECTED').length); }).catch(() => {});
+    };
+    load();
+    const t = setInterval(load, 30000);
+    return () => { alive = false; clearInterval(t); };
+  }, [isApprover, isOperator]);
+
   return (
     <div className="appShell">
       <nav className="nav">
@@ -37,9 +53,9 @@ export function AppShell() {
         <NavLink to="/" end>Dashboard</NavLink>
 
         {sectionLabel('Policies')}
-        <NavLink to="/policies">Policy Sets</NavLink>
+        <NavLink to="/policies">Policy Sets{rejectedCount > 0 && <span className="nav-badge nav-badge-warn" title="Policy versions of yours that were rejected">{rejectedCount}</span>}</NavLink>
         <NavLink to="/policy-templates">Templates</NavLink>
-        {isApprover && <NavLink to="/approvals">Approvals</NavLink>}
+        {isApprover && <NavLink to="/approvals">Approvals{pendingCount > 0 && <span className="nav-badge" title="Versions waiting for review">{pendingCount}</span>}</NavLink>}
         {isViewer && <NavLink to="/deployments">Deployments</NavLink>}
 
         {sectionLabel('Infrastructure')}

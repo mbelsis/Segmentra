@@ -395,7 +395,7 @@ A **policy set** is a named policy with a **scope**: the hosts it applies to, ch
 ### 5. Approvals: a second person reviews (`approver` or `admin`, but not the author)
 
 - New versions must be approved by a user with the **`approver` or `admin` role who did not create, edit or submit that version**. The app blocks self-approval ("You cannot approve a policy version that you created, edited or submitted").
-- On the **Approvals** page, the reviewer can expand a version, use **Analyze Impact** to compare it with an earlier approved or deployed version on sample hosts, and then **Approve** or **Reject** it with a reason.
+- When sending a version for approval the author can type a **reason**; the reviewer sees it on the **Approvals** page. **View Rules** opens a dialog with the rules (and an optional **Impact analysis** against an earlier version); **Reject** opens its own dialog and asks for a reason. The author sees the outcome on the Dashboard (**Your approval requests**), in a counter next to Policy Sets, and on the policy set page. Every submission, approval and rejection is written to the audit log with who asked, when, why, who decided and when.
 - A rejected version can be fixed and resubmitted. An approved version becomes `APPROVED` and can be deployed.
 - **High-risk deployments** (rules that open sensitive or management ports to very broad sources, "any/any"-style rules, or a wide interface scope across many hosts) also need a deployment-level approval by an `approver`/`admin` other than the person who created the deployment.
 

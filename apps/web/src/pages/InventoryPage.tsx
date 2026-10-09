@@ -14,6 +14,7 @@ function effectiveCredentialLabel(ec: any): string {
   return `${ec.name} (${why})`;
 }
 import { HostPolicyVisualization } from '../components/HostPolicyVisualization';
+import { ReadinessSummary } from '../components/ReadinessSummary';
 import { DiscoveryTab } from '../components/DiscoveryTab';
 
 type Tab = 'hosts' | 'tags' | 'vlans' | 'tag-rules' | 'discovery';
@@ -1201,48 +1202,7 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                           View Visualization
                         </button>
                       </div>
-                      {readinessResults.has(h.id) && (
-                        <div style={{ marginTop: 4, fontSize: '0.85em' }}>
-                          {(() => {
-                            const result = readinessResults.get(h.id);
-                            return (
-                              <div style={{ 
-                                padding: 8, 
-                                background: result.ready ? '#e8f5e9' : '#ffebee', 
-                                borderRadius: 4,
-                                marginTop: 4
-                              }}>
-                                <strong>{result.ready ? '✓ Ready' : '✗ Not Ready'}</strong>
-                                {result.backend !== 'unknown' && (
-                                  <div>Backend: {result.backend}</div>
-                                )}
-                                {result.persistence && (
-                                  <div title={[...result.persistence.warnings, ...result.persistence.notes].join('\n')}>
-                                    Survives reboot:{' '}
-                                    {result.persistence.available
-                                      ? `✓ via ${result.persistence.method ?? 'distribution service'} (${result.persistence.distro === 'rhel' ? 'RHEL family' : result.persistence.distro === 'debian' ? 'Debian/Ubuntu' : 'unknown distro'})`
-                                      : `⚠ no (${result.persistence.distro === 'unsupported' ? 'unsupported distribution' : 'see warnings'})`}
-                                  </div>
-                                )}
-                                {result.errors.length > 0 && (
-                                  <div style={{ color: '#d32f2f', marginTop: 4 }}>
-                                    {result.errors.map((e: string, i: number) => (
-                                      <div key={i}>• {e}</div>
-                                    ))}
-                                  </div>
-                                )}
-                                {result.warnings.length > 0 && (
-                                  <div style={{ color: '#f57c00', marginTop: 4 }}>
-                                    {result.warnings.map((w: string, i: number) => (
-                                      <div key={i}>⚠ {w}</div>
-                                    ))}
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })()}
-                        </div>
-                      )}
+                      {readinessResults.has(h.id) && <ReadinessSummary result={readinessResults.get(h.id)} />}
                     </td>
                   </tr>
                 ))}

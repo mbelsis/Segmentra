@@ -180,6 +180,8 @@ Click **Check Readiness** on a host row to verify:
 - The `nf_tables` kernel module is loaded (for nftables; a warning only)
 - Firewall backend is auto-detected if set to `auto`, preferring active firewalld/UFW; conflicting active managers or failed detection stop deployment
 
+The result is shown as a short summary: a headline (**Ready to deploy**, **Ready to deploy, with notes** or **Not ready**), the firewall in use, and one titled finding per issue in plain words (for example *Rules are lost on reboot*, *Ansible needs Python*). Anything that blocks a deployment is red, notes that need your attention are amber and informational ones grey. The raw technical messages are under **Technical details**.
+
 ### Step 6: (Optional) Discover Hosts Automatically
 
 Instead of adding hosts by hand, use **Inventory → Discovery**:
@@ -375,39 +377,41 @@ All rules go into one `HOST_LIST` policy set with a DRAFT version, and every hos
 
 ### Step 1: Submit for Approval
 
-On the policy set page, click **Submit for Approval** next to the DRAFT version (or **Resubmit for Approval** for a REJECTED one). The system automatically:
+On the policy set page, click **Submit for Approval** next to the DRAFT version (or **Resubmit for Approval** for a REJECTED one). A dialog asks for a **reason / description** (optional, up to 1000 characters): what changed and why, for example a ticket number. For a resubmission the dialog also shows why the version was rejected. When you send it, the system automatically:
 - Evaluates high-risk patterns (broad source ranges, ALL_INTERFACES scope, sensitive ports)
 - Flags the version as high-risk if applicable
 - Changes status from DRAFT to PENDING_APPROVAL
+- Stores your reason with the version; the approver sees it, and it is written to the audit log
 
 ### Step 2: Review and Approve
 
-Go to **Approvals** in the sidebar. The page displays a table of all pending approval versions automatically — no need to look up or paste version UUIDs.
-
-**Table columns:**
+Go to **Approvals** in the sidebar (a number next to it counts the versions waiting for review). The page lists every pending version; clicking a row does nothing, so nothing opens by accident.
 
 | Column | Description |
 |--------|-------------|
 | **Policy Set** | Name of the parent policy set |
-| **Version** | Version number |
+| **Version** | Version number, with a **HIGH RISK** badge when the high-risk evaluator flagged it |
 | **Rules** | Number of rules in the version |
-| **Submitted By** | User who created and submitted the version |
-| **Submitted** | Submission date with relative time (e.g., "3 hours ago") |
-| **Change Summary** | Brief description of what changed |
-
-Versions flagged by the high-risk evaluator display a **HIGH RISK** badge.
+| **Requested By** | The user who sent it for approval |
+| **Requested** | When, with relative time |
+| **Reason** | The reason the author typed (or the change summary) |
 
 **Actions per row:**
 
-- **Approve** (green button) — approve the version
-- **Reject** — expands to reveal a textarea for entering a rejection reason
-- **View Rules** — links to the full version detail page
+- **Approve**: approves the version.
+- **Reject**: opens a dialog asking for the **reason for rejection** (required). The author sees it and can fix and resubmit.
+- **View Rules**: opens a dialog with the version's rules (direction, action, protocol, ports, source, destination, comment), who asked and why, and **Approve** / **Reject** buttons. A collapsible **Impact analysis** compares the version with an earlier approved or deployed one on sample hosts (new allows, removed allows, new denies, removed denies per host). **Open full page** goes to the version page.
 
-**Expanded row detail:**
+### Step 3: The author finds out
 
-Expanding a row shows two panels:
-- **Left:** Rejection reason form (required when rejecting)
-- **Right:** Optional impact analysis — compare the pending version against a previous approved or deployed version on sample hosts, showing a semantic diff of new allows, removed allows, new denies, and removed denies per host
+- **Dashboard**: the card **Your approval requests** lists your versions of the last 30 days as waiting, approved (who and when, "ready to deploy") or rejected (who, when and the reason).
+- **Menu**: a red number next to **Policy Sets** counts your rejected versions.
+- **Policy set page and version page** show the status, your reason and the rejection reason.
+- **Webhooks and email-style integrations**: `POLICY_APPROVED` and `POLICY_REJECTED` can be subscribed to under Notifications (see [Notifications](#notifications)).
+
+### The audit trail
+
+Every submission, approval and rejection is an Audit Log entry with the complete picture: policy set and version, who created it, **who requested** and **when**, the author's **reason**, **who decided**, **when**, the decision and, for a rejection, the **rejection reason** (`POLICY_SUBMIT`, `POLICY_APPROVE`, `POLICY_REJECT`).
 
 ### Approval Constraints
 
@@ -424,7 +428,7 @@ Expanding a row shows two panels:
 Go to **Deployments** and click **+ Create Deployment**:
 
 1. **Policy Version:** pick an APPROVED or DEPLOYED version from the list (shown as `<policy set> v<n> (<status>)`)
-2. **Deployment Mode:**
+2. **Deployment Mode** (a short explanation of the chosen mode is shown under the picker, and a tooltip on the mode in the list and next to the Mode filter):
    - `FULL` — all target hosts
    - `CANARY` — the first hosts by hostname (**Canary Size**, default 1) are deployed first; if one of them fails, the remaining hosts are not deployed
    - `PROGRESSIVE` — hosts are deployed in batches (**Batch Size**, default 5); if a host fails, the rollout stops at the end of that batch
@@ -433,6 +437,8 @@ Go to **Deployments** and click **+ Create Deployment**:
 3. **Target Type:** Tag, VLAN or specific hosts (only enabled hosts are included)
 4. **Schedule Deployment:** (optional) start at a future time (e.g., maintenance window); a background job starts it automatically when it is due
 5. **Policy Expires At / On Expiry:** (optional) see [Policy Expiry](#20-policy-expiry-time-limited-deployments)
+
+The deployments list can be filtered by search text, mode, status, **Created by** (the user who created the deployment), tag, VLAN and date; hover the mode in the list, or **what is this?** next to the Mode filter, for what canary, progressive and full mean.
 
 If the policy version is high-risk (for example broad sources or many targets), the deployment needs a second person: an approver or admin clicks **Approve** on the deployment before it can be started.
 

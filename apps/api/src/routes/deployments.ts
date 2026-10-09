@@ -561,6 +561,16 @@ deploymentsRouter.post('/deployments', requireRole('operator', 'admin'), async (
   res.status(201).json({ deployment });
 });
 
+// Who created deployments: feeds the "Created by" filter.
+deploymentsRouter.get('/deployments/creators', requireRole('viewer', 'operator', 'approver', 'admin'), async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT u.username, u.display_name, COUNT(*)::int AS deployments
+       FROM deployments d JOIN users u ON u.id = d.created_by
+      GROUP BY u.username, u.display_name ORDER BY u.username`
+  );
+  res.json({ creators: rows });
+});
+
 deploymentsRouter.get('/deployments', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   // Check for stale hosts before returning deployments
   await checkAndTimeoutStaleHosts();
@@ -571,6 +581,7 @@ deploymentsRouter.get('/deployments', requireRole('viewer', 'operator', 'approve
   const status = req.query.status as string | undefined;
   const tag = req.query.tag as string | undefined;
   const vlan = req.query.vlan as string | undefined;
+  const createdBy = req.query.createdBy as string | undefined;
   const fromDate = req.query.fromDate as string | undefined;
   const toDate = req.query.toDate as string | undefined;
   const sortBy = (req.query.sortBy as string) || 'created_at';
@@ -602,6 +613,13 @@ deploymentsRouter.get('/deployments', requireRole('viewer', 'operator', 'approve
   if (status) {
     conditions.push(`d.status = $${paramIndex}`);
     params.push(status);
+    paramIndex++;
+  }
+
+  // Filter by creator (username)
+  if (createdBy) {
+    conditions.push(`d.created_by IN (SELECT id FROM users WHERE username = $${paramIndex})`);
+    params.push(createdBy);
     paramIndex++;
   }
 

@@ -14,6 +14,14 @@ function localDateToIso(v: string, endOfDay: boolean): string {
   return new Date(`${v}T${endOfDay ? '23:59:59.999' : '00:00:00'}`).toISOString();
 }
 
+/** What each deployment mode does, in plain words. Shown as tooltips, next to the mode filter and under the mode picker. */
+const MODE_HELP: Record<string, string> = {
+  CANARY: 'Canary: deploy to a few hosts first (the canary size). If a canary host fails, the other hosts are skipped and nothing else is touched. Use it for a new or risky policy.',
+  PROGRESSIVE: 'Progressive: deploy in batches, one after another. If a host in a batch fails, the rollout stops after that batch. You can pause or stop it at any time.',
+  FULL: 'Full: deploy to every target host in one go and keep going even if some fail. Least control; use it for a policy you have already proven.',
+};
+const MODE_HELP_ALL = Object.values(MODE_HELP).join('\n\n');
+
 export function DeploymentsPage() {
   const navigate = useNavigate();
   const { roles } = useAuth();
@@ -32,6 +40,8 @@ export function DeploymentsPage() {
   const requestIdRef = useRef(0);
   const [filterMode, setFilterMode] = useState<string>('');
   const [filterStatus, setFilterStatus] = useState<string>('');
+  const [filterCreator, setFilterCreator] = useState<string>('');
+  const [creators, setCreators] = useState<Array<{ username: string; display_name: string | null; deployments: number }>>([]);
   const [filterTag, setFilterTag] = useState<string>('');
   const [filterVlan, setFilterVlan] = useState<string>('');
   const [filterFromDate, setFilterFromDate] = useState('');
@@ -115,6 +125,7 @@ export function DeploymentsPage() {
       if (debouncedSearch.trim()) params.search = debouncedSearch.trim();
       if (filterMode) params.mode = filterMode;
       if (filterStatus) params.status = filterStatus;
+      if (filterCreator) params.createdBy = filterCreator;
       if (filterTag) params.tag = filterTag;
       if (filterVlan) params.vlan = filterVlan;
       if (filterFromDate) params.fromDate = localDateToIso(filterFromDate, false);
@@ -128,11 +139,15 @@ export function DeploymentsPage() {
       if (requestId !== requestIdRef.current) return;
       setError(String(e.message || e));
     }
-  }, [currentPage, debouncedSearch, filterMode, filterStatus, filterTag, filterVlan, filterFromDate, filterToDate, sortBy, sortOrder]);
+  }, [currentPage, debouncedSearch, filterMode, filterStatus, filterCreator, filterTag, filterVlan, filterFromDate, filterToDate, sortBy, sortOrder]);
 
   useEffect(() => {
     loadDeployments();
   }, [loadDeployments]);
+
+  useEffect(() => {
+    api.deploymentCreators().then((r) => setCreators(r.creators)).catch(() => {});
+  }, []);
 
   // Keep the list current while any deployment is in progress.
   const hasActive = deployments.some((d) => ['RUNNING', 'QUEUED', 'PAUSED'].includes(d.status));
@@ -387,6 +402,7 @@ export function DeploymentsPage() {
                 <option value="PROGRESSIVE">Progressive (batches)</option>
                 <option value="FULL">Full (all targets)</option>
               </select>
+              <small style={{ display: 'block', marginTop: 4, color: '#78644e', lineHeight: 1.4 }}>{MODE_HELP[formMode]}</small>
               <div
                 id="deployment-mode-tooltip"
                 style={{
@@ -690,7 +706,9 @@ export function DeploymentsPage() {
               />
             </div>
             <div>
-              <label style={{ display: 'block', marginBottom: 4, fontSize: '0.9em', fontWeight: 500 }}>Mode</label>
+              <label style={{ display: 'block', marginBottom: 4, fontSize: '0.9em', fontWeight: 500 }}>
+                Mode <span title={MODE_HELP_ALL} style={{ cursor: 'help', color: '#8b6914', borderBottom: '1px dotted #8b6914' }}>what is this?</span>
+              </label>
               <select
                 value={filterMode}
                 onChange={(e) => { setFilterMode(e.target.value); setCurrentPage(1); }}
@@ -700,6 +718,19 @@ export function DeploymentsPage() {
                 <option value="CANARY">Canary</option>
                 <option value="PROGRESSIVE">Progressive</option>
                 <option value="FULL">Full</option>
+              </select>
+            </div>
+            <div>
+              <label style={{ display: 'block', marginBottom: 4, fontSize: '0.9em', fontWeight: 500 }}>Created by</label>
+              <select
+                value={filterCreator}
+                onChange={(e) => { setFilterCreator(e.target.value); setCurrentPage(1); }}
+                style={{ width: '100%', padding: '6px 8px', border: '1px solid #ddd', borderRadius: 4 }}
+              >
+                <option value="">Anyone</option>
+                {creators.map((c) => (
+                  <option key={c.username} value={c.username}>{c.display_name && c.display_name !== c.username ? `${c.display_name} (${c.username})` : c.username} ({c.deployments})</option>
+                ))}
               </select>
             </div>
             <div>
@@ -791,12 +822,13 @@ export function DeploymentsPage() {
               </select>
             </div>
           </div>
-          {(searchQuery || filterMode || filterStatus || filterTag || filterVlan || filterFromDate || filterToDate) && (
+          {(searchQuery || filterMode || filterStatus || filterCreator || filterTag || filterVlan || filterFromDate || filterToDate) && (
             <button
               onClick={() => {
                 setSearchQuery('');
                 setFilterMode('');
                 setFilterStatus('');
+                setFilterCreator('');
                 setFilterTag('');
                 setFilterVlan('');
                 setFilterFromDate('');
@@ -834,7 +866,7 @@ export function DeploymentsPage() {
               <tr key={d.id}>
                 <td><code style={{ fontSize: '0.85em' }}>{d.id.slice(0, 8)}...</code></td>
                 <td><code style={{ fontSize: '0.85em' }}>{d.policy_version_id.slice(0, 8)}...</code></td>
-                <td>{d.mode}</td>
+                <td><span title={MODE_HELP[d.mode] ?? d.mode} style={{ cursor: 'help', borderBottom: '1px dotted #97846c' }}>{d.mode}</span></td>
                 <td>{d.target_count} host(s)</td>
                 <td>
                   {getStatusBadge(d.status)}
@@ -887,7 +919,7 @@ export function DeploymentsPage() {
             {deployments.length === 0 && (
               <tr>
                 <td colSpan={8} className="empty-state" style={{ textAlign: 'center', padding: '24px' }}>
-                  {searchQuery || filterMode || filterStatus || filterTag || filterVlan || filterFromDate || filterToDate
+                  {searchQuery || filterMode || filterStatus || filterCreator || filterTag || filterVlan || filterFromDate || filterToDate
                     ? 'No deployments match your filters. Try adjusting your search criteria.'
                     : canOperate ? 'No deployments yet. Click "Create Deployment" to create one.' : 'No deployments yet.'}
                 </td>

@@ -63,6 +63,43 @@ async function main() {
   check('after expiry REMOVE the host is treated as having no deployed policy', !JSON.stringify(r3).includes(`rf-pol-${suffix}`), JSON.stringify(r3).slice(0, 120));
   psql(`UPDATE deployment_hosts SET expiry_status = NULL WHERE deployment_id = '${depId}' AND host_id = '${host.id}'`);
 
+  console.log('\nApproval trail: reason, rejection, resubmission, approval, and what the author sees');
+  const mkVersion = async () => {
+    const nv = (await api('POST', `/policy-sets/${ps.id}/versions`, { token: op, body: { changeSummary: 'trail', interfaceScopeType: 'ALL_INTERFACES' } })).version;
+    await api('POST', `/policy-versions/${nv.id}/rules`, { token: op, body: { orderIndex: 0, direction: 'IN', action: 'ALLOW', protocol: 'tcp', ports: '3306', sourceType: 'CIDR', sourceValue: 'any', logMode: 'NONE', usePolicyInterfaceScope: true, comment: 'trail' } });
+    return nv;
+  };
+  const tv = await mkVersion();
+  const tooLong = await raw('POST', `/policy-versions/${tv.id}/submit-approval`, { token: op, body: { reason: 'x'.repeat(1001) } });
+  check('a reason longer than 1000 characters is refused (400)', tooLong.status === 400);
+  const sub = await api('POST', `/policy-versions/${tv.id}/submit-approval`, { token: op, body: { reason: 'Needed for the migration, CHG-1' } });
+  check('the reason is stored with the version', sub.version.submission_note === 'Needed for the migration, CHG-1');
+  const pend = (await api('GET', '/policy-versions/pending-approval', { token: appr })).versions.find((x) => x.id === tv.id);
+  check('the approver sees the reason and who requested it', pend?.submission_note === 'Needed for the migration, CHG-1' && pend?.submitted_by_username === 'rf-operator');
+  const mine1 = (await api('GET', '/policy-versions/my-requests', { token: op })).requests.find((x) => x.id === tv.id);
+  check('the author sees it as waiting', mine1?.status === 'PENDING_APPROVAL');
+  check('another user does not see it as theirs', !(await api('GET', '/policy-versions/my-requests', { token: appr })).requests.some((x) => x.id === tv.id));
+  const noReason = await raw('POST', `/policy-versions/${tv.id}/reject`, { token: appr, body: { reason: '' } });
+  check('a rejection without a reason is refused (400)', noReason.status === 400);
+  await api('POST', `/policy-versions/${tv.id}/reject`, { token: appr, body: { reason: 'Restrict 3306 to the app subnet' } });
+  const mine2 = (await api('GET', '/policy-versions/my-requests', { token: op })).requests.find((x) => x.id === tv.id);
+  check('the author sees the rejection with who and why', mine2?.status === 'REJECTED' && mine2.rejected_by_username === 'rf-approver' && mine2.rejection_reason === 'Restrict 3306 to the app subnet' && !!mine2.rejected_at);
+  await api('POST', `/policy-versions/${tv.id}/submit-approval`, { token: op, body: { reason: 'Restricted to the app subnet' } });
+  await api('POST', `/policy-versions/${tv.id}/approve`, { token: appr, body: {} });
+  const mine3 = (await api('GET', '/policy-versions/my-requests', { token: op })).requests.find((x) => x.id === tv.id);
+  check('after the resubmission the author sees it approved, with who and when', mine3?.status === 'APPROVED' && mine3.approved_by_username === 'rf-approver' && !!mine3.approved_at);
+  const events = JSON.parse(psql(`SELECT json_agg(json_build_object('a', action, 'm', metadata) ORDER BY timestamp) FROM audit_events WHERE entity_id = '${tv.id}' AND action LIKE 'POLICY_%'`));
+  const ev = (a, n = 0) => events.filter((e) => e.a === a)[n]?.m ?? {};
+  check('audit: the submission has requester, time, reason and policy set', ev('POLICY_SUBMIT').requestedBy === 'rf-operator' && !!ev('POLICY_SUBMIT').requestedAt && ev('POLICY_SUBMIT').reason === 'Needed for the migration, CHG-1' && ev('POLICY_SUBMIT').policySet === ps.name);
+  check('audit: the rejection has who, when, the decision and both reasons', ev('POLICY_REJECT').decidedBy === 'rf-approver' && !!ev('POLICY_REJECT').decidedAt && ev('POLICY_REJECT').decision === 'REJECTED' && ev('POLICY_REJECT').rejectionReason === 'Restrict 3306 to the app subnet' && ev('POLICY_REJECT').requestedBy === 'rf-operator' && ev('POLICY_REJECT').reason === 'Needed for the migration, CHG-1');
+  check('audit: the approval has who asked, when, why, who approved and when', ev('POLICY_APPROVE').requestedBy === 'rf-operator' && ev('POLICY_APPROVE').reason === 'Restricted to the app subnet' && ev('POLICY_APPROVE').decidedBy === 'rf-approver' && ev('POLICY_APPROVE').decision === 'APPROVED' && !!ev('POLICY_APPROVE').decidedAt && !!ev('POLICY_APPROVE').requestedAt);
+  const creators = (await api('GET', '/deployments/creators', { token: op })).creators;
+  check('the deployment creators list includes users who deployed', Array.isArray(creators) && creators.length > 0 && creators.every((c) => typeof c.username === 'string'));
+  if (creators[0]) {
+    const filtered = (await api('GET', `/deployments?createdBy=${encodeURIComponent(creators[0].username)}&limit=100`, { token: op })).deployments;
+    check('filtering deployments by creator returns only that user\'s', filtered.length > 0 && filtered.every((d) => d.created_by_username === creators[0].username));
+  }
+
   console.log('\nHost lock and restore guard');
   process.env.DATABASE_URL ??= 'postgres://segmentra:segmentra@127.0.0.1:15432/segmentra';
   process.env.JWT_SECRET ??= 'x'.repeat(40);

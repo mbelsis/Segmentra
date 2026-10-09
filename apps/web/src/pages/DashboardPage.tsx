@@ -17,6 +17,7 @@ import {
   AreaChart
 } from 'recharts';
 
+import { MyApprovalRequests } from '../components/MyApprovalRequests';
 import { api } from '../lib/api';
 
 interface DashboardStats {
@@ -229,6 +230,8 @@ export function DashboardPage() {
           <div style={{ fontSize: 11, color: '#97846c', marginTop: 2 }}>within 7 days</div>
         </div>
       </div>
+
+      <MyApprovalRequests />
 
       {/* Current Deployments Progress */}
       {stats.currentDeployments.length > 0 && (

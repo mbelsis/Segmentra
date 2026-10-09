@@ -122,15 +122,39 @@ policyVersionsRouter.get('/policy-versions/pending-approval', requireRole('appro
             pv.policy_set_id,
             ps.name AS policy_set_name, ps.scope_type AS policy_set_scope_type,
             ps.scope_tag_id, ps.scope_vlan_id,
+            pv.submission_note,
             u.username AS created_by_username, u.display_name AS created_by_display_name,
+            su.username AS submitted_by_username, su.display_name AS submitted_by_display_name,
             (SELECT COUNT(*)::int FROM policy_rules pr WHERE pr.policy_version_id = pv.id) AS rule_count
      FROM policy_versions pv
      JOIN policy_sets ps ON ps.id = pv.policy_set_id
      LEFT JOIN users u ON u.id = pv.created_by
+     LEFT JOIN users su ON su.id = pv.submitted_by
      WHERE pv.status = 'PENDING_APPROVAL'
      ORDER BY pv.submitted_at ASC`
   );
   res.json({ versions: rows });
+});
+
+// The versions I sent for approval and what became of them (the author's "inbox"): pending, approved or rejected, with who
+// decided, when and why. Shown on the dashboard so the author does not have to open each policy set to find out.
+policyVersionsRouter.get('/policy-versions/my-requests', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT pv.id, pv.version_number, pv.status, pv.policy_set_id, ps.name AS policy_set_name,
+            pv.submitted_at, pv.submission_note,
+            au.username AS approved_by_username, pv.approved_at,
+            ru.username AS rejected_by_username, pv.rejected_at, pv.rejection_reason
+       FROM policy_versions pv
+       JOIN policy_sets ps ON ps.id = pv.policy_set_id
+       LEFT JOIN users au ON au.id = pv.approved_by
+       LEFT JOIN users ru ON ru.id = pv.rejected_by
+      WHERE pv.submitted_by = $1 AND pv.submitted_at > now() - interval '30 days'
+        AND pv.status IN ('PENDING_APPROVAL', 'APPROVED', 'REJECTED', 'DEPLOYED')
+      ORDER BY GREATEST(pv.submitted_at, COALESCE(pv.approved_at, pv.submitted_at), COALESCE(pv.rejected_at, pv.submitted_at)) DESC
+      LIMIT 25`,
+    [req.auth!.userId]
+  );
+  res.json({ requests: rows });
 });
 
 policyVersionsRouter.get('/policy-versions/:versionId', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
@@ -158,8 +182,33 @@ policyVersionsRouter.put('/policy-versions/:versionId', requireRole('operator', 
   res.json({ version: rows[0] });
 });
 
+/**
+ * Who asked for the approval, when, why, and (for approve/reject) who decided and when. Written into every approval
+ * audit event so the trail reads without joining other tables.
+ */
+async function approvalTrail(version: any): Promise<Record<string, unknown>> {
+  const { rows } = await pool.query(
+    `SELECT ps.name AS policy_set_name,
+            (SELECT username FROM users WHERE id = $2) AS requested_by,
+            (SELECT username FROM users WHERE id = $3) AS created_by
+       FROM policy_sets ps WHERE ps.id = $1`,
+    [version.policy_set_id, version.submitted_by, version.created_by]
+  );
+  return {
+    policySet: rows[0]?.policy_set_name ?? null,
+    versionNumber: version.version_number,
+    createdBy: rows[0]?.created_by ?? null,
+    requestedBy: rows[0]?.requested_by ?? null,
+    requestedAt: version.submitted_at ?? null,
+    reason: version.submission_note ?? null,
+  };
+}
+
 policyVersionsRouter.post('/policy-versions/:versionId/submit-approval', requireRole('operator', 'admin'), async (req, res) => {
   const userId = req.auth!.userId;
+  const noteParse = z.object({ reason: z.string().trim().max(1000).optional() }).safeParse(req.body ?? {});
+  if (!noteParse.success) return res.status(400).json({ error: 'invalid_body', message: 'The reason can be at most 1000 characters' });
+  const submissionNote = noteParse.data.reason ? noteParse.data.reason : null;
 
   // Evaluate high-risk status before submission
   const isHighRisk = await isPolicyVersionHighRisk({
@@ -176,10 +225,10 @@ policyVersionsRouter.post('/policy-versions/:versionId/submit-approval', require
     if (previousStatus === 'DRAFT' || previousStatus === 'REJECTED') {
       const upd = await client.query(
         `UPDATE policy_versions
-         SET status='PENDING_APPROVAL', submitted_at=now(), submitted_by=$3, rejection_reason=NULL, is_high_risk=$2
+         SET status='PENDING_APPROVAL', submitted_at=now(), submitted_by=$3, rejection_reason=NULL, is_high_risk=$2, submission_note=$4
          WHERE id=$1
          RETURNING *`,
-        [req.params.versionId, isHighRisk, userId]
+        [req.params.versionId, isHighRisk, userId, submissionNote]
       );
       rows = upd.rows;
     }
@@ -195,7 +244,7 @@ policyVersionsRouter.post('/policy-versions/:versionId/submit-approval', require
   await pool.query(
     `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
      VALUES ($1,'POLICY_SUBMIT','policy_version',$2,$3)`,
-    [userId, req.params.versionId, { by: req.auth!.username, resubmitted, isHighRisk }]
+    [userId, req.params.versionId, { by: req.auth!.username, resubmitted, isHighRisk, ...(await approvalTrail(rows[0])) }]
   );
   notifyPolicyVersionEvent('POLICY_SUBMITTED', req.params.versionId, { submittedBy: req.auth!.username, resubmitted });
   res.json({ version: rows[0] });
@@ -242,7 +291,7 @@ policyVersionsRouter.post(
     await pool.query(
       `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
        VALUES ($1,'POLICY_APPROVE','policy_version',$2,$3)`,
-      [approverId, req.params.versionId, { by: req.auth!.username, isHighRisk }]
+      [approverId, req.params.versionId, { by: req.auth!.username, isHighRisk, decision: 'APPROVED', decidedBy: req.auth!.username, decidedAt: rows[0].approved_at, ...(await approvalTrail(rows[0])) }]
     );
     notifyPolicyVersionEvent('POLICY_APPROVED', req.params.versionId, { approvedBy: req.auth!.username });
     res.json({ version: rows[0] });
@@ -269,7 +318,7 @@ policyVersionsRouter.post(
     await pool.query(
       `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
        VALUES ($1,'POLICY_REJECT','policy_version',$2,$3)`,
-      [approverId, req.params.versionId, { by: req.auth!.username, reason: body.data.reason }]
+      [approverId, req.params.versionId, { by: req.auth!.username, decision: 'REJECTED', decidedBy: req.auth!.username, decidedAt: rows[0].rejected_at, rejectionReason: body.data.reason, ...(await approvalTrail(rows[0])) }]
     );
     notifyPolicyVersionEvent('POLICY_REJECTED', req.params.versionId, { rejectedBy: req.auth!.username, reason: body.data.reason });
     res.json({ version: rows[0] });

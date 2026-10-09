@@ -234,12 +234,13 @@ Routers are mounted in `apps/api/src/index.ts` (inventory and policy sub-routers
 #### Policy Versions
 - `GET /policy-sets/:id/versions` — all roles
 - `POST /policy-sets/:id/versions` — `operator`, `admin`. Creates a `DRAFT` version. Body: `{ changeSummary?, interfaceScopeType?, interfaceScopeRoles?, interfaceScopeNames? }`
-- `GET /policy-versions/pending-approval` — `approver`, `admin`. Versions in `PENDING_APPROVAL`
+- `GET /policy-versions/pending-approval` — `approver`, `admin`. Versions in `PENDING_APPROVAL`, with the requester and the author's reason (`submission_note`)
+- `GET /policy-versions/my-requests` — all roles. The versions I submitted in the last 30 days with their status, who decided, when and why (Dashboard card, menu counter)
 - `GET /policy-versions/:versionId` — all roles
 - `PUT /policy-versions/:versionId` — `operator`, `admin`; only while `DRAFT` or `REJECTED`
-- `POST /policy-versions/:versionId/submit-approval` — `operator`, `admin`. Status → `PENDING_APPROVAL`; evaluates and sets `is_high_risk`
+- `POST /policy-versions/:versionId/submit-approval` — `operator`, `admin`. Status → `PENDING_APPROVAL`; evaluates and sets `is_high_risk`. Optional body `{ reason }` (up to 1000 characters) is stored as `submission_note`. The audit event carries `requestedBy`, `requestedAt`, `reason`, `policySet`, `versionNumber`
 - `POST /policy-versions/:versionId/approve` — `approver`, `admin`. Refused (`403`) for the creator, the submitter and anyone who edited the version (`policy_version_editors`) — this applies to every version, including for admins
-- `POST /policy-versions/:versionId/reject` — `approver`, `admin`. Body: `{ reason }`
+- `POST /policy-versions/:versionId/reject` — `approver`, `admin`. Body: `{ reason }`. Approve and reject audit events carry `decidedBy`, `decidedAt`, `decision`, the requester, the author's `reason` and (reject) `rejectionReason`
 - `POST /policy-versions/:versionId/clone` — `operator`, `admin`. Copies the version and its rules into a new `DRAFT`
 - `DELETE /policy-versions/:versionId` — `operator`, `admin`. Only `DRAFT` or `REJECTED` versions
 - `POST /policy-versions/:versionId/archive` — `operator`, `admin`. `APPROVED`, `DEPLOYED` or `PENDING_APPROVAL` → `ARCHIVED`
@@ -275,7 +276,8 @@ Routers are mounted in `apps/api/src/index.ts` (inventory and policy sub-routers
   - Status is `SCHEDULED` when `scheduledAt` is in the future, otherwise `QUEUED`
   - **Safety check**: verifies SSH access is preserved. `FULL` mode is blocked (`400 safety_check_failed`) if SSH would be blocked; `CANARY`/`PROGRESSIVE` only warn
   - **High risk**: the version's risk is re-evaluated with the real target count; a high-risk deployment is created with `requires_approval = true` and cannot start until a second person approves it
-- `GET /deployments?search=&mode=&status=&tag=&vlan=&fromDate=&toDate=&sortBy=&sortOrder=&page=&limit=` — paginated list (max 100 per page)
+- `GET /deployments?search=&mode=&status=&createdBy=&tag=&vlan=&fromDate=&toDate=&sortBy=&sortOrder=&page=&limit=` — paginated list (max 100 per page); `createdBy` is a username
+- `GET /deployments/creators` — the users who created deployments (for the "Created by" filter)
 - `GET /deployments/:deploymentId`
 - `GET /deployments/:deploymentId/hosts` — per-host status
 - `GET /deployments/:deploymentId/artifacts` — bundles

@@ -262,6 +262,21 @@ export function PolicyVersionPage() {
         </div>
       </div>
 
+      {version.status === 'REJECTED' && (
+        <div style={{ padding: 12, marginBottom: 16, background: '#faf0ee', border: '1px solid #e8c4bf', borderRadius: 8, color: '#a63d2f' }}>
+          <strong>Rejected{version.rejected_at ? ` on ${new Date(version.rejected_at).toLocaleString()}` : ''}.</strong>{' '}
+          {version.rejection_reason ? <>Reason: {version.rejection_reason}</> : null}
+          <div style={{ color: '#5c4633', fontSize: 13, marginTop: 4 }}>
+            Change the rules below, then go back to the policy set and use "Resubmit for Approval".
+          </div>
+        </div>
+      )}
+      {version.status === 'PENDING_APPROVAL' && (
+        <div style={{ padding: 12, marginBottom: 16, background: '#f7f4ef', border: '1px solid #e6dfd2', borderRadius: 8, color: '#5c4633' }}>
+          <strong>Waiting for approval</strong>{version.submitted_at ? ` since ${new Date(version.submitted_at).toLocaleString()}` : ''}.
+          {version.submission_note ? <> Reason given: {version.submission_note}</> : null}
+        </div>
+      )}
       {(version.status === 'APPROVED' || version.status === 'DEPLOYED') && (
         <div style={{ 
           padding: 12, 
