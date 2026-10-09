@@ -50,7 +50,8 @@ export function MyApprovalRequests() {
                 {r.status === 'PENDING_APPROVAL' && <>Sent on {when(r.submitted_at)}; no decision yet</>}
               </div>
               {r.submission_note && <div style={{ fontSize: 12, color: '#78644e', marginTop: 2 }}>Your reason: {r.submission_note}</div>}
-              {rejected && <div style={{ fontSize: 12, color: '#78644e', marginTop: 2 }}>Fix the rules in the policy set, then use "Resubmit for Approval".</div>}
+              {rejected && !r.superseded && <div style={{ fontSize: 12, color: '#78644e', marginTop: 2 }}>Fix the rules in the policy set, then use "Resubmit for Approval".</div>}
+              {rejected && r.superseded && <div style={{ fontSize: 12, color: '#78644e', marginTop: 2 }}>A newer version of this policy set is already waiting, approved or deployed.</div>}
             </div>
           );
         })}

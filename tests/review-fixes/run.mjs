@@ -88,6 +88,17 @@ async function main() {
   await api('POST', `/policy-versions/${tv.id}/approve`, { token: appr, body: {} });
   const mine3 = (await api('GET', '/policy-versions/my-requests', { token: op })).requests.find((x) => x.id === tv.id);
   check('after the resubmission the author sees it approved, with who and when', mine3?.status === 'APPROVED' && mine3.approved_by_username === 'rf-approver' && !!mine3.approved_at);
+  // A rejected version counts as "needs a fix" until a newer version of the same policy set is waiting, approved or deployed.
+  const rj = await mkVersion();
+  await api('POST', `/policy-versions/${rj.id}/submit-approval`, { token: op, body: {} });
+  await api('POST', `/policy-versions/${rj.id}/reject`, { token: appr, body: { reason: 'not like this' } });
+  const rjMine = async () => (await api('GET', '/policy-versions/my-requests', { token: op })).requests.find((x) => x.id === rj.id);
+  check('a rejected version needs a fix (not superseded)', (await rjMine())?.superseded === false);
+  const psRow = (await api('GET', '/policy-sets', { token: op })).policySets.find((x) => x.id === ps.id);
+  check('the policy set list counts its rejected versions', psRow.rejected_count >= 1, String(psRow.rejected_count));
+  const newer = await mkVersion();
+  await api('POST', `/policy-versions/${newer.id}/submit-approval`, { token: op, body: {} });
+  check('once a newer version is waiting, the rejected one is superseded', (await rjMine())?.superseded === true);
   const events = JSON.parse(psql(`SELECT json_agg(json_build_object('a', action, 'm', metadata) ORDER BY timestamp) FROM audit_events WHERE entity_id = '${tv.id}' AND action LIKE 'POLICY_%'`));
   const ev = (a, n = 0) => events.filter((e) => e.a === a)[n]?.m ?? {};
   check('audit: the submission has requester, time, reason and policy set', ev('POLICY_SUBMIT').requestedBy === 'rf-operator' && !!ev('POLICY_SUBMIT').requestedAt && ev('POLICY_SUBMIT').reason === 'Needed for the migration, CHG-1' && ev('POLICY_SUBMIT').policySet === ps.name);

@@ -143,7 +143,14 @@ policyVersionsRouter.get('/policy-versions/my-requests', requireRole('viewer', '
     `SELECT pv.id, pv.version_number, pv.status, pv.policy_set_id, ps.name AS policy_set_name,
             pv.submitted_at, pv.submission_note,
             au.username AS approved_by_username, pv.approved_at,
-            ru.username AS rejected_by_username, pv.rejected_at, pv.rejection_reason
+            ru.username AS rejected_by_username, pv.rejected_at, pv.rejection_reason,
+            -- a rejected version no longer needs action when a newer version of the same policy set is already
+            -- waiting, approved or deployed
+            (pv.status = 'REJECTED' AND EXISTS (
+               SELECT 1 FROM policy_versions nv
+                WHERE nv.policy_set_id = pv.policy_set_id AND nv.version_number > pv.version_number
+                  AND nv.status IN ('PENDING_APPROVAL', 'APPROVED', 'DEPLOYED')
+            )) AS superseded
        FROM policy_versions pv
        JOIN policy_sets ps ON ps.id = pv.policy_set_id
        LEFT JOIN users au ON au.id = pv.approved_by

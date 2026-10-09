@@ -36,7 +36,7 @@ export function AppShell() {
     let alive = true;
     const load = () => {
       if (isApprover) api.pendingApprovals().then((r) => { if (alive) setPendingCount(r.versions.length); }).catch(() => {});
-      if (isOperator) api.myApprovalRequests().then((r) => { if (alive) setRejectedCount(r.requests.filter((x: any) => x.status === 'REJECTED').length); }).catch(() => {});
+      if (isOperator) api.myApprovalRequests().then((r) => { if (alive) setRejectedCount(r.requests.filter((x: any) => x.status === 'REJECTED' && !x.superseded).length); }).catch(() => {});
     };
     load();
     const t = setInterval(load, 30000);
@@ -53,7 +53,7 @@ export function AppShell() {
         <NavLink to="/" end>Dashboard</NavLink>
 
         {sectionLabel('Policies')}
-        <NavLink to="/policies">Policy Sets{rejectedCount > 0 && <span className="nav-badge nav-badge-warn" title="Policy versions of yours that were rejected">{rejectedCount}</span>}</NavLink>
+        <NavLink to="/policies">Policy Sets{rejectedCount > 0 && <span className="nav-badge nav-badge-warn" title="Rejected policy versions of yours that still need a fix">{rejectedCount}</span>}</NavLink>
         <NavLink to="/policy-templates">Templates</NavLink>
         {isApprover && <NavLink to="/approvals">Approvals{pendingCount > 0 && <span className="nav-badge" title="Versions waiting for review">{pendingCount}</span>}</NavLink>}
         {isViewer && <NavLink to="/deployments">Deployments</NavLink>}

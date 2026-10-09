@@ -405,7 +405,7 @@ Go to **Approvals** in the sidebar (a number next to it counts the versions wait
 ### Step 3: The author finds out
 
 - **Dashboard**: the card **Your approval requests** lists your versions of the last 30 days as waiting, approved (who and when, "ready to deploy") or rejected (who, when and the reason).
-- **Menu**: a red number next to **Policy Sets** counts your rejected versions.
+- **Menu**: a red number next to **Policy Sets** counts your rejected versions that still need a fix (a rejected version is not counted once a newer version of the same policy set is waiting, approved or deployed). In the policy set list, the **Versions** column shows a red **Rejected** badge on each policy set that has rejected versions; open it to see the reasons.
 - **Policy set page and version page** show the status, your reason and the rejection reason.
 - **Webhooks and email-style integrations**: `POLICY_APPROVED` and `POLICY_REJECTED` can be subscribed to under Notifications (see [Notifications](#notifications)).
 

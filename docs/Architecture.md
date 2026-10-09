@@ -235,7 +235,7 @@ Routers are mounted in `apps/api/src/index.ts` (inventory and policy sub-routers
 - `GET /policy-sets/:id/versions` — all roles
 - `POST /policy-sets/:id/versions` — `operator`, `admin`. Creates a `DRAFT` version. Body: `{ changeSummary?, interfaceScopeType?, interfaceScopeRoles?, interfaceScopeNames? }`
 - `GET /policy-versions/pending-approval` — `approver`, `admin`. Versions in `PENDING_APPROVAL`, with the requester and the author's reason (`submission_note`)
-- `GET /policy-versions/my-requests` — all roles. The versions I submitted in the last 30 days with their status, who decided, when and why (Dashboard card, menu counter)
+- `GET /policy-versions/my-requests` — all roles. The versions I submitted in the last 30 days with their status, who decided, when and why; `superseded` is true for a rejected version that a newer waiting, approved or deployed version replaced (Dashboard card, menu counter)
 - `GET /policy-versions/:versionId` — all roles
 - `PUT /policy-versions/:versionId` — `operator`, `admin`; only while `DRAFT` or `REJECTED`
 - `POST /policy-versions/:versionId/submit-approval` — `operator`, `admin`. Status → `PENDING_APPROVAL`; evaluates and sets `is_high_risk`. Optional body `{ reason }` (up to 1000 characters) is stored as `submission_note`. The audit event carries `requestedBy`, `requestedAt`, `reason`, `policySet`, `versionNumber`

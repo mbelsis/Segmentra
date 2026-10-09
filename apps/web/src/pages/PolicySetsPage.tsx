@@ -627,6 +627,11 @@ export function PolicySetsPage() {
                           {ps.pending_count} Pending
                         </span>
                       )}
+                      {ps.rejected_count > 0 && (
+                        <span title="Rejected by an approver: open the policy set, fix the rules and resubmit" style={{ padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600, background: '#faf0ee', color: '#a63d2f', border: '1px solid #e8c4bf' }}>
+                          {ps.rejected_count} Rejected
+                        </span>
+                      )}
                       {ps.draft_count > 0 && (
                         <span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: 10, fontSize: '11px', fontWeight: 600, background: '#f5f5f5', color: '#666', border: '1px solid #ddd' }}>
                           {ps.draft_count} Draft

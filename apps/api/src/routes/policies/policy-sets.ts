@@ -15,7 +15,8 @@ policySetsRouter.get('/', requireRole('viewer', 'operator', 'approver', 'admin')
        (SELECT COUNT(*)::int FROM policy_versions pv WHERE pv.policy_set_id = ps.id AND pv.status IN ('APPROVED', 'DEPLOYED')) as approved_count,
        (SELECT COUNT(*)::int FROM policy_versions pv WHERE pv.policy_set_id = ps.id AND pv.status = 'DEPLOYED') as deployed_count,
        (SELECT COUNT(*)::int FROM policy_versions pv WHERE pv.policy_set_id = ps.id AND pv.status = 'PENDING_APPROVAL') as pending_count,
-       (SELECT COUNT(*)::int FROM policy_versions pv WHERE pv.policy_set_id = ps.id AND pv.status = 'DRAFT') as draft_count
+       (SELECT COUNT(*)::int FROM policy_versions pv WHERE pv.policy_set_id = ps.id AND pv.status = 'DRAFT') as draft_count,
+       (SELECT COUNT(*)::int FROM policy_versions pv WHERE pv.policy_set_id = ps.id AND pv.status = 'REJECTED') as rejected_count
      FROM policy_sets ps ORDER BY ps.created_at DESC`
   );
   res.json({ policySets: rows });
