@@ -13,6 +13,11 @@ export function PolicySetsPage() {
   const [vlans, setVlans] = useState<any[]>([]);
   const [hosts, setHosts] = useState<any[]>([]);
   const [showCreate, setShowCreate] = useState(false);
+  const [showImport, setShowImport] = useState(false);
+  const [importText, setImportText] = useState('');
+  const [importUpdateScope, setImportUpdateScope] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importResult, setImportResult] = useState<any>(null);
   const [error, setError] = useState<string>('');
   const [loading, setLoading] = useState(true);
 
@@ -36,6 +41,22 @@ export function PolicySetsPage() {
   useEffect(() => {
     loadData();
   }, []);
+
+  async function runImport(dryRun: boolean) {
+    setImportBusy(true);
+    setError('');
+    try {
+      const r = await api.importPolicy(importText, { dryRun, updateScope: importUpdateScope });
+      setImportResult(r);
+      if (!dryRun && r.action !== 'unchanged') loadData();
+    } catch (e: any) {
+      // Validation problems come back as a structured 400
+      const body = e?.body && typeof e.body === 'object' ? e.body : null;
+      if (body?.problems) setImportResult({ problems: body.problems, message: body.message || 'The document is invalid' });
+      else setError(errorMessage(e));
+    }
+    setImportBusy(false);
+  }
 
   async function loadData() {
     try {
@@ -161,9 +182,65 @@ export function PolicySetsPage() {
       <div className="page-header">
         <h2>Policy Sets</h2>
         {canManage && (
-          <button onClick={() => setShowCreate(true)} className="btn-primary">+ Create Policy Set</button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={() => { setShowImport(true); setImportResult(null); }} className="btn-secondary" title="Policy as code: import a YAML/JSON policy document">Import YAML/JSON</button>
+            <button onClick={() => setShowCreate(true)} className="btn-primary">+ Create Policy Set</button>
+          </div>
         )}
       </div>
+
+      {showImport && canManage && (
+        <div className="card" style={{ border: '1px solid #d4c9b8' }}>
+          <h3>Import a policy (policy as code)</h3>
+          <p style={{ fontSize: '0.9em', color: '#666', marginTop: 0 }}>
+            Paste or load a <code>segmentra.io/v1</code> <code>PolicySet</code> document (YAML or JSON; tags, VLANs and hosts by name). It creates the policy set, or a new
+            <strong> DRAFT</strong> version of the policy set with the same name. Nothing is approved or deployed: the draft still goes through the normal approval.
+            Use <strong>Check</strong> first to see exactly what would change. See <code>docs/policy-as-code.md</code>.
+          </p>
+          <input type="file" accept=".yaml,.yml,.json,text/yaml,application/json" onChange={async (e) => {
+            const f = e.target.files?.[0];
+            if (f) { setImportText(await f.text()); setImportResult(null); }
+          }} />
+          <textarea rows={14} value={importText} onChange={(e) => { setImportText(e.target.value); setImportResult(null); }} spellCheck={false}
+            placeholder={'apiVersion: segmentra.io/v1\nkind: PolicySet\nmetadata:\n  name: web-servers\nspec:\n  scope:\n    type: TAG\n    tag: web\n  rules:\n    - action: ALLOW\n      protocol: tcp\n      ports: "443"\n      source: 10.0.0.0/8'}
+            style={{ width: '100%', fontFamily: 'monospace', fontSize: '12px', marginTop: 8 }} />
+          <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: '0.9em', marginTop: 6 }}>
+            <input type="checkbox" checked={importUpdateScope} onChange={(e) => setImportUpdateScope(e.target.checked)} style={{ width: 'auto' }} />
+            Also change the scope (which hosts the policy applies to) of an existing policy set to the one in the document
+          </label>
+          {importResult && (
+            <div role="status" style={{ marginTop: 10, padding: '8px 12px', borderRadius: 6, fontSize: '0.9em', background: importResult.problems ? '#faf0ee' : '#eef4e8', border: `1px solid ${importResult.problems ? '#e8c4bd' : '#c9dcb8'}` }}>
+              {importResult.problems ? (
+                <>
+                  <strong style={{ color: '#a63d2f' }}>{importResult.message}</strong>
+                  <ul style={{ margin: '6px 0 0 18px' }}>{importResult.problems.map((p: any, i: number) => <li key={i}><code>{p.path}</code>: {p.message}</li>)}</ul>
+                </>
+              ) : (
+                <>
+                  <strong>{importResult.dryRun ? 'Check: ' : ''}{importResult.action === 'created'
+                    ? `${importResult.dryRun ? 'Would create' : 'Created'} "${importResult.name}" with a DRAFT v1`
+                    : importResult.action === 'new_version'
+                      ? `${importResult.dryRun ? 'Would add' : 'Added'} DRAFT version v${importResult.versionNumber} of "${importResult.name}"`
+                      : `No change: "${importResult.name}" already matches v${importResult.matchesVersion} (${importResult.versionStatus})`}</strong>
+                  {(importResult.diff?.added?.length > 0 || importResult.diff?.removed?.length > 0 || importResult.diff?.reordered) && (
+                    <ul style={{ margin: '6px 0 0 18px', fontFamily: 'monospace', fontSize: '12px', listStyle: 'none', padding: 0 }}>
+                      {importResult.diff.added.map((a: string, i: number) => <li key={`a${i}`} style={{ color: '#3f5a26' }}>+ {a}</li>)}
+                      {importResult.diff.removed.map((a: string, i: number) => <li key={`r${i}`} style={{ color: '#a63d2f' }}>- {a}</li>)}
+                      {importResult.diff.reordered && <li>~ rules reordered</li>}
+                    </ul>
+                  )}
+                  {importResult.warnings?.map((w: string, i: number) => <div key={i} style={{ color: '#8b6914', marginTop: 4 }}>! {w}</div>)}
+                </>
+              )}
+            </div>
+          )}
+          <div className="form-actions" style={{ marginTop: 10 }}>
+            <button className="btn-secondary" disabled={!importText.trim() || importBusy} onClick={() => runImport(true)}>Check (dry run)</button>
+            <button className="btn-primary" disabled={!importText.trim() || importBusy || !!importResult?.problems} onClick={() => runImport(false)}>Import as DRAFT</button>
+            <button className="btn-secondary" onClick={() => setShowImport(false)}>Close</button>
+          </div>
+        </div>
+      )}
 
       {error && <div className="error-banner">{error}</div>}
 

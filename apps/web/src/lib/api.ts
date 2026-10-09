@@ -175,6 +175,22 @@ export const api = {
   deleteVlan: (id: string) => request<{ ok: boolean }>(`/vlans/${id}`, { method: 'DELETE' }),
 
   policySets: () => request<{ policySets: any[] }>('/policy-sets'),
+  /** Download a policy set (or one version) as a policy-as-code document (YAML or JSON). */
+  exportPolicySet: async (id: string, format: 'yaml' | 'json' = 'yaml', version?: number | string) => {
+    const token = getToken();
+    const q = `format=${format}${version !== undefined ? `&version=${encodeURIComponent(String(version))}` : ''}`;
+    const resp = await fetch(`${API_BASE}/policy-sets/${id}/export?${q}`, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+    if (!resp.ok) throw new ApiError(`${resp.status} ${resp.statusText}`, resp.status, undefined);
+    const disposition = resp.headers.get('content-disposition') || '';
+    return {
+      text: await resp.text(),
+      filename: /filename="([^"]+)"/.exec(disposition)?.[1] ?? `policy.${format}`,
+      versionNumber: resp.headers.get('x-segmentra-version'),
+    };
+  },
+  /** Validate (dryRun) or import a policy-as-code document; creates a DRAFT version, never approves. */
+  importPolicy: (content: string, opts: { dryRun?: boolean; updateScope?: boolean } = {}) =>
+    request<any>(`/policy-sets/import?dryRun=${!!opts.dryRun}&updateScope=${!!opts.updateScope}`, { method: 'POST', body: JSON.stringify({ content }) }),
   policySet: (id: string) => request<{ policySet: any }>(`/policy-sets/${id}`),
   createPolicySet: (b: any) => request<{ policySet: any }>('/policy-sets', { method: 'POST', body: JSON.stringify(b) }),
   deletePolicySet: (id: string) => request<{ ok: boolean }>(`/policy-sets/${id}`, { method: 'DELETE' }),

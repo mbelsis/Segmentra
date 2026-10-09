@@ -20,6 +20,22 @@ export function PolicySetDetailPage() {
     loadData();
   }, [policySetId]);
 
+  async function exportVersion(v: any, format: 'yaml' | 'json') {
+    if (!policySetId) return;
+    try {
+      const r = await api.exportPolicySet(policySetId, format, v.version_number);
+      const blob = new Blob([r.text], { type: format === 'json' ? 'application/json' : 'application/yaml' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = r.filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e: any) {
+      setError(errorMessage(e));
+    }
+  }
+
   async function loadData() {
     if (!policySetId) return;
     try {
@@ -243,6 +259,8 @@ export function PolicySetDetailPage() {
                   <td>
                     <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                       <button onClick={() => navigate(`/policy-version/${v.id}`)} className="btn-small btn-primary">View Rules</button>
+                      <button onClick={() => exportVersion(v, 'yaml')} className="btn-small btn-secondary" title="Download this version as a policy-as-code document">Export YAML</button>
+                      <button onClick={() => exportVersion(v, 'json')} className="btn-small btn-secondary">JSON</button>
                       {canManage && isDraft && (
                         <button onClick={() => submitForApproval(v.id)} className="btn-small btn-secondary">Submit for Approval</button>
                       )}

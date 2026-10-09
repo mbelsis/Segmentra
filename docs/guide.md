@@ -826,6 +826,10 @@ Go to **Integrations** in the sidebar (admin only) and click **+ New Integration
 
 ---
 
+## Policy as code
+
+Policy sets can be exported and imported as YAML or JSON documents (tags, VLANs and hosts by name), for Git and CI workflows. On **Policy Sets**, **Import YAML/JSON** opens a panel: paste or load a document, press **Check (dry run)** to see what would change (rules added and removed, warnings, or every validation problem with its path), then **Import as DRAFT**. The result is a normal DRAFT version: it still needs **Submit for Approval**, a different person's approval and a deployment. On a policy set's page each version has **Export YAML** and **JSON** buttons. The `scripts/segmentra-policy.mjs` command-line tool offers `export`, `plan` and `apply` for CI. See [policy-as-code.md](policy-as-code.md) for the format, semantics and limitations.
+
 ## 18. Kubernetes Microsegmentation
 
 Generate Kubernetes NetworkPolicy manifests from Segmentra policies and apply them to the cluster from Segmentra (with stored credentials), or apply them yourself with `kubectl` or a CI/CD pipeline.

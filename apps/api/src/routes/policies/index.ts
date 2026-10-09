@@ -1,5 +1,6 @@
 import { Router } from 'express';
 
+import { policyCodeRouter } from './policy-code.js';
 import { policySetsRouter } from './policy-sets.js';
 import { policyVersionsRouter } from './policy-versions.js';
 import { policyRulesRouter } from './policy-rules.js';
@@ -8,6 +9,7 @@ import { templatesRouter } from './templates.js';
 
 export const policiesRouter = Router();
 
+policiesRouter.use('/policy-sets', policyCodeRouter);
 policiesRouter.use('/policy-sets', policySetsRouter);
 policiesRouter.use('/policy-templates', templatesRouter);
 policiesRouter.use('/', policyVersionsRouter);

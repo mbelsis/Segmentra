@@ -78,7 +78,7 @@ apps/
         topology.ts            # Visual topology design
         troubleshoot.ts        # Lookups, simulation, Firewall Learning
         inventory/             # hosts.ts, interfaces.ts, tags.ts, vlans.ts, tag-rules.ts, discovery.ts
-        policies/              # policy-sets.ts, policy-versions.ts, policy-rules.ts, render.ts, templates.ts
+        policies/              # policy-sets.ts, policy-versions.ts, policy-rules.ts, policy-code.ts, render.ts, templates.ts
       services/                # Business logic, e.g.:
         ssh-credentials.ts     # Credential resolution + decryption for SSH connections
         discovery.ts           # Inventory discovery runs and scheduler
@@ -227,6 +227,8 @@ Routers are mounted in `apps/api/src/index.ts` (inventory and policy sub-routers
 - `GET /policy-sets/:id`
 - `PUT /policy-sets/:id`
 - `DELETE /policy-sets/:id`
+- `GET /policy-sets/:id/export?format=yaml|json&version=latest|N|<id>` — all roles. Policy as code: the policy set as a `segmentra.io/v1` `PolicySet` document (names instead of ids, deterministic output). See [policy-as-code.md](policy-as-code.md)
+- `POST /policy-sets/import?dryRun=&updateScope=` — `operator`, `admin`. Body: YAML text, the document as JSON, or `{ content }`. Creates the policy set or a DRAFT version; idempotent; never approves; `dryRun` rolls back; an existing set's scope is only changed with `updateScope`. `400` with `problems[{path,message}]` for an invalid document, `409 ambiguous_policy_set`
 
 #### Policy Versions
 - `GET /policy-sets/:id/versions` — all roles
