@@ -62,6 +62,7 @@ export function AppShell() {
         <NavLink to="/inventory">Inventory</NavLink>
         {isOperator && <NavLink to="/topology">Topology</NavLink>}
         <NavLink to="/kubernetes">Kubernetes</NavLink>
+        <NavLink to="/swarm">Docker Swarm</NavLink>
         <NavLink to="/iot">OT/IoT</NavLink>
 
         {sectionLabel('Analysis')}

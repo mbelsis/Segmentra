@@ -37,6 +37,7 @@ Segmentra never changes a firewall on its own. Every change goes through the sam
 **1. Build your inventory** (*Inventory*, *OT/IoT*, *Kubernetes*)
 - **Linux servers:** add hosts by hand, **Bulk Import** a CSV, or let **Discovery** scan your networks for SSH and import what it finds. Group them with **tags** (also automatic, with **Auto-Tagging** rules) and **VLANs**. **Check Readiness** confirms Segmentra can log in, use sudo and find the firewall tool.
 - **OT/IoT devices:** pick a Linux host that sits in front of the devices, tag it `iot-gateway`, then open **OT/IoT**: register the devices by hand, or use the **Discovery** tab to list what the gateway sees (its ARP table, optionally an active ping probe of a subnet) and import the devices. Assign each device to its gateway. The devices themselves are never touched; the gateway firewall protects them. See [docs/iot.md](docs/iot.md).
+- **Docker Swarm:** give every node of the swarm the same **Swarm name** in the Docker section of its host form; the **Docker Swarm** page (with a how-to) shows the nodes and warns about gaps. See [docs/docker-swarm.md](docs/docker-swarm.md).
 - **Kubernetes:** register each cluster under **Kubernetes** with its CNI and credentials, and optionally map workloads (pod labels) to tags. See [docs/kubernetes.md](docs/kubernetes.md).
 
 **2. Create a policy set and choose its scope** (*Policy Sets*)

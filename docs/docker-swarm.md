@@ -31,7 +31,7 @@ Both are per-host settings (Inventory → host → **Docker**). They are indepen
 | Swarm address | `swarmAddr` | The node's `--advertise-addr` as its peers see it. Defaults to the management IP. Set it when the swarm uses another network than the management one |
 | Encrypted overlay networks | `swarmEncryptedOverlay` | Also allow IPsec ESP (IP protocol 50) between the nodes, needed for overlay networks created with `--opt encrypted` |
 
-Register **every** node of the swarm as a host with the same Swarm name; peers are computed from the registered hosts. A node that is not registered is not allowed. When you add a node, redeploy the existing nodes so they allow it.
+The **Docker Swarm** page (Infrastructure menu, `GET /api/hosts/swarms/overview`) lists the registered swarms with their nodes, repeats these steps and warns about a single-node swarm, a missing manager, disabled nodes, a mixed encrypted-overlay setting and nodes deployed before the swarm last changed (an estimate based on host edit times; any edit counts). It only reads the inventory. Register **every** node of the swarm as a host with the same Swarm name; peers are computed from the registered hosts. A node that is not registered is not allowed. When you add a node, redeploy the existing nodes so they allow it.
 
 ## What is generated
 
@@ -47,6 +47,8 @@ Register **every** node of the swarm as a host with the same Swarm name; peers a
 Drift detection treats a missing `DOCKER-USER` jump as "policy not present".
 
 ## Known limitations
+
+- **What stays open between the nodes.** Only the Swarm ports (2377/tcp on managers, 7946 tcp and udp, 4789/udp, optionally ESP) are allowed, and only from the other registered, enabled nodes of the same swarm; everything else between nodes follows your policy. Container-to-container traffic across nodes travels inside the VXLAN tunnel on 4789/udp, which Segmentra allows but cannot inspect or restrict. The Docker Swarm page shows this note.
 
 - **Peers come from the inventory.** The peers of a node are the other **enabled** hosts with the same Swarm name. A node that is not registered is not allowed. Disabling or deleting a node's host record makes the others stop allowing it after their next deployment, which cuts that node off from the swarm. Adding, removing or re-addressing a node requires redeploying the other nodes; Segmentra does not do it automatically, and it does not warn about a swarm node that is missing from the inventory.
 - **Published ports become default-deny.** With the setting on, a published port that no IN rule allows is dropped for external clients, including ports a service starts publishing later (no redeployment is needed, or possible to forget). Add the rules before enabling it on a production node, and use the normal approval workflow.

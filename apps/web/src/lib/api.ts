@@ -155,6 +155,7 @@ export const api = {
 
   hosts: (params?: HostListParams) => fetchHosts(params),
   /** All hosts (pages through the API). Use for pickers. */
+  swarms: () => request<{ swarms: Array<{ name: string; nodes: any[] }> }>('/hosts/swarms/overview'),
   allHosts: (params?: Omit<HostListParams, 'page' | 'limit'>) => fetchAllHosts(params),
   createHost: (b: any) => request<{ host: any }>('/hosts', { method: 'POST', body: JSON.stringify(b) }),
   updateHost: (id: string, b: any) => request<{ host: any }>(`/hosts/${id}`, { method: 'PUT', body: JSON.stringify(b) }),

@@ -290,6 +290,27 @@ hostsRouter.post('/', requireRole('operator', 'admin'), async (req, res) => {
   }
 });
 
+// Docker Swarm overview: hosts that carry a Swarm name, grouped by swarm, with the time of their last successful deployment.
+// Must stay above '/:id'.
+hostsRouter.get('/swarms/overview', requireRole('viewer', 'operator', 'approver', 'admin'), async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT h.id, h.hostname, h.mgmt_ip, h.enabled, h.firewall_backend, h.swarm_cluster, h.swarm_role, h.swarm_addr,
+            h.swarm_encrypted_overlay, h.docker_published_ports, h.created_at, h.updated_at,
+            (SELECT max(COALESCE(dh.finished_at, d.finished_at, d.created_at))
+               FROM deployment_hosts dh JOIN deployments d ON d.id = dh.deployment_id
+              WHERE dh.host_id = h.id AND dh.status = 'SUCCEEDED' AND COALESCE(dh.expiry_status, '') <> 'REMOVED') AS last_deployed_at
+       FROM hosts h
+      WHERE h.swarm_cluster IS NOT NULL AND h.swarm_cluster <> ''
+      ORDER BY h.swarm_cluster, h.swarm_role, h.hostname`
+  );
+  const swarms = new Map<string, any[]>();
+  for (const r of rows) {
+    if (!swarms.has(r.swarm_cluster)) swarms.set(r.swarm_cluster, []);
+    swarms.get(r.swarm_cluster)!.push(r);
+  }
+  res.json({ swarms: [...swarms.entries()].map(([name, nodes]) => ({ name, nodes })) });
+});
+
 hostsRouter.get('/:id', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const { rows } = await pool.query(
     `SELECT h.*, v.vlan_tag, v.name as vlan_name

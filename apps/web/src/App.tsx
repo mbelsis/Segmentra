@@ -20,6 +20,7 @@ import { TopologyPage } from './pages/TopologyPage'
 import { IntegrationsPage } from './pages/IntegrationsPage'
 import { PolicyTestPage } from './pages/PolicyTestPage'
 import { KubernetesPage } from './pages/KubernetesPage'
+import { SwarmPage } from './pages/SwarmPage'
 import { IoTPage } from './pages/IoTPage'
 import { SecurityAuditPage } from './pages/SecurityAuditPage'
 import { ComplianceReportPage } from './pages/ComplianceReportPage'
@@ -51,6 +52,7 @@ function App() {
           <Route path="deployment/:deploymentId" element={<DeploymentDetailPage />} />
           <Route path="troubleshoot" element={<TroubleshootPage />} />
           <Route path="kubernetes" element={<KubernetesPage />} />
+          <Route path="swarm" element={<SwarmPage />} />
           <Route path="iot" element={<IoTPage />} />
           <Route path="security-audit" element={<SecurityAuditPage />} />
           <Route path="compliance-report" element={<ComplianceReportPage />} />
