@@ -80,17 +80,21 @@ export function LoginPage() {
       }}>
         {/* Logo */}
         <div style={{ textAlign: 'center', marginBottom: '32px' }}>
+          {/* The wordmark has its own brown background: it forms the header band of the card. */}
           <img
-            src="/segmentra.png"
-            alt="Segmentra"
+            src="/segmentra-logo-dark.png"
+            alt="Segmentra: microsegmentation for Linux"
             style={{
-              maxWidth: '240px',
+              display: 'block',
+              width: 'calc(100% + 96px)',
+              maxWidth: 'none',
               height: 'auto',
-              marginBottom: '8px'
+              margin: '-48px -48px 0',
+              borderRadius: '16px 16px 0 0'
             }}
           />
           <h1 style={{
-            margin: '16px 0 8px 0',
+            margin: '28px 0 8px 0',
             fontSize: '26px',
             fontWeight: '700',
             color: '#292018',

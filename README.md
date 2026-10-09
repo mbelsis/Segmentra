@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="logo/segmentra.png" alt="Segmentra" style="max-width: 300px; height: auto;" />
+  <img src="logo/segmentra-logo-dark.png" alt="Segmentra: microsegmentation for Linux" style="max-width: 560px; width: 100%; height: auto; border-radius: 10px;" />
 </div>
 
 # Segmentra

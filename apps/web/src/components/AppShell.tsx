@@ -31,7 +31,7 @@ export function AppShell() {
     <div className="appShell">
       <nav className="nav">
         <div style={{ marginBottom: 12, textAlign: 'center' }}>
-          <img src="/segmentra.png" alt="Segmentra" style={{ maxWidth: '115%', height: 'auto', marginBottom: 4, marginLeft: '-7.5%' }} />
+          <img src="/segmentra-mark.png" alt="Segmentra" style={{ width: 60, height: 'auto', display: 'inline-block', margin: '4px 0 6px' }} />
         </div>
 
         <NavLink to="/" end>Dashboard</NavLink>
@@ -55,6 +55,7 @@ export function AppShell() {
         <NavLink to="/iot">OT/IoT</NavLink>
 
         <NavLink to="/security-audit">Security Audit</NavLink>
+        <NavLink to="/compliance-report">Compliance Report</NavLink>
         <NavLink to="/audit">Audit Log</NavLink>
 
         {isAdmin && (
