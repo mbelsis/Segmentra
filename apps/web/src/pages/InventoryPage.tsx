@@ -35,6 +35,12 @@ export function InventoryPage() {
   const [hostFirewallBackend, setHostFirewallBackend] = useState<string>('auto');
   const [hostEnvironment, setHostEnvironment] = useState('');
   const [hostOsFamily, setHostOsFamily] = useState('');
+  // Docker: Swarm node profile and published-port enforcement
+  const [hostSwarmCluster, setHostSwarmCluster] = useState('');
+  const [hostSwarmRole, setHostSwarmRole] = useState<'manager' | 'worker'>('worker');
+  const [hostSwarmAddr, setHostSwarmAddr] = useState('');
+  const [hostSwarmEncrypted, setHostSwarmEncrypted] = useState(false);
+  const [hostDockerPublished, setHostDockerPublished] = useState(false);
   // '' = automatic (by credential scope); otherwise an explicitly assigned credential id (admin only)
   const [hostCredentialId, setHostCredentialId] = useState<string>('');
   const [sshCreds, setSshCreds] = useState<any[]>([]);
@@ -375,6 +381,11 @@ export function InventoryPage() {
     setHostFirewallBackend('auto');
     setHostEnvironment('');
     setHostOsFamily('');
+    setHostSwarmCluster('');
+    setHostSwarmRole('worker');
+    setHostSwarmAddr('');
+    setHostSwarmEncrypted(false);
+    setHostDockerPublished(false);
     setHostCredentialId('');
     setEditingHost(null);
     setEditingHostOriginal(null);
@@ -408,6 +419,14 @@ export function InventoryPage() {
         if (hostEnvironment.trim() !== (orig.environment ?? '')) payload.environment = hostEnvironment.trim();
         if (hostOsFamily.trim() !== (orig.os_family ?? '')) payload.osFamily = hostOsFamily.trim();
         if (isAdmin && (hostCredentialId || '') !== (orig.ssh_credential_id ?? '')) payload.sshCredentialId = hostCredentialId || null;
+        // Swarm profile is sent as a group; an empty cluster clears it.
+        if (hostSwarmCluster.trim() !== (orig.swarm_cluster ?? '') || (hostSwarmCluster.trim() && hostSwarmRole !== (orig.swarm_role ?? 'worker')) || hostSwarmAddr.trim() !== (orig.swarm_addr ?? '')) {
+          payload.swarmCluster = hostSwarmCluster.trim() || null;
+          payload.swarmRole = hostSwarmCluster.trim() ? hostSwarmRole : null;
+          payload.swarmAddr = hostSwarmCluster.trim() && hostSwarmAddr.trim() ? hostSwarmAddr.trim() : null;
+        }
+        if (hostSwarmEncrypted !== !!orig.swarm_encrypted_overlay) payload.swarmEncryptedOverlay = hostSwarmEncrypted;
+        if (hostDockerPublished !== !!orig.docker_published_ports) payload.dockerPublishedPorts = hostDockerPublished;
         const r = await api.updateHost(editingHost, payload);
         setHosts((prev) => prev.map(h => h.id === editingHost ? r.host : h));
       } else {
@@ -420,7 +439,9 @@ export function InventoryPage() {
           firewallBackend: hostFirewallBackend || 'auto',
           ...(hostEnvironment.trim() ? { environment: hostEnvironment.trim() } : {}),
           ...(hostOsFamily.trim() ? { osFamily: hostOsFamily.trim() } : {}),
-          ...(isAdmin && hostCredentialId ? { sshCredentialId: hostCredentialId } : {})
+          ...(isAdmin && hostCredentialId ? { sshCredentialId: hostCredentialId } : {}),
+          ...(hostSwarmCluster.trim() ? { swarmCluster: hostSwarmCluster.trim(), swarmRole: hostSwarmRole, ...(hostSwarmAddr.trim() ? { swarmAddr: hostSwarmAddr.trim() } : {}), swarmEncryptedOverlay: hostSwarmEncrypted } : {}),
+          ...(hostDockerPublished ? { dockerPublishedPorts: true } : {})
         };
         const r = await api.createHost(payload);
         setHosts((prev) => [...prev, r.host]);
@@ -441,6 +462,11 @@ export function InventoryPage() {
     setHostFirewallBackend(host.firewall_backend || 'auto');
     setHostEnvironment(host.environment || '');
     setHostOsFamily(host.os_family || '');
+    setHostSwarmCluster(host.swarm_cluster || '');
+    setHostSwarmRole(host.swarm_role === 'manager' ? 'manager' : 'worker');
+    setHostSwarmAddr(host.swarm_addr || '');
+    setHostSwarmEncrypted(!!host.swarm_encrypted_overlay);
+    setHostDockerPublished(!!host.docker_published_ports);
     setHostCredentialId(host.ssh_credential_id || '');
     setEditingHostOriginal(host);
     setEditingHost(host.id);
@@ -792,6 +818,44 @@ export function InventoryPage() {
                 <label>OS family</label>
                 <input value={hostOsFamily} onChange={(e) => setHostOsFamily(e.target.value)} placeholder="e.g., debian, ubuntu, rhel" />
                 <small>Optional. Filled in automatically by discovery; used by auto-tagging rules.</small>
+              </div>
+              <div className="form-group" style={{ gridColumn: '1 / -1', borderTop: '1px solid #e8e0d4', paddingTop: 12 }}>
+                <label style={{ fontWeight: 600 }}>Docker</label>
+                <small style={{ display: 'block', marginBottom: 8 }}>
+                  For Docker Swarm nodes and Docker hosts. Published container ports and the Swarm routing mesh never reach the INPUT chain, so by default
+                  host firewall rules do not restrict them, and a default-deny policy would block the cluster ports between the nodes.
+                </small>
+                <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontWeight: 'normal' }}>
+                  <input type="checkbox" checked={hostDockerPublished} onChange={(e) => setHostDockerPublished(e.target.checked)} style={{ width: 'auto' }} />
+                  Apply inbound policy rules to Docker-published ports
+                </label>
+                <small style={{ display: 'block', margin: '2px 0 10px 22px' }}>
+                  Rules are matched on the published (original) port; unmatched published ports are denied like any other inbound port. Traffic from containers on the host is not affected.
+                  Uses the forwarding chain, so it needs the iptables or nftables backend.
+                </small>
+                <div className="form-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))' }}>
+                  <div className="form-group">
+                    <label>Swarm name</label>
+                    <input value={hostSwarmCluster} onChange={(e) => setHostSwarmCluster(e.target.value)} placeholder="empty = not a Swarm node" />
+                    <small>Nodes with the same name are peers: their Swarm ports (2377, 7946, 4789) are always allowed.</small>
+                  </div>
+                  <div className="form-group">
+                    <label>Swarm role</label>
+                    <select value={hostSwarmRole} onChange={(e) => setHostSwarmRole(e.target.value === 'manager' ? 'manager' : 'worker')} disabled={!hostSwarmCluster.trim()}>
+                      <option value="worker">Worker</option>
+                      <option value="manager">Manager (also accepts 2377/tcp)</option>
+                    </select>
+                  </div>
+                  <div className="form-group">
+                    <label>Swarm address</label>
+                    <input value={hostSwarmAddr} onChange={(e) => setHostSwarmAddr(e.target.value)} placeholder="defaults to the management IP" disabled={!hostSwarmCluster.trim()} />
+                    <small>The node's --advertise-addr, as its peers see it.</small>
+                  </div>
+                </div>
+                <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontWeight: 'normal', marginTop: 6 }}>
+                  <input type="checkbox" checked={hostSwarmEncrypted} onChange={(e) => setHostSwarmEncrypted(e.target.checked)} disabled={!hostSwarmCluster.trim()} style={{ width: 'auto' }} />
+                  Encrypted overlay networks (also allow IPsec ESP between the nodes)
+                </label>
               </div>
               {isAdmin ? (
                 <div className="form-group">

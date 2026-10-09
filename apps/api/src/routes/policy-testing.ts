@@ -9,6 +9,7 @@ import { requireAuth, requireRole } from '../middleware/auth.js';
 import { analyzePolicyTest } from '../services/policy-test-analyzer.js';
 import { compileHostPolicy, type RuleDirection } from '@segmentra/compiler';
 import { addDestinationSets, compilerDestination, getProtectedDestinations } from '../services/forward-rules.js';
+import { getDockerCompileInput } from '../services/swarm.js';
 import { startAuditSession, deployLogOnlyPolicy, restoreAuditSession, retrieveAuditLogs } from '@segmentra/executor';
 import { parseFirewallLogs, groupCommunicationFlows } from '../services/log-parser.js';
 import { getSshCredentialForHost, type MaterializedSshCredential } from '../services/ssh-credentials.js';
@@ -270,6 +271,7 @@ policyTestingRouter.post('/start', requireRole('operator', 'approver', 'admin'),
         baseline: { mgmtSshCidrs: mgmtCidrs },
         logOnlyMode: true,
         protectedDestinations,
+        ...(await getDockerCompileInput(host.id)),
       });
     } catch (ce: any) {
       if (ce?.name === 'CompileError') throw new Error(`Policy failed to compile for ${host.hostname}: ${ce.message}`);

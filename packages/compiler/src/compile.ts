@@ -56,6 +56,19 @@ export type Host = {
   sshPort?: number | null;
 };
 
+/**
+ * Docker Swarm node profile. A Swarm node must always reach its peers on the cluster ports,
+ * otherwise the overlay network breaks (nodes keep showing Ready while traffic through the routing
+ * mesh fails), so these are allowed in the baseline, ahead of any policy rule.
+ */
+export type SwarmProfile = {
+  role: 'manager' | 'worker';
+  /** Addresses (IPs/CIDRs) of the OTHER nodes of the same swarm. */
+  peerCidrs: string[];
+  /** Overlay networks created with --opt encrypted use IPsec ESP (IP protocol 50) between nodes. */
+  encryptedOverlay?: boolean;
+};
+
 export type CompileInput = {
   host: Host;
   policyInterfaceScope: InterfaceScope;
@@ -78,6 +91,15 @@ export type CompileInput = {
    * host has FORWARD rules or protected destinations; otherwise the output is unchanged.
    */
   protectedDestinations?: string[];
+  /** Docker Swarm node: always allow the cluster ports from the other nodes (see SwarmProfile). */
+  swarm?: SwarmProfile | null;
+  /**
+   * Apply the inbound (IN/BOTH) rules also to traffic that Docker publishes with DNAT (published
+   * container ports and the Swarm routing mesh). Those packets are forwarded, never reach INPUT,
+   * so INPUT rules cannot restrict them. Traffic from Docker's own bridges is not affected, and
+   * unmatched DNAT traffic follows defaultInputAction. Not applied in log-only mode.
+   */
+  dockerPublishedPorts?: boolean;
 };
 
 export type CompileOutput = {
@@ -439,9 +461,48 @@ function prepareProtected(input: CompileInput, sets: PreparedSets): ProtectedDes
   };
 }
 
-/** Forwarding is filtered only when the host has FORWARD rules or protected destinations. */
+/** Forwarding is filtered when the host has FORWARD rules, protected destinations or published-port rules. */
 function forwardingEnabled(input: CompileInput, prot: ProtectedDests): boolean {
-  return input.rules.some((r) => r.direction === 'FORWARD') || prot.v4.length > 0 || prot.v6.length > 0;
+  return (
+    input.rules.some((r) => r.direction === 'FORWARD') ||
+    prot.v4.length > 0 ||
+    prot.v6.length > 0 ||
+    input.dockerPublishedPorts === true
+  );
+}
+
+// --- Docker Swarm / published ports ------------------------------------------------------------
+
+type SwarmAllow = { label: string; proto: 'tcp' | 'udp' | 'esp'; port?: number };
+
+/** Ports a Swarm node needs from its peers: 2377/tcp (managers), 7946/tcp+udp, 4789/udp, ESP if encrypted. */
+function swarmAllows(sw: SwarmProfile): SwarmAllow[] {
+  const allows: SwarmAllow[] = [
+    { label: 'swarm_gossip_tcp', proto: 'tcp', port: 7946 },
+    { label: 'swarm_gossip_udp', proto: 'udp', port: 7946 },
+    { label: 'swarm_vxlan', proto: 'udp', port: 4789 }
+  ];
+  if (sw.role === 'manager') allows.unshift({ label: 'swarm_manager', proto: 'tcp', port: 2377 });
+  if (sw.encryptedOverlay) allows.push({ label: 'swarm_overlay_esp', proto: 'esp' });
+  return allows;
+}
+
+/** Peer addresses of one family (validated, deduplicated). */
+function swarmPeers(sw: SwarmProfile | null | undefined, fam: Family): string[] {
+  if (!sw) return [];
+  if (sw.role !== 'manager' && sw.role !== 'worker') throw new CompileError(`Invalid Swarm role "${String(sw.role)}"`);
+  return dedupeAddrs(sw.peerCidrs.map((p) => parseAddr(p, 'Swarm peer address')))
+    .filter((a) => a.family === fam)
+    .map((a) => a.text);
+}
+
+/** Interfaces of Docker's own bridges: traffic from containers/overlay gateways is not "external". */
+const DOCKER_INTERNAL_IFACES = { ipt: ['docker0', 'docker_gwbridge', 'br-+'], nft: ['docker0', 'docker_gwbridge', 'br-*'] };
+
+/** conntrack original-destination-port arguments (iptables): one per range, or a single empty string. */
+function iptCtPortArgs(ports: Array<[number, number]> | null): string[] {
+  if (!ports) return [''];
+  return ports.map(([lo, hi]) => `--ctorigdstport ${lo === hi ? lo : `${lo}:${hi}`}`);
 }
 
 type ForwardMatch = { family: Family | null; src: RuleTarget; dst: RuleTarget };
@@ -477,11 +538,42 @@ function nftProtoExpr(r: PolicyRule, ports: Array<[number, number]> | null, fami
   return '';
 }
 
+/**
+ * Inbound rules applied to Docker-published (DNAT) traffic: matched on the ORIGINAL destination port,
+ * because the destination has already been rewritten to the container when the packet is forwarded.
+ */
+function nftPublishedPortRules(input: CompileInput, sets: PreparedSets): string[] {
+  const out: string[] = [];
+  const rulesSorted = [...input.rules].sort((a, b) => a.orderIndex - b.orderIndex);
+  for (const r of rulesSorted) {
+    if (r.direction !== 'IN' && r.direction !== 'BOTH') continue;
+    if (r.protocol === 'icmp') continue;
+    const ports = rulePorts(r);
+    const commentText = sanitizeText(r.comment, 120);
+    const comment = `comment "${sanitizeText(`published rule${r.orderIndex}${commentText ? ` ${commentText}` : ''}`, 120)}"`;
+    const ifs = resolveInterfaceNames(input.host, ruleScope(r, input));
+    const ifExpr = ifs.length === 0 ? '' : `iifname { ${ifs.map((n) => `"${n}"`).join(', ')} }`;
+    for (const t of resolveTargets(r, sets)) {
+      const addrExpr = t.nftAddr === null ? '' : `${t.family === 6 ? 'ip6' : 'ip'} saddr ${t.nftAddr}`;
+      let protoExpr = '';
+      if (r.protocol === 'tcp' || r.protocol === 'udp') {
+        protoExpr = `meta l4proto ${r.protocol}`;
+        if (ports) protoExpr += ` ct original proto-dst { ${ports.map(([lo, hi]) => (lo === hi ? String(lo) : `${lo}-${hi}`)).join(', ')} }`;
+      }
+      out.push(['ct status dnat', ifExpr, addrExpr, protoExpr, r.action === 'ALLOW' ? 'accept' : 'drop', comment].filter(Boolean).join(' '));
+    }
+  }
+  const external = DOCKER_INTERNAL_IFACES.nft.map((n) => `iifname != "${n}"`).join(' ');
+  out.push(`ct status dnat ${external} ${(input.defaultInputAction ?? 'DROP') === 'ACCEPT' ? 'accept' : 'drop'} comment "published_default"`);
+  return out;
+}
+
 /** Lines of the nft forward chain (without the chain header). */
 function nftForwardRules(input: CompileInput, sets: PreparedSets, prot: ProtectedDests, logOnly: boolean): string[] {
   const lines: string[] = [];
   // Replies of allowed connections (and related ICMP) always pass.
   lines.push('ct state established,related accept');
+  if (input.dockerPublishedPorts && !logOnly) lines.push(...nftPublishedPortRules(input, sets));
   const rulesSorted = [...input.rules].filter((r) => r.direction === 'FORWARD').sort((a, b) => a.orderIndex - b.orderIndex);
   for (const r of rulesSorted) {
     const ports = rulePorts(r);
@@ -539,6 +631,19 @@ function compileNft(input: CompileInput, logOnly: boolean): string {
     inputRules.push(`meta nfproto ipv4 tcp dport ${mgmt.port} ${logStmt('ALLOW: mgmt_ssh_fallback')}accept comment "mgmt_ssh_fallback"`);
   } else if (mgmt.fallbackV6) {
     inputRules.push(`meta nfproto ipv6 tcp dport ${mgmt.port} ${logStmt('ALLOW: mgmt_ssh_fallback')}accept comment "mgmt_ssh_fallback"`);
+  }
+
+  // --- Docker Swarm cluster ports from the other nodes (always, ahead of policy rules) ---
+  if (input.swarm) {
+    for (const fam of [4, 6] as Family[]) {
+      const peers = swarmPeers(input.swarm, fam);
+      if (peers.length === 0) continue;
+      const addr = `${fam === 6 ? 'ip6' : 'ip'} saddr ${peers.length === 1 ? peers[0] : `{ ${peers.join(', ')} }`}`;
+      for (const a of swarmAllows(input.swarm)) {
+        const proto = a.proto === 'esp' ? 'meta l4proto esp' : `${a.proto} dport ${a.port}`;
+        inputRules.push(`${addr} ${proto} ${logStmt(`ALLOW: ${a.label}`)}accept comment "${a.label}"`);
+      }
+    }
   }
 
   // --- Policy rules, in user-defined order_index order (no reordering) ---
@@ -749,6 +854,15 @@ function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Famil
     baselineAccept(`-p tcp --dport ${mgmt.port}`, 'mgmt_ssh_fallback');
   }
 
+  // Docker Swarm cluster ports from the other nodes (always, ahead of policy rules).
+  if (input.swarm) {
+    for (const peer of swarmPeers(input.swarm, fam)) {
+      for (const a of swarmAllows(input.swarm)) {
+        baselineAccept(a.proto === 'esp' ? `-p esp -s ${peer}` : `-p ${a.proto} -s ${peer} --dport ${a.port}`, a.label);
+      }
+    }
+  }
+
   const rulesSorted = [...input.rules].sort((a, b) => a.orderIndex - b.orderIndex);
   for (const r of rulesSorted) {
     validateRuleEnums(r);
@@ -807,6 +921,35 @@ function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Famil
     // deny = DROP; traffic to protected devices no rule allowed is dropped; anything else
     // forwarded is handed back to FORWARD unchanged.
     push(`-A ${FWD} -m conntrack --ctstate ESTABLISHED,RELATED ${iptComment('established')} -j ${ALLOW}`);
+    if (input.dockerPublishedPorts && !logOnly) {
+      // Docker-published ports and the Swarm routing mesh: DNAT'd packets are forwarded, never INPUT.
+      // Same rules as INPUT, matched on the original destination port; unmatched DNAT traffic from
+      // outside Docker's own bridges follows the default verdict.
+      for (const r of rulesSorted) {
+        if (r.direction !== 'IN' && r.direction !== 'BOTH') continue;
+        if (r.protocol === 'icmp') continue;
+        const ports = rulePorts(r);
+        const pubProto = r.protocol === 'any' ? '' : `-p ${r.protocol}`;
+        const commentText = sanitizeText(r.comment, 120);
+        const pubComment = iptComment(`published rule${r.orderIndex}${commentText ? ` ${commentText}` : ''}`);
+        const ifNames = resolveInterfaceNames(input.host, ruleScope(r, input));
+        for (const t of resolveTargets(r, sets).filter((x) => x.family === null || x.family === fam)) {
+          for (const iface of ifNames.length === 0 ? [''] : ifNames) {
+            for (const addr of t.iptAddrs.length === 0 ? [''] : t.iptAddrs) {
+              for (const p of iptCtPortArgs(ports)) {
+                push(`-A ${FWD} ${iface ? `-i ${iface}` : ''} ${pubProto} ${addr ? `-s ${addr}` : ''} -m conntrack --ctstate DNAT ${p} ${pubComment} -j ${r.action === 'ALLOW' ? ALLOW : 'DROP'}`);
+              }
+            }
+          }
+        }
+      }
+      // iptables accepts one -i per rule, so each Docker bridge gets its own exemption: traffic that
+      // containers/overlay gateways send to published ports is not an external client.
+      for (const iface of DOCKER_INTERNAL_IFACES.ipt) {
+        push(`-A ${FWD} -i ${iface} -m conntrack --ctstate DNAT ${iptComment('published_docker_internal')} -j RETURN`);
+      }
+      push(`-A ${FWD} -m conntrack --ctstate DNAT ${iptComment('published_default')} -j ${defaultAccept ? 'RETURN' : 'DROP'}`);
+    }
     const fwdRules = rulesSorted.filter((r) => r.direction === 'FORWARD');
     for (const r of fwdRules) {
       const ports = rulePorts(r);
@@ -922,6 +1065,16 @@ function compileFirewalld(input: CompileInput): string {
 export function compileHostPolicy(input: CompileInput): CompileOutput {
   const backend = input.host.firewallBackend;
   const logOnly = input.logOnlyMode ?? false;
+
+  // Docker support is implemented for the iptables and nftables backends. The native managers would silently
+  // ignore it (firewalld) or apply only half of it (UFW has no DOCKER-USER integration), which leaves the
+  // cluster ports or published ports unprotected without any warning, so refuse instead.
+  if (backend === 'firewalld' && (input.swarm || input.dockerPublishedPorts)) {
+    throw new CompileError('Docker Swarm / published-port support needs the iptables or nftables backend; firewalld is not supported for it');
+  }
+  if (backend === 'ufw' && input.dockerPublishedPorts) {
+    throw new CompileError('Docker published-port enforcement needs the iptables or nftables backend; UFW is not supported for it');
+  }
 
   if (backend === 'firewalld') {
     const text = compileFirewalld(input);

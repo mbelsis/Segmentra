@@ -155,6 +155,7 @@ Go to **Inventory → Hosts** tab:
 - Click **+ Add Host**
 - Enter hostname, management IP, SSH port (default 22)
 - Select firewall backend (`auto`, `nftables`, `iptables`, `firewalld`, or `ufw`)
+- **Docker** section: mark the host as a Docker Swarm node (swarm name, manager/worker, address) so the cluster ports between the nodes are always allowed, and optionally apply your inbound rules to Docker-published ports (they never reach the INPUT chain, so ordinary rules do not restrict them). iptables and nftables only; see [docker-swarm.md](docker-swarm.md)
 - Assign VLAN and tags
 - *SSH credential* (admins only): leave *Automatic (by credential scope)* or assign a credential explicitly
 

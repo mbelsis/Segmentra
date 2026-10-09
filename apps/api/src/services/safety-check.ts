@@ -12,6 +12,7 @@ import {
 } from './ip-utils.js';
 import { createSourceResolver } from './source-resolver.js';
 import { addDestinationSets, compilerDestination, getProtectedDestinations } from './forward-rules.js';
+import { getDockerCompileInput } from './swarm.js';
 
 export interface SafetyCheckResult {
   safe: boolean;
@@ -188,6 +189,7 @@ export async function checkDeploymentSafety(params: {
         sets,
         baseline: { mgmtSshCidrs },
         protectedDestinations,
+        ...(await getDockerCompileInput(host.id)),
       });
     } catch (e: any) {
       result.errors.push(`Host ${host.hostname}: policy does not compile: ${e?.message ?? String(e)}`);

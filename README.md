@@ -4,7 +4,7 @@
 
 # Segmentra
 
-***Segmentra*** is an on-prem, web-based **fleet firewall & microsegmentation management** tool for Linux servers. It lets security and infrastructure teams centrally define **host firewall policies** (allow/deny), and deploy them at scale to nftables, iptables, firewalld, and UFW, via SSH or Ansible Playbook. It extends enforcement to **Kubernetes containers** and **OT/IoT devices** through gateway firewalls.
+***Segmentra*** is an on-prem, web-based **fleet firewall & microsegmentation management** tool for Linux servers. It lets security and infrastructure teams centrally define **host firewall policies** (allow/deny), and deploy them at scale to nftables, iptables, firewalld, and UFW, via SSH or Ansible Playbook. It extends enforcement to **Kubernetes** clusters, **Docker Swarm** nodes and Docker-published ports, and **OT/IoT devices** through gateway firewalls.
 
 The platform enables:
 - **Inventory creation and auto-tagging**
@@ -195,6 +195,43 @@ Segmentra turns approved policy versions into Kubernetes **NetworkPolicy** manif
 - **Discovering workloads from the cluster.** The sync endpoint returns `501`; workloads are registered by hand with their labels.
 - **Other exec-plugin / OIDC logins** (kubeconfigs that run a program or read a token file) and API servers reachable only through a proxy or over plain `http`.
 
+### Docker Swarm and Docker-published ports
+
+A Swarm node is an ordinary Linux server, so Segmentra manages its **host firewall over SSH** exactly like any other host. What it adds is awareness of two things Docker does that make a plain host policy unsafe or ineffective. There is no Swarm API integration: Segmentra does not talk to the Docker daemon, and it does not manage overlay or container-to-container traffic. See the [Docker Swarm Guide](docs/docker-swarm.md) for details.
+
+**How Swarm is supported**
+1. Register **every node** of the swarm as a host (SSH credential, firewall backend `iptables` or `nftables`).
+2. In **Inventory → host → Docker** give all nodes the **same Swarm name**, set each node's role (manager or worker) and, if the swarm uses another network than the management one, its Swarm address (`--advertise-addr`).
+3. Tick **Apply inbound policy rules to Docker-published ports** to have your inbound rules restrict published ports and the routing mesh.
+4. Write the policy as usual (for example "only 10.0.0.5 may reach 8080") and deploy it with the normal approval workflow. Redeploy the existing nodes when you add or remove a node.
+
+**Capabilities**
+- **Swarm node profile.** The cluster ports (2377/tcp on managers, 7946/tcp and udp, 4789/udp, optionally IPsec ESP for encrypted overlays) are always allowed from the other registered nodes of the same swarm, ahead of the policy rules. Without this a default-deny policy breaks the overlay network while `docker node ls` still shows every node Ready: in the lab only 4 of 12 routing-mesh requests and 3 of 9 overlay requests worked.
+- **Published-port enforcement.** Docker publishes ports, and the routing mesh does so on every node, with NAT, so the traffic is forwarded and never reaches `INPUT`: ordinary host rules do not restrict it (in the lab a client the policy did not allow reached the service on every node). With the setting on, the inbound rules also apply to that traffic, matched on the published port, and published ports that no rule allows, **including ports a service publishes later**, are denied for external clients. Traffic from Docker's own bridges (containers on the host) is not affected.
+- **Robust against Docker.** Docker re-inserts its own `FORWARD` jumps whenever a service publishes a port, which would push Segmentra's rules below Docker's `ACCEPT`. Segmentra therefore also keeps a jump in `DOCKER-USER`, the chain Docker keeps first. The jump is covered by reboot persistence, rollback (backup and restore), removal and drift detection, and Docker's own chains and rules are left alone.
+- **Both backends.** iptables (`SEGMENTRA-IN` and `SEGMENTRA-FWD`) and nftables (`input` and `forward` chains of `table inet segmentra`).
+
+**Known limitations**
+- **Peers come from the inventory.** The peers of a node are the other **enabled** hosts with the same Swarm name. A node that is not registered is not allowed, and disabling or deleting a node's host record makes the others stop allowing it. Adding, removing or re-addressing a node needs a redeployment of the other nodes; this is not automatic.
+- **Default deny for published ports.** With published-port enforcement on, every published port is closed to external clients until a rule allows it, which also covers ports published later. Add the rules before enabling it on a production node.
+- **Rules use published ports and client addresses.** Match the published port (for example `8080`), not the container's target port. Sources are the client addresses as the first node sees them: behind a load balancer or NAT that is the balancer's address.
+- **It applies to all DNAT traffic from outside Docker's bridges.** Other tools on the same host that DNAT traffic (for example libvirt or LXC port forwards, or a Kubernetes node) are covered by the same default deny. Do not enable the setting on such hosts unless their traffic is allowed by a rule.
+- **Inbound only.** OUT and ICMP rules are not applied to published ports; FORWARD rules keep working as before. Firewall learning (log-only) and policy test sessions do not cover published ports.
+- **Backends.** Only `iptables` and `nftables`. A host set to firewalld, or to UFW with published-port enforcement, fails to compile with a clear message instead of silently ignoring the setting.
+- **One address per node.** Only one Swarm address per node is allowed between peers; separate data-path addresses (`--data-path-addr`) are not handled.
+- **No Swarm awareness beyond ports.** Segmentra does not check that the swarm is healthy and does not warn when a node of the swarm is missing from the inventory.
+
+**Not tested yet** (implemented, but never verified)
+- **Real multi-machine swarms and reboots.** Only a lab on Docker Desktop was used: all nodes share one kernel. Boot-time persistence and its ordering against Docker's start-up were not exercised (the saved-rules rendering is checked, a reboot is not), and neither was restarting or upgrading the Docker daemon (the `DOCKER-USER` chain is expected to survive it).
+- **The nftables backend with a live Docker host** (its rules are unit-tested only).
+- **Docker 28 and newer**, Docker's experimental nftables firewall backend, and `iptables-legacy` (the lab runs Docker 27.5 with `iptables-nft`).
+- **Encrypted overlay networks**, **host-mode and IPv6 published ports**, and standalone Docker or Compose hosts.
+
+**Not supported yet**
+- Reading services, stacks and published ports from the Docker API (policies refer to port numbers, not service names).
+- Policies for container-to-container and overlay-network traffic.
+- Egress rules for published ports, and Docker on the firewalld or UFW backends.
+
 ### Security & Compliance
 - **Security Posture Audit** — on-demand scan of all deployed policies for excessive permissions (8 categories: sensitive port open to any, all ports open to any, very broad source CIDRs, any-protocol / any-port rules, `ALL_INTERFACES` with a broad source, duplicate rules, unmanaged hosts, stale policies)
 - **Comprehensive Audit Trail** — changes logged with actor, timestamp, entity, and rich metadata
@@ -375,6 +412,8 @@ npm run test:integration:ssh-docker
 
 This builds the current code, starts a temporary API + PostgreSQL + 3 target-container environment, deploys sample firewall ACLs through the real API using both SSH password and SSH key authentication, verifies the resulting `iptables` state, and runs live `ping` checks between the targets. For full details, see [tests/README.md](tests/README.md).
 
+Other integration tests need a running Segmentra API and Docker Desktop (or Docker): `npm run test:integration:k8s -- <kindnet|calico|cilium>` (Kubernetes enforcement on kind clusters) and `npm run test:integration:swarm` (a 3-node Docker Swarm lab). They create their own lab and remove it afterwards; run them against a development stack, because they leave users, hosts and archived policy sets behind.
+
 ---
 
 ## Architecture
@@ -432,6 +471,7 @@ Segmentra only manages its own firewall objects and leaves rules created by othe
 - **Native firewalld/UFW:** Segmentra writes permanent native policy objects/custom-rule blocks, verifies live rules and boot-service enablement, and includes both live and saved state in drift checks. Native allows are authoritative within the manager; see [native firewall managers](docs/firewall-managers.md) for coexistence, prerequisites, and scope/learning limitations.
 - **Upgrading hosts deployed by older versions** (which replaced the whole iptables filter table): the first deploy removes the old Segmentra rules from `INPUT`/`OUTPUT` and resets the `INPUT`/`OUTPUT` policy to `ACCEPT` (only if Segmentra had set it to `DROP`). Rules that can't be positively identified as Segmentra's are left in place and reported as warnings in the deployment output. `FORWARD` is left at `DROP` when Docker or Kubernetes chains are present.
 
+- **Docker published ports (opt-in per host):** with *Apply inbound policy rules to Docker-published ports* the `SEGMENTRA-FWD` chain also filters DNAT-ed traffic, and a second jump from `DOCKER-USER` keeps it ahead of Docker's `DOCKER-INGRESS` after Docker re-orders `FORWARD`. Docker's own chains and rules are not modified. Swarm nodes additionally always allow the cluster ports from their peers. See [Docker Swarm and Docker-published ports](#docker-swarm-and-docker-published-ports).
 - **Forwarded traffic (IoT/OT gateways):** forwarding is filtered only on hosts whose policy has FORWARD rules or that protect IoT devices (assets assigned to the host on the OT/IoT page). With nftables this is a `chain forward` inside `table inet segmentra` (policy `accept`). With iptables it is a `SEGMENTRA-FWD` chain reached from a single jump at the top of `FORWARD`. Only traffic *to protected devices* is dropped unless a FORWARD rule allows it. Other forwarded traffic, including Docker's, passes as before. Allowed traffic leaves `SEGMENTRA-FWD` with `RETURN`, so `DOCKER-USER` and other `FORWARD` rules after the jump still apply. Deploying a version without forwarding, or removing the policy, deletes the forward chain and its jump. On other hosts nothing changes.
 
 - **Reboot persistence** uses the distribution's own service and touches only Segmentra's part of its files: one `include` line plus `segmentra.nft` for nftables, only the `SEGMENTRA-*` lines of the saved filter table for iptables, permanent native policy XML for firewalld, or marked before-rule blocks for UFW. Docker and Kubernetes chains are not copied into these files. See [Persistence across reboots](#persistence-across-reboots).
@@ -469,6 +509,7 @@ The following table and service behavior apply to the **raw nftables/iptables ba
 - **Raw-backend persistence with firewalld.** Raw nftables/iptables persistence still conflicts with active/enabled firewalld and reports `firewalld_active`. Use the supported native `firewalld` backend to persist ACLs through firewalld itself; remove any old raw Segmentra policy before switching.
 - **Native-manager limits.** Firewalld requires its native policy API, nftables backend, and `ALL_INTERFACES` for non-forward rules. UFW requires IPv6 enabled and both family save/restore tools. Learning/log-only sessions are rejected without changing the ACL. Native prerequisites and persistence checks fail deployment instead of silently applying runtime-only rules.
 - **Raw-backend persistence on other distributions.** Distribution-specific raw persistence supports Debian, Ubuntu and RHEL-family hosts. Other distributions report `unsupported_distro`. Native firewalld/UFW persistence instead depends on the manager/service prerequisites; this is not certification of every distribution. Missing packages are reported, never installed. Saved administrator catch-all REJECT/DROP rules can still block raw-backend allows after reboot.
+- **Docker Swarm and published ports.** Peers are derived from the inventory (redeploy the other nodes after adding or removing a node), published-port enforcement denies every published port no rule allows (also ports published later) and every other DNAT traffic from outside Docker's bridges, and it needs the iptables or nftables backend. Details and the not-tested list are in [Docker Swarm and Docker-published ports](#docker-swarm-and-docker-published-ports).
 - **Docker socket.** The Ansible executor runs `docker exec` and therefore needs `/var/run/docker.sock`, which is root-equivalent on the Docker host. SSH-executor-only installations can remove the mount.
 - **Ansible executor:**
   - It needs **Python on the target hosts** (readiness warns if it's missing).
@@ -525,6 +566,7 @@ Everything below was exercised against Docker containers. The core workflow went
   - SSRF checks.
 - **Threat intelligence:** AbuseIPDB against a mock of its API (error handling, auto-block drafts, deduplication).
 - **SIEM forwarding:** every audit event forwarded exactly once (including a second API replica and a reconnect), with no secrets in messages. Integration and notification secrets are encrypted at rest; a database dump showed none of them.
+- **Docker Swarm:** `npm run test:integration:swarm` builds a 3-node Swarm on Docker Desktop (privileged Docker-in-Docker nodes with sshd, an overlay network, a published nginx service and two client containers) and runs 35 checks through the real API and SSH executor: the allowed client reaches the published port on every node and a client the policy does not allow is blocked on every node, the overlay stays healthy without the policy mentioning any Swarm port, a port published later is blocked without a redeployment even after Docker re-ordered its `FORWARD` jumps, redeploying is idempotent, remove, backup and restore handle the `DOCKER-USER` jump and leave Docker's chain alone, the saved-rules rendering merges with existing fail2ban/Docker lines, and each feature makes a difference when switched off. `npm run test:swarm-compile` unit-tests the generated rules for both backends.
 - **Kubernetes:** `npm run test:integration:k8s` builds 3-node kind clusters with **kindnet**, **Calico** and **Cilium** and runs 69 checks on each against the real API: stored kubeconfig and service-account token credentials, apply, dry run, drift check and removal through Segmentra, real pod-to-pod TCP/UDP enforcement (CIDR, HOST, TAG, VLAN, `any`, port ranges, same-node and cross-node clients, selector peers, updates), refusal to overwrite or delete a policy Segmentra did not create, read-only RBAC failure, and no credential material in any API response. The cloud-login token minting has unit tests (`npm run test:k8s-auth`: SigV4 against AWS's documented example, JWT signature, mocked token endpoints). Earlier generated manifests were also applied to k3s v1.30 and enforced.
 - **Other:** `scripts/restore-previous-policy.sh` (`--latest` / `--timestamp`); password change and reset; and the PowerShell scripts parse under PowerShell 7 and as Windows PowerShell 5.1 would read them.
 
@@ -532,6 +574,7 @@ Everything below was exercised against Docker containers. The core workflow went
 
 - **Email notifications are not implemented.** There is no SMTP sending; email channels report FAILED.
 - **Kubernetes: see [Not tested yet / Not supported yet](#kubernetes-not-tested-yet).** Workload discovery is not implemented (the sync endpoint returns `501`), only kind clusters were tested (the EKS/GKE/AKS cloud logins never against real clouds), and generated manifests use `podSelector: {}` (all pods in the namespace).
+- **Docker Swarm: see [Not tested yet / Not supported yet](#docker-swarm-and-docker-published-ports).** Only a Docker Desktop lab was used (one kernel, Docker 27.5, `iptables-nft`): real multi-machine swarms, reboots, Docker daemon restarts and upgrades, the nftables backend on a live Docker host, Docker 28+, encrypted overlays, host-mode and IPv6 published ports are untested.
 - **Microsoft Active Directory itself, and LDAPS with a real certificate.** Only OpenLDAP was tested.
 - **The real AbuseIPDB service**, as opposed to the mock, and real Slack workspaces.
 - **Hosts that log only to journald (no rsyslog).** Firewall Learning reads the rsyslog file, so such hosts capture no flows. FORWARD traffic on gateways is not analyzed by Learning or Policy Impact Analysis, by design.
@@ -552,6 +595,7 @@ See also [Known Limitations](#known-limitations) and the [OT/IoT guide](docs/iot
 
 - **Email notifications.** Email channels can be configured but there is no SMTP sending yet; they report FAILED with "Email delivery is not implemented yet". Plan: add an SMTP client (e.g. nodemailer) with TLS, authentication stored encrypted like other secrets, and a test-send button.
 - **Kubernetes workload discovery.** The sync endpoint returns `501 not_implemented`. Workloads are registered by hand; with the stored cluster credentials Segmentra could now read namespaces, workloads and pod labels from the cluster and map labels to tags automatically. Generated NetworkPolicies still select all pods in the namespace (`podSelector: {}`).
+- **Docker Swarm awareness.** Read services, stacks and published ports from the Docker API so policies can refer to services, warn when a swarm node is missing from the inventory, and cover container-to-container and overlay traffic.
 - **UI for API-only features.** These work through the API but have no screens yet: policy recommendations, enforcement points (network device ACLs), IoT baselines and observed flows, host interfaces, and the per-host compiled-policy preview (`render`).
 - **More integrations.** SOAR and vulnerability-database integrations can be configured but don't do anything yet.
 
@@ -578,6 +622,7 @@ See also [Known Limitations](#known-limitations) and the [OT/IoT guide](docs/iot
 | [OT/IoT Guide](docs/iot.md) | IoT microsegmentation with gateway model |
 | [Gateway Setup](docs/gateway-setup-guide.md) | Linux gateway firewall configuration |
 | [Kubernetes Guide](docs/kubernetes.md) | K8s NetworkPolicy management |
+| [Docker Swarm Guide](docs/docker-swarm.md) | Swarm node profile and Docker-published ports |
 | [Ansible Playbook](docs/playbook-ansible.md) | Deployment playbook documentation |
 | [Original Specification](docs/segmentra_fleet_microsegmentation_firewall_manager_full_specification.md) | The original product specification (historical; the implementation differs in places) |
 

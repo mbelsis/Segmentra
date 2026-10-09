@@ -29,6 +29,10 @@ Port 22
 Port ${SSH_PORT}
 PasswordAuthentication yes
 PubkeyAuthentication yes
+# The SSH executor opens many short connections in a row, often to all nodes at once on a busy VM.
+MaxStartups 100:30:200
+MaxAuthTries 10
+LoginGraceTime 60
 PermitRootLogin no
 UsePAM no
 KbdInteractiveAuthentication no

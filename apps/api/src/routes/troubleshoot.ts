@@ -8,6 +8,7 @@ import { buildAuditHost, restoreAuditSessionById } from '../services/audit-sched
 import { cidrContains, isValidCidr, isValidIp, portSpecIncludes } from '../services/ip-utils.js';
 import { createSourceResolver } from '../services/source-resolver.js';
 import { createDestinationResolver, gatewaysProtecting, getProtectedDestinations } from '../services/forward-rules.js';
+import { getDockerCompileInput } from '../services/swarm.js';
 import { getSshCredentialForHost, type MaterializedSshCredential } from '../services/ssh-credentials.js';
 import { createAuditEvent } from '../services/audit.js';
 import fs from 'node:fs';
@@ -674,7 +675,8 @@ troubleshootRouter.post('/audit/start', requireRole('operator', 'admin'), async 
         baseline: { mgmtSshCidrs },
         logOnlyMode: true,
         // Gateways: log forwarded traffic to their protected devices (accepted while learning)
-        protectedDestinations: await getProtectedDestinations(host.id)
+        protectedDestinations: await getProtectedDestinations(host.id),
+        ...(await getDockerCompileInput(host.id))
       });
 
       policyFilePath = path.join(os.tmpdir(), `audit_policy_${host.id}_${Date.now()}.${compiled.backend === 'nftables' ? 'nft' : 'iptables'}`);

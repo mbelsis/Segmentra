@@ -15,9 +15,22 @@ SUBNET=172.28.77.0/24
 IMAGE=segmentra-swarm-node:lab
 
 node_ip()   { echo "172.28.77.1$1"; }
+
+# The lab publishes SSH on 127.0.0.1:2231-2233. Segmentra records host keys with accept-new, so drop the
+# lab's own stale entries (only those three) whenever the lab is created or removed.
+forget_lab_host_keys() {
+  local kh="${SEGMENTRA_KNOWN_HOSTS:-$HOME/.ssh/known_hosts}" tmp
+  [ -f "$kh" ] || return 0
+  tmp="$(mktemp)"; cp "$kh" "$tmp"
+  # Work on a copy: ssh-keygen -R would overwrite the user's known_hosts.old backup.
+  for i in 1 2 3; do ssh-keygen -q -R "[127.0.0.1]:$(node_port $i)" -f "$tmp" >/dev/null 2>&1 || true; done
+  cmp -s "$kh" "$tmp" || cat "$tmp" > "$kh"
+  rm -f "$tmp" "$tmp.old"
+}
 node_port() { echo "223$1"; }
 
 up() {
+  forget_lab_host_keys
   docker build -q -t "$IMAGE" . >/dev/null
   docker network inspect "$NET" >/dev/null 2>&1 || docker network create --subnet "$SUBNET" "$NET" >/dev/null
   for i in 1 2 3; do
@@ -50,6 +63,7 @@ up() {
 down() {
   for c in segswarm-client50 segswarm-client51 segswarm-node1 segswarm-node2 segswarm-node3; do docker rm -f -v "$c" >/dev/null 2>&1 || true; done
   docker network rm "$NET" >/dev/null 2>&1 || true
+  forget_lab_host_keys
   echo "swarm lab removed"
 }
 

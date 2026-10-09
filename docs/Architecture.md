@@ -1550,6 +1550,17 @@ Structured pre-enforcement testing that validates a policy against real traffic 
 - Log Parser: `parseFirewallLogs()`, `groupCommunicationFlows()`
 - Background Job: Expired test sessions auto-stopped every 1 minute
 
+### Docker Swarm and Docker-published ports
+
+Swarm nodes are managed as ordinary hosts over SSH; there is no Docker API integration. Host columns `swarm_cluster`, `swarm_role`, `swarm_addr`, `swarm_encrypted_overlay` and `docker_published_ports` (migration 036) feed the compiler through `apps/api/src/services/swarm.ts` (`getDockerCompileInput`), which every `compileHostPolicy` call site spreads into its input: the peers are the other enabled hosts with the same swarm name, addressed by `swarm_addr` or the management IP.
+
+- The compiler puts the Swarm cluster ports (2377/tcp on managers, 7946/tcp+udp, 4789/udp, optionally ESP) into the baseline of the input chain (`SEGMENTRA-IN`, or the nftables `input` chain), ahead of the policy rules.
+- With `docker_published_ports` the forward chain (`SEGMENTRA-FWD`, or the nftables `forward` chain) gets the inbound rules again, matched on `conntrack --ctstate DNAT --ctorigdstport` (nft: `ct status dnat`, `ct original proto-dst`), then an exemption for Docker's own bridges and a default verdict. Docker publishes ports with NAT, so that traffic is forwarded and never reaches `INPUT`.
+- The iptables script keeps a second jump `DOCKER-USER -> SEGMENTRA-FWD` (only when the fragment carries `segmentra:published_default`), because Docker re-inserts its own `DOCKER-USER` / `DOCKER-INGRESS` jumps at the top of `FORWARD` whenever a service publishes a port. Apply, remove, backup/restore and persistence (the saved file declares `DOCKER-USER`, since `iptables-restore` runs before Docker adopts it) manage that jump, and drift detection reports a missing jump as "not present".
+- firewalld hosts reject both settings and UFW hosts reject published-port enforcement at compile time.
+
+See [docker-swarm.md](docker-swarm.md) for settings, limitations and what is not tested, and `tests/swarm-lab/` for the Docker Desktop lab.
+
 ### Kubernetes Microsegmentation
 
 Kubernetes NetworkPolicy management through the K8s API (`apps/api/src/services/k8s-client.ts`, a small HTTPS client without extra dependencies).

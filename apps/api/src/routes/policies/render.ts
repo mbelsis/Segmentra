@@ -5,6 +5,7 @@ import { compileHostPolicy, firewallBackend, type RuleDirection } from '@segment
 import { pool } from '../../db/pool.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 import { addDestinationSets, compilerDestination, getProtectedDestinations } from '../../services/forward-rules.js';
+import { getDockerCompileInput } from '../../services/swarm.js';
 
 export const policyRenderRouter = Router();
 policyRenderRouter.use(requireAuth);
@@ -137,7 +138,8 @@ policyRenderRouter.get('/policy-versions/:versionId/render/host/:hostId', requir
     rules,
     sets,
     baseline: { mgmtSshCidrs },
-    protectedDestinations
+    protectedDestinations,
+    ...(await getDockerCompileInput(hostId))
   });
 
   res.json({ backend: compiled.backend, sha256: compiled.sha256, text: compiled.text });

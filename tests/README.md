@@ -18,6 +18,14 @@ Segmentra only generates NetworkPolicy manifests, so the test creates a 3-node k
 
 The test also drives the cluster-management API: it stores credentials (a kubeconfig with a client certificate, and service-account tokens with read-write and read-only RBAC), tests the connection, applies, drift-checks and removes policies through Segmentra, and verifies that unmanaged same-named policies are never overwritten or deleted and that no credential material is ever returned. Run it against a development or disposable Segmentra stack: it creates users, hosts, tags and policy sets, and because approved policy versions cannot be deleted it archives its versions but leaves those records behind.
 
+## Docker Swarm Checks
+
+Run `npm run test:integration:swarm` against a running Segmentra API (same settings as the Kubernetes test) with Docker Desktop or Docker. `tests/swarm-lab/lab.sh up` builds the lab in about 40 seconds: three privileged Docker-in-Docker nodes (one manager, two workers) that also run sshd, an overlay network, an nginx service published on 8080, and two client containers; `lab.sh down` removes it. The test creates and removes its own lab (`--reuse` uses a running one, `--keep` leaves it up).
+
+It registers the nodes with a Swarm profile and published-port enforcement, deploys policies through the real API and SSH executor, and verifies with real traffic that the allowed client reaches the published port on every node while another client is blocked, that the overlay stays healthy without the policy mentioning any Swarm port, that a port published later is blocked without a redeployment (even after Docker re-orders its `FORWARD` jumps), that redeploying is idempotent, that remove, backup and restore handle the `DOCKER-USER` jump and leave Docker's chain alone, how the saved-rules file is rendered, and that each feature makes a difference when switched off. A deployment that fails only with a transient SSH error is retried (the lab runs on a busy VM). `tests/swarm-lab/probe.mjs` is the exploratory version that prints measurements.
+
+`npm run test:swarm-compile` unit-tests the generated iptables and nftables rules without Docker. The lab is one Docker Desktop VM, so a real reboot, multiple machines and Docker daemon restarts are not covered. `lab.sh` removes only its own three `[127.0.0.1]:223x` entries from `~/.ssh/known_hosts` when it is created or removed (the SSH executor records host keys with accept-new). See [Docker Swarm](../docs/docker-swarm.md).
+
 ## Security Regression Checks
 
 Run `npm run test:security` from the repository root. This builds the API and its dependencies, then uses Node's built-in test runner without Docker or a database.

@@ -185,8 +185,29 @@ const createHostSchema = z.object({
   tagIds: z.array(z.string().uuid()).optional().default([]),
   enabled: z.boolean().optional(),
   /** Explicit SSH credential (admin only); null/omitted = automatic (by credential scope). */
-  sshCredentialId: z.string().uuid().nullable().optional()
+  sshCredentialId: z.string().uuid().nullable().optional(),
+  /** Docker Swarm node: name of the swarm (groups its nodes); null/'' = not a Swarm node. */
+  swarmCluster: z.string().trim().max(100).nullable().optional(),
+  /** Role in the swarm (defaults to worker when swarmCluster is set). */
+  swarmRole: z.enum(['manager', 'worker']).nullable().optional(),
+  /** Address the node uses in the swarm (--advertise-addr); defaults to the management IP. */
+  swarmAddr: z
+    .string()
+    .trim()
+    .nullable()
+    .optional()
+    .refine((v) => v === undefined || v === null || v === '' || isValidIp(v), { message: 'swarmAddr must be a valid IPv4 or IPv6 address' }),
+  /** Overlay networks use IPsec (--opt encrypted): also allow ESP between the nodes. */
+  swarmEncryptedOverlay: z.boolean().optional(),
+  /** Apply the inbound policy rules also to Docker-published ports (DNAT; Swarm routing mesh). */
+  dockerPublishedPorts: z.boolean().optional()
 });
+
+/** Normalised Swarm columns from a request: cluster, role (default worker), address. */
+function swarmColumns(b: { swarmCluster?: string | null; swarmRole?: 'manager' | 'worker' | null; swarmAddr?: string | null }) {
+  const cluster = b.swarmCluster && b.swarmCluster.trim() ? b.swarmCluster.trim() : null;
+  return { cluster, role: cluster ? (b.swarmRole ?? 'worker') : null, addr: cluster && b.swarmAddr && b.swarmAddr.trim() ? b.swarmAddr.trim() : null };
+}
 
 // Write operations require operator/admin
 hostsRouter.post('/', requireRole('operator', 'admin'), async (req, res) => {
@@ -196,13 +217,16 @@ hostsRouter.post('/', requireRole('operator', 'admin'), async (req, res) => {
   const credProblem = await credentialAssignmentProblem(req, req.body, b.sshCredentialId);
   if (credProblem) return res.status(credProblem.status).json(credProblem.body);
 
+  const swarmCols = swarmColumns(b);
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     
     const { rows } = await client.query(
-      `INSERT INTO hosts (hostname, mgmt_ip, ssh_port, environment, os_family, firewall_backend, vlan_id, enabled, ssh_credential_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      `INSERT INTO hosts (hostname, mgmt_ip, ssh_port, environment, os_family, firewall_backend, vlan_id, enabled, ssh_credential_id,
+                          swarm_cluster, swarm_role, swarm_addr, swarm_encrypted_overlay, docker_published_ports)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
        RETURNING *`,
       [
         b.hostname,
@@ -213,7 +237,12 @@ hostsRouter.post('/', requireRole('operator', 'admin'), async (req, res) => {
         b.firewallBackend ?? 'auto',
         b.vlanId ?? null,
         b.enabled ?? true,
-        b.sshCredentialId ?? null
+        b.sshCredentialId ?? null,
+        swarmCols.cluster,
+        swarmCols.role,
+        swarmCols.addr,
+        b.swarmEncryptedOverlay ?? false,
+        b.dockerPublishedPorts ?? false
       ]
     );
     const host = rows[0];
@@ -293,6 +322,9 @@ hostsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
   const setCredential = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'sshCredentialId');
   const credProblem = await credentialAssignmentProblem(req, req.body, b.sshCredentialId);
   if (credProblem) return res.status(credProblem.status).json(credProblem.body);
+  // Swarm profile: sent as a group (swarmCluster/swarmRole/swarmAddr); an empty cluster clears it.
+  const setSwarm = ['swarmCluster', 'swarmRole', 'swarmAddr'].some((k) => Object.prototype.hasOwnProperty.call(req.body ?? {}, k));
+  const swarmCols = swarmColumns(b);
 
   const client = await pool.connect();
   try {
@@ -309,6 +341,11 @@ hostsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
            vlan_id = CASE WHEN $10::boolean THEN NULL ELSE COALESCE($8, vlan_id) END,
            enabled = COALESCE($9, enabled),
            ssh_credential_id = CASE WHEN $11::boolean THEN $12::uuid ELSE ssh_credential_id END,
+           swarm_cluster = CASE WHEN $13::boolean THEN $14 ELSE swarm_cluster END,
+           swarm_role = CASE WHEN $13::boolean THEN $15 ELSE swarm_role END,
+           swarm_addr = CASE WHEN $13::boolean THEN $16 ELSE swarm_addr END,
+           swarm_encrypted_overlay = COALESCE($17, swarm_encrypted_overlay),
+           docker_published_ports = COALESCE($18, docker_published_ports),
            updated_at = now()
        WHERE id=$1
        RETURNING *`,
@@ -324,7 +361,13 @@ hostsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
         typeof b.enabled === 'boolean' ? b.enabled : null,
         clearVlan,
         setCredential,
-        b.sshCredentialId ?? null
+        b.sshCredentialId ?? null,
+        setSwarm,
+        swarmCols.cluster,
+        swarmCols.role,
+        swarmCols.addr,
+        typeof b.swarmEncryptedOverlay === 'boolean' ? b.swarmEncryptedOverlay : null,
+        typeof b.dockerPublishedPorts === 'boolean' ? b.dockerPublishedPorts : null
       ]
     );
     if (!rows[0]) {

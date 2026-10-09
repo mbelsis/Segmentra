@@ -14,6 +14,7 @@ import { pool } from '../db/pool.js';
 import { env } from '../lib/env.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { addDestinationSets, compilerDestination, getProtectedDestinations } from '../services/forward-rules.js';
+import { getDockerCompileInput } from '../services/swarm.js';
 import { createAuditEvent } from '../services/audit.js';
 import { getSshCredentialForHost, loadSshCredential, materializeSshCredential, sshAuthFields, type MaterializedSshCredential } from '../services/ssh-credentials.js';
 import { checkDeploymentSafety } from '../services/safety-check.js';
@@ -1041,7 +1042,8 @@ async function generateBundle(deploymentId: string, opts: { ansible: boolean } =
           rules,
           sets,
           baseline: { mgmtSshCidrs },
-          protectedDestinations
+          protectedDestinations,
+          ...(await getDockerCompileInput(h.id))
         });
       } catch (compileError: any) {
         if (compileError?.name !== 'CompileError') throw compileError;

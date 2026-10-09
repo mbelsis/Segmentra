@@ -3,8 +3,11 @@
  *
  * Segmentra owns only the SEGMENTRA-IN / SEGMENTRA-OUT chains of the filter
  * table plus one jump to each from INPUT / OUTPUT — and, on hosts that filter
- * forwarded traffic (gateways with FORWARD rules / protected devices), the
- * SEGMENTRA-FWD chain plus one jump from FORWARD. Everything else (DOCKER*,
+ * forwarded traffic (gateways with FORWARD rules / protected devices, Docker-published ports), the
+ * SEGMENTRA-FWD chain plus one jump from FORWARD. When the policy covers Docker-published ports
+ * (the fragment contains the segmentra:published_default rule) a second jump from DOCKER-USER is kept:
+ * Docker re-inserts its own DOCKER-USER/DOCKER-INGRESS jumps at the top of FORWARD whenever a service
+ * publishes a port, which would push our FORWARD jump below DOCKER-INGRESS's ACCEPT. Everything else (DOCKER*,
  * KUBE-*, f2b-*, built-in chain policies) is left alone.
  *
  * The same script is shipped to Ansible as
@@ -93,6 +96,7 @@ restore="$ipt-restore"
 IN=SEGMENTRA-IN
 OUT=SEGMENTRA-OUT
 FWD=SEGMENTRA-FWD
+DU=DOCKER-USER
 LIN=SEGMENTRA-LEGACY-IN
 LOUT=SEGMENTRA-LEGACY-OUT
 info() { echo "[segmentra:$ipt] $*"; }
@@ -103,11 +107,11 @@ had_jump=0
 if $ipt -C INPUT -j $IN 2>/dev/null; then had_jump=1; fi
 
 dedupe_jumps() {
-  for pair in INPUT:$IN OUTPUT:$OUT FORWARD:$FWD; do
+  for pair in INPUT:$IN OUTPUT:$OUT FORWARD:$FWD $DU:$FWD; do
     ch=\${pair%%:*}; tg=\${pair#*:}
-    # -S prints the policy first, so rule number = line number - 1. Keep the first
-    # (top-most) jump, delete the others bottom-up.
-    nums=$($ipt -S $ch | grep -nxF -- "-A $ch -j $tg" | cut -d: -f1 | tail -n +2 | sort -rn)
+    # -S prints one header line first (the policy of a built-in chain, -N for a user chain), so rule
+    # number = line number - 1. Keep the first (top-most) jump, delete the others bottom-up.
+    nums=$($ipt -S $ch 2>/dev/null | grep -nxF -- "-A $ch -j $tg" | cut -d: -f1 | tail -n +2 | sort -rn)
     for n in $nums; do $ipt -D $ch $((n - 1)) || return 1; info "removed duplicate $ch -> $tg jump"; done
   done
   return 0
@@ -117,10 +121,23 @@ dedupe_jumps() {
 # then no longer filtered by Segmentra).
 drop_fwd() {
   while $ipt -C FORWARD -j $FWD 2>/dev/null; do $ipt -D FORWARD -j $FWD || return 1; done
+  while $ipt -C $DU -j $FWD 2>/dev/null; do $ipt -D $DU -j $FWD || return 1; done
   if $ipt -S $FWD >/dev/null 2>&1; then
     $ipt -F $FWD || return 1
     $ipt -X $FWD || { echo "segmentra-iptables: could not delete chain $FWD (still referenced?)" >&2; return 1; }
     info "removed chain $FWD"
+  fi
+  return 0
+}
+
+# ensure_du_jump <0|1>: 1 = keep a jump DOCKER-USER -> SEGMENTRA-FWD at position 1 (creating the chain when
+# Docker is not running yet; Docker adopts an existing DOCKER-USER chain and never flushes it), 0 = remove it.
+ensure_du_jump() {
+  if [ "$1" = 1 ]; then
+    if ! $ipt -S $DU >/dev/null 2>&1; then $ipt -N $DU || return 1; fi
+    if ! $ipt -C $DU -j $FWD 2>/dev/null; then $ipt -I $DU 1 -j $FWD || return 1; fi
+  elif $ipt -S $DU >/dev/null 2>&1; then
+    while $ipt -C $DU -j $FWD 2>/dev/null; do $ipt -D $DU -j $FWD || return 1; done
   fi
   return 0
 }
@@ -132,6 +149,9 @@ apply_chains() {
   fi
   want_fwd=0
   if grep -q "^:$FWD " "$pol"; then want_fwd=1; fi
+  # Docker-published ports are covered: SEGMENTRA-FWD must also be reached from DOCKER-USER.
+  want_du=0
+  if [ "$want_fwd" = 1 ] && grep -q 'segmentra:published_default' "$pol"; then want_du=1; fi
   {
     sed '/^COMMIT[[:space:]]*$/d' "$pol"
     if ! $ipt -C INPUT -j $IN 2>/dev/null; then echo "-I INPUT 1 -j $IN"; fi
@@ -144,6 +164,7 @@ apply_chains() {
   if [ "$want_fwd" = 0 ]; then
     drop_fwd || { echo "segmentra-iptables: could not remove $FWD" >&2; exit 4; }
   fi
+  ensure_du_jump $want_du || { echo "segmentra-iptables: could not update the $DU jump" >&2; exit 4; }
   dedupe_jumps || { echo "segmentra-iptables: could not remove duplicate jumps" >&2; exit 4; }
   if [ "$want_fwd" = 1 ]; then
     info "applied $IN/$OUT/$FWD; INPUT/OUTPUT/FORWARD jumps present"
@@ -153,7 +174,7 @@ apply_chains() {
 }
 
 remove_chains() {
-  for pair in INPUT:$IN OUTPUT:$OUT FORWARD:$FWD; do
+  for pair in INPUT:$IN OUTPUT:$OUT FORWARD:$FWD $DU:$FWD; do
     ch=\${pair%%:*}; tg=\${pair#*:}
     while $ipt -C $ch -j $tg 2>/dev/null; do $ipt -D $ch -j $tg || exit 5; done
   done
@@ -305,24 +326,25 @@ backup_state() {
   # No tables loaded -> empty dump; store an explicit open filter table instead
   if [ ! -s "$tmpd/full" ]; then printf "$EMPTY_FILTER" > "$tmpd/full"; fi
   seg_fragment "$tmpd/full" > "$tmpd/frag"
-  ci=0; co=0; cf=0; ji=0; jo=0; jf=0; lg=0
+  ci=0; co=0; cf=0; ji=0; jo=0; jf=0; jd=0; lg=0
   if grep -q "^:$IN " "$tmpd/frag"; then ci=1; fi
   if grep -q "^:$OUT " "$tmpd/frag"; then co=1; fi
   if grep -q "^:$FWD " "$tmpd/frag"; then cf=1; fi
   if save_has_jump "$tmpd/full" INPUT $IN; then ji=1; fi
   if save_has_jump "$tmpd/full" OUTPUT $OUT; then jo=1; fi
   if save_has_jump "$tmpd/full" FORWARD $FWD; then jf=1; fi
+  if save_has_jump "$tmpd/full" $DU $FWD; then jd=1; fi
   if is_legacy "$tmpd/full"; then lg=1; fi
   {
     echo "$V2HDR"
     echo "# Segmentra's own filter-table state only (chains $IN/$OUT/$FWD + INPUT/OUTPUT/FORWARD jumps)."
     echo "# Complete $save output at the time of the backup: $full"
-    echo "# chain-in=$ci chain-out=$co chain-fwd=$cf jump-in=$ji jump-out=$jo jump-fwd=$jf legacy=$lg"
+    echo "# chain-in=$ci chain-out=$co chain-fwd=$cf jump-in=$ji jump-out=$jo jump-fwd=$jf jump-du=$jd legacy=$lg"
     if [ -s "$tmpd/frag" ]; then echo '*filter'; cat "$tmpd/frag"; echo COMMIT; fi
   } > "$tmpd/v2" || exit 4
   cp "$tmpd/full" "$full.tmp" && mv -f "$full.tmp" "$full" || { echo "segmentra-iptables: could not write $full" >&2; exit 4; }
   cp "$tmpd/v2" "$bfile.tmp" && mv -f "$bfile.tmp" "$bfile" || { echo "segmentra-iptables: could not write $bfile" >&2; exit 4; }
-  info "backup written: $bfile (chains: in=$ci out=$co fwd=$cf, jumps: in=$ji out=$jo fwd=$jf, legacy=$lg)"
+  info "backup written: $bfile (chains: in=$ci out=$co fwd=$cf, jumps: in=$ji out=$jo fwd=$jf du=$jd, legacy=$lg)"
 }
 
 # Legacy hosts only: Segmentra's rules live directly in INPUT/OUTPUT (and may have set the
@@ -347,6 +369,7 @@ restore_scoped() {
   [ "$hi" = 1 ] || ji=0
   [ "$ho" = 1 ] || jo=0
   [ "$hf" = 1 ] || jf=0
+  [ "$hf" = 1 ] || jd=0
   if [ "$hi" = 1 ] || [ "$ho" = 1 ] || [ "$hf" = 1 ]; then
     # Declaring an existing chain with --noflush flushes it: the chains get their backed-up
     # content (and missing jumps are inserted) in ONE atomic transaction.
@@ -364,6 +387,7 @@ restore_scoped() {
   if [ "$ji" = 0 ]; then while $ipt -C INPUT -j $IN 2>/dev/null; do $ipt -D INPUT -j $IN || exit 5; done; fi
   if [ "$jo" = 0 ]; then while $ipt -C OUTPUT -j $OUT 2>/dev/null; do $ipt -D OUTPUT -j $OUT || exit 5; done; fi
   if [ "$jf" = 0 ]; then while $ipt -C FORWARD -j $FWD 2>/dev/null; do $ipt -D FORWARD -j $FWD || exit 5; done; fi
+  ensure_du_jump $jd || { echo "segmentra-iptables: could not restore the $DU jump" >&2; exit 4; }
   for pair in $IN:$hi $OUT:$ho $FWD:$hf; do
     c=\${pair%%:*}; h=\${pair#*:}
     if [ "$h" = 0 ] && $ipt -S $c >/dev/null 2>&1; then
@@ -372,7 +396,7 @@ restore_scoped() {
     fi
   done
   dedupe_jumps || { echo "segmentra-iptables: could not remove duplicate jumps" >&2; exit 4; }
-  info "restored $IN/$OUT/$FWD from $bfile (chains: in=$hi out=$ho fwd=$hf, jumps: in=$ji out=$jo fwd=$jf); other chains untouched"
+  info "restored $IN/$OUT/$FWD from $bfile (chains: in=$hi out=$ho fwd=$hf, jumps: in=$ji out=$jo fwd=$jf du=$jd); other chains untouched"
 }
 
 restore_backup() {
@@ -382,7 +406,8 @@ restore_backup() {
     "$V2HDR")
       hdr=$(grep -m 1 '^# chain-in=' "$bfile" || true)
       case " $hdr " in *" legacy="[01]" "*) ;; *) echo "segmentra-iptables: malformed backup header in $bfile" >&2; exit 4 ;; esac
-      ji=0; jo=0; jf=0
+      ji=0; jo=0; jf=0; jd=0
+      case " $hdr " in *" jump-du=1 "*) jd=1 ;; esac
       case " $hdr " in *" jump-in=1 "*) ji=1 ;; esac
       case " $hdr " in *" jump-out=1 "*) jo=1 ;; esac
       case " $hdr " in *" jump-fwd=1 "*) jf=1 ;; esac
@@ -392,7 +417,8 @@ restore_backup() {
       echo "segmentra-iptables: $bfile is not a $ipt backup this version understands ($first)" >&2; exit 4 ;;
     *)
       # Pre-v2 backup: a complete $save dump. Only Segmentra's part of it is restored.
-      ji=0; jo=0; jf=0
+      ji=0; jo=0; jf=0; jd=0
+      if save_has_jump "$bfile" $DU $FWD; then jd=1; fi
       if save_has_jump "$bfile" INPUT $IN; then ji=1; fi
       if save_has_jump "$bfile" OUTPUT $OUT; then jo=1; fi
       if save_has_jump "$bfile" FORWARD $FWD; then jf=1; fi
@@ -425,11 +451,15 @@ ipt_render() {
   seg_fragment "$tmpd/psave" > "$tmpd/pfrag"
   grep '^:' "$tmpd/pfrag" > "$tmpd/pdecl"
   [ -s "$tmpd/pdecl" ] || return 1
+  # A DOCKER-USER -> SEGMENTRA-FWD jump needs the chain declared in the saved file: iptables-restore at boot
+  # runs before Docker, and Docker adopts the existing chain.
+  if save_has_jump "$tmpd/psave" $DU $FWD; then echo ":$DU - [0:0]" >> "$tmpd/pdecl"; fi
   if grep -q 'FW-AUDIT: ALLOW: catch-all' "$tmpd/pfrag"; then return 2; fi
   {
     if save_has_jump "$tmpd/psave" INPUT $IN; then echo "-A INPUT -j $IN"; fi
     if save_has_jump "$tmpd/psave" OUTPUT $OUT; then echo "-A OUTPUT -j $OUT"; fi
     if save_has_jump "$tmpd/psave" FORWARD $FWD; then echo "-A FORWARD -j $FWD"; fi
+    if save_has_jump "$tmpd/psave" $DU $FWD; then echo "-A $DU -j $FWD"; fi
     grep '^-A ' "$tmpd/pfrag"
   } > "$tmpd/prules"
   return 0
@@ -440,9 +470,12 @@ ipt_render() {
 # the first rules of INPUT/OUTPUT/FORWARD). All other lines are printed unchanged. Without a
 # *filter section (or file) and with something to add, a minimal *filter section is appended.
 ipt_merge() {
-  awk -v decl="$tmpd/pdecl" -v rules="$tmpd/prules" '
+  # A DOCKER-USER declaration already present in the saved file (netfilter-persistent saves Docker's chains)
+  # must not be declared a second time.
+  hasdu=0; if grep -q '^:DOCKER-USER ' "$1" 2>/dev/null; then hasdu=1; fi
+  awk -v decl="$tmpd/pdecl" -v rules="$tmpd/prules" -v hasdu="$hasdu" '
     BEGIN {
-      while ((getline l < decl) > 0) d[++nd] = l
+      while ((getline l < decl) > 0) { if (hasdu == 1 && l ~ /^:DOCKER-USER /) continue; d[++nd] = l }
       while ((getline l < rules) > 0) r[++nr] = l
     }
     function emit(  i) { if (!done) { for (i = 1; i <= nd; i++) print d[i]; for (i = 1; i <= nr; i++) print r[i]; done = 1 } }
@@ -450,6 +483,7 @@ ipt_merge() {
       if (s ~ /^:SEGMENTRA-(IN|OUT|FWD)[ \\t]/) return 1
       if (s ~ /^-A SEGMENTRA-(IN|OUT|FWD)[ \\t]/) return 1
       if (s ~ /^-A (INPUT|OUTPUT|FORWARD) -j SEGMENTRA-(IN|OUT|FWD)[ \\t]*$/) return 1
+      if (s ~ /^-A DOCKER-USER -j SEGMENTRA-FWD[ \\t]*$/) return 1
       return 0
     }
     substr($0, 1, 1) == "*" { if (inf && !done) emit(); inf = ($0 == "*filter"); if (inf) seen = 1; print; next }

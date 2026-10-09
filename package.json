@@ -16,7 +16,9 @@
     "test:firewall-managers": "npm run build -w @segmentra/api && node --test tests/native-firewall.test.mjs",
     "test:integration:firewall-managers": "npm run build -w @segmentra/api && node tests/run-native-firewall-integration.mjs",
     "test:integration:k8s": "node tests/k8s-integration/run.mjs",
-    "test:k8s-auth": "npm run build -w @segmentra/api && node --test tests/k8s-cloud-auth.test.mjs"
+    "test:k8s-auth": "npm run build -w @segmentra/api && node --test tests/k8s-cloud-auth.test.mjs",
+    "test:swarm-compile": "npm run build -w @segmentra/compiler && node --test tests/swarm-compile.test.mjs",
+    "test:integration:swarm": "npm run build && node tests/swarm-lab/run.mjs"
   },
   "engines": {
     "node": ">=20"
