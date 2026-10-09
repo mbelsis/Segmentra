@@ -987,6 +987,8 @@ This is the recommended approach for production environments as it keeps the ful
 3. Click **Send Test** to verify connectivity
 4. Under **Event Subscriptions**, click **+ Add Event** to choose which events trigger notifications on this channel
 
+The three policy events carry the approval trail: `POLICY_SUBMITTED` has the author's `reason` and `submittedBy`/`submittedAt`; `POLICY_APPROVED` has `approvedBy`/`approvedAt`, `requestedBy`/`requestedAt` and the author's reason as `requestReason`; `POLICY_REJECTED` has `rejectedBy`/`rejectedAt`, the rejection reason as `reason`, and the same `requestedBy`/`requestedAt`/`requestReason`.
+
 Available events: `POLICY_SUBMITTED`, `POLICY_APPROVED`, `POLICY_REJECTED`, `DEPLOYMENT_STARTED`, `DEPLOYMENT_COMPLETED`, `DEPLOYMENT_FAILED`, `COMPLIANCE_DRIFT`, `POLICY_EXPIRING_SOON`, `POLICY_EXPIRED`, `EXCESSIVE_RULES_DETECTED`. `COMPLIANCE_DRIFT` can be selected but is currently never sent. A subscription's optional filter is stored but not applied yet: every event of the subscribed type is sent. The API also accepts `AUDIT_RESTORE_FAILED` (a firewall-learning restore failed).
 
 Webhook URLs pointing to loopback, link-local or cloud-metadata addresses are refused unless `SEGMENTRA_ALLOW_PRIVATE_WEBHOOKS=true` (RFC1918 addresses are allowed). Webhook URLs and auth headers are masked in API responses.

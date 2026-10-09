@@ -253,7 +253,7 @@ policyVersionsRouter.post('/policy-versions/:versionId/submit-approval', require
      VALUES ($1,'POLICY_SUBMIT','policy_version',$2,$3)`,
     [userId, req.params.versionId, { by: req.auth!.username, resubmitted, isHighRisk, ...(await approvalTrail(rows[0])) }]
   );
-  notifyPolicyVersionEvent('POLICY_SUBMITTED', req.params.versionId, { submittedBy: req.auth!.username, resubmitted });
+  notifyPolicyVersionEvent('POLICY_SUBMITTED', req.params.versionId, { submittedBy: req.auth!.username, submittedAt: rows[0].submitted_at, resubmitted, ...(submissionNote ? { reason: submissionNote } : {}) });
   res.json({ version: rows[0] });
 });
 
@@ -295,12 +295,16 @@ policyVersionsRouter.post(
       [req.params.versionId, approverId]
     );
     if (!rows[0]) return res.status(404).json({ error: 'not_found_or_not_approvable' });
+    const trail = await approvalTrail(rows[0]);
     await pool.query(
       `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
        VALUES ($1,'POLICY_APPROVE','policy_version',$2,$3)`,
-      [approverId, req.params.versionId, { by: req.auth!.username, isHighRisk, decision: 'APPROVED', decidedBy: req.auth!.username, decidedAt: rows[0].approved_at, ...(await approvalTrail(rows[0])) }]
+      [approverId, req.params.versionId, { by: req.auth!.username, isHighRisk, decision: 'APPROVED', decidedBy: req.auth!.username, decidedAt: rows[0].approved_at, ...trail }]
     );
-    notifyPolicyVersionEvent('POLICY_APPROVED', req.params.versionId, { approvedBy: req.auth!.username });
+    notifyPolicyVersionEvent('POLICY_APPROVED', req.params.versionId, {
+      approvedBy: req.auth!.username, approvedAt: rows[0].approved_at, requestedBy: trail.requestedBy, requestedAt: trail.requestedAt,
+      ...(trail.reason ? { requestReason: trail.reason } : {}),
+    });
     res.json({ version: rows[0] });
   }
 );
@@ -322,12 +326,17 @@ policyVersionsRouter.post(
       [req.params.versionId, approverId, body.data.reason]
     );
     if (!rows[0]) return res.status(404).json({ error: 'not_found_or_not_rejectable' });
+    const trail = await approvalTrail(rows[0]);
     await pool.query(
       `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
        VALUES ($1,'POLICY_REJECT','policy_version',$2,$3)`,
-      [approverId, req.params.versionId, { by: req.auth!.username, decision: 'REJECTED', decidedBy: req.auth!.username, decidedAt: rows[0].rejected_at, rejectionReason: body.data.reason, ...(await approvalTrail(rows[0])) }]
+      [approverId, req.params.versionId, { by: req.auth!.username, decision: 'REJECTED', decidedBy: req.auth!.username, decidedAt: rows[0].rejected_at, rejectionReason: body.data.reason, ...trail }]
     );
-    notifyPolicyVersionEvent('POLICY_REJECTED', req.params.versionId, { rejectedBy: req.auth!.username, reason: body.data.reason });
+    // `reason` stays the rejection reason (as before); the author's own reason is requestReason
+    notifyPolicyVersionEvent('POLICY_REJECTED', req.params.versionId, {
+      rejectedBy: req.auth!.username, rejectedAt: rows[0].rejected_at, reason: body.data.reason, requestedBy: trail.requestedBy, requestedAt: trail.requestedAt,
+      ...(trail.reason ? { requestReason: trail.reason } : {}),
+    });
     res.json({ version: rows[0] });
   }
 );
