@@ -2,6 +2,7 @@
  * Reboot persistence helpers that talk to a host (see persist-scripts.ts for the design).
  */
 import type { SshHostInfo } from './types.js';
+import type { FirewallBackend } from './types.js';
 import { runSshSudo, type SshConnectionOptions } from './ssh-options.js';
 import { persistSnippet } from './firewall-backup.js';
 import { parsePersistenceOutput, type PersistenceResult } from './persist-scripts.js';
@@ -14,7 +15,7 @@ import { parsePersistenceOutput, type PersistenceResult } from './persist-script
  */
 export async function checkHostPersistence(
   host: SshHostInfo,
-  backend: 'nftables' | 'iptables',
+  backend: FirewallBackend,
   opts: SshConnectionOptions = {}
 ): Promise<PersistenceResult & { error?: string }> {
   try {

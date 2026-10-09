@@ -1,4 +1,5 @@
 import { removeSegmentraPolicy, type SshHostInfo } from '@segmentra/executor';
+import { firewallBackend } from '@segmentra/compiler';
 
 import { pool } from '../db/pool.js';
 import { claimDeploymentForStart, runDeploymentInBackground } from '../routes/deployments.js';
@@ -150,7 +151,7 @@ async function handleRemove(dep: any, hosts: ExpiringHost[]): Promise<{ outcome:
         ip: String(h.mgmt_ip),
         port: Number(h.ssh_port) || 22,
         ...sshAuthFields(cred),
-        backend: h.firewall_backend === 'nftables' || h.firewall_backend === 'iptables' ? h.firewall_backend : 'auto',
+        backend: h.firewall_backend && h.firewall_backend !== 'auto' ? firewallBackend(h.firewall_backend) : 'auto',
       };
       const r = await removeSegmentraPolicy(sshHost, { timeoutMs: REMOVE_SSH_TIMEOUT_MS });
       success = r.success;

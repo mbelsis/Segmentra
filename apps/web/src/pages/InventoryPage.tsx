@@ -775,11 +775,13 @@ export function InventoryPage() {
               <div className="form-group">
                 <label>Firewall Backend</label>
                 <select value={hostFirewallBackend} onChange={(e) => setHostFirewallBackend(e.target.value)}>
-                  <option value="auto">Auto (nftables preferred)</option>
+                  <option value="auto">Auto (active manager first)</option>
                   <option value="nftables">nftables</option>
                   <option value="iptables">iptables</option>
+                  <option value="firewalld">firewalld</option>
+                  <option value="ufw">UFW</option>
                 </select>
-                <small>Firewall backend to use for policy compilation. Auto defaults to nftables.</small>
+                <small>Auto selects active firewalld or UFW, then nftables or iptables.</small>
               </div>
               <div className="form-group">
                 <label>Environment</label>
@@ -861,7 +863,7 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                   <li><strong>ssh_port</strong> (optional) - SSH port (default: 22)</li>
                   <li><strong>vlan</strong> (optional) - VLAN name or tag number</li>
                   <li><strong>tags</strong> (optional) - Comma-separated tag names</li>
-                  <li><strong>firewall_backend</strong> (optional) - auto, nftables, or iptables (default: auto)</li>
+                  <li><strong>firewall_backend</strong> (optional) - auto, nftables, iptables, firewalld, or ufw (default: auto)</li>
                   <li><strong>enabled</strong> (optional) - true/false (default: true)</li>
                 </ul>
               </div>

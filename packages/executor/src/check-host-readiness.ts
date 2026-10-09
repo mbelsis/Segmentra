@@ -1,4 +1,5 @@
-import type { SshHostInfo } from './types.js';
+import type { SshHostInfo, FirewallBackend } from './types.js';
+import { DETECT_FIREWALL_BACKEND, isManagedBackend } from './manager-scripts.js';
 import { runSshCommand, runSshSudo, usesSudoPassword, type SshConnectionOptions, type SudoErrorKind } from './ssh-options.js';
 import { checkHostPersistence, persistenceAvailable } from './persistence.js';
 import type { PersistenceMethod } from './persist-scripts.js';
@@ -20,7 +21,7 @@ export interface HostPersistenceCapability {
 export interface HostReadinessResult {
   hostname: string;
   ready: boolean;
-  backend: 'nftables' | 'iptables' | 'unknown';
+  backend: FirewallBackend | 'unknown';
   nftVersion?: string;
   iptablesVersion?: string;
   sudoAccess: boolean;
@@ -84,6 +85,27 @@ export async function checkHostReadiness(host: SshHostInfo, opts: SshConnectionO
 
   const iptablesCheck = await run('command -v iptables 2>/dev/null');
   const hasIptables = iptablesCheck.exitCode === 0 && iptablesCheck.stdout.trim() !== '';
+
+  const detected = await runSshSudo(host, DETECT_FIREWALL_BACKEND, opts);
+  if (detected.exitCode !== 0) {
+    result.ready = false;
+    result.sudoError = detected.sudoError;
+    result.errors.push((detected.stderr || detected.stdout).trim() || 'Firewall manager detection failed');
+    return result;
+  }
+  const selected = host.backend && host.backend !== 'auto' ? host.backend : detected.stdout.trim();
+  if (isManagedBackend(selected)) {
+    result.backend = selected;
+    result.sudoAccess = true;
+    const p = await checkHostPersistence(host, selected, opts);
+    const available = !p.error && persistenceAvailable(p);
+    result.persistence = { distro: p.distro, method: p.method, available, status: p.status, warnings: p.warnings, notes: p.notes };
+    result.ready = available;
+    result.kernelSupport = available;
+    if (!available) result.errors.push(p.error || 'Native firewall manager prerequisites or reboot persistence are unavailable');
+    result.warnings.push(...p.warnings);
+    return result;
+  }
 
   if (!hasNft && !hasIptables) {
     result.ready = false;

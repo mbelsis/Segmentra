@@ -164,7 +164,7 @@ Alternatively, switch to the **SSH Direct** executor in the UI: **Admin → Depl
 - **Docker Engine** + **docker compose** (v2)
 - Linux host recommended
 - Network access from Segmentra to managed hosts (SSH, port 22)
-- On managed hosts: an account with full sudo rights, `nft` or `iptables`, and, for rules that survive a reboot, the distribution's own persistence service: Debian/Ubuntu `nftables` (nftables backend) or `iptables-persistent` (iptables backend); RHEL/Rocky/Alma `nftables` or `iptables-services` **with firewalld disabled**. Segmentra never installs these packages or disables firewalld; it reports what is missing (readiness check, "Survives reboot" column). See [guide.md](guide.md#on-target-linux-hosts) and [Persistence across reboots](../README.md#persistence-across-reboots).
+- On managed hosts: an account with full sudo rights and a supported backend: **nftables**, **iptables**, **firewalld**, or **UFW**. Raw reboot persistence needs Debian/Ubuntu `nftables` or `iptables-persistent`, or RHEL-family `nftables`/`iptables-services` without conflicting firewalld. Native firewalld/UFW require Python 3, systemd, and an already active manager: firewalld needs the native policy API and nftables backend; UFW needs IPv6 enabled and both family save/restore tools. Native ACLs are saved in the manager's permanent files and its boot service is enabled and verified; persistence failures roll back deployment. Segmentra never installs target packages or disables firewalld. See [target prerequisites](guide.md#on-target-linux-hosts), [native firewall managers](firewall-managers.md), and [Persistence across reboots](../README.md#persistence-across-reboots).
 
 ### Docker Architecture
 

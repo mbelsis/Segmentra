@@ -14,6 +14,8 @@
 # the executor and the Ansible playbook use:
 #   infra/ansible-runner/playbooks/files/segmentra-nft.sh
 #   infra/ansible-runner/playbooks/files/segmentra-iptables.sh
+# Native firewalld/UFW backups use the one-shot helper installed on the host:
+#   /var/backups/segmentra/segmentra-manager.py
 #
 # Usage:
 #   ./restore-previous-policy.sh --hosts <hosts-file> --user <ssh-user> --timestamp <backup-timestamp>
@@ -175,7 +177,7 @@ while IFS= read -r HOST <&3 || [ -n "$HOST" ]; do
   # not abort the loop.
   if [ "$USE_LATEST" = true ]; then
     RC=0
-    BACKUP_FILE=$(remote "$HOST" "sudo -n ls -1t '$BACKUP_DIR' 2>/dev/null | grep -E '^(nft\.ruleset|iptables)\.[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9][0-9A-Za-z-]*\$' | head -n 1" 2>/dev/null) || RC=$?
+    BACKUP_FILE=$(remote "$HOST" "sudo -n ls -1t '$BACKUP_DIR' 2>/dev/null | grep -E '^((nft\.ruleset|iptables)\.[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9][0-9A-Za-z-]*|(firewalld|ufw)\.(remove\.)?[0-9][0-9A-Za-z-]*\.json)\$' | head -n 1" 2>/dev/null) || RC=$?
     if [ "$RC" -eq 255 ]; then
       echo "  ✗ SSH connection failed (exit $RC)"
       FAILED=$((FAILED + 1))
@@ -197,7 +199,7 @@ while IFS= read -r HOST <&3 || [ -n "$HOST" ]; do
       continue
     fi
     RC=0
-    FOUND=$(remote "$HOST" "for f in '$BACKUP_DIR/nft.ruleset.$TIMESTAMP' '$BACKUP_DIR/iptables.$TIMESTAMP'; do if sudo -n test -f \"\$f\"; then echo \"\$f\"; break; fi; done" 2>/dev/null) || RC=$?
+    FOUND=$(remote "$HOST" "for f in '$BACKUP_DIR/nft.ruleset.$TIMESTAMP' '$BACKUP_DIR/iptables.$TIMESTAMP' '$BACKUP_DIR/firewalld.$TIMESTAMP.json' '$BACKUP_DIR/ufw.$TIMESTAMP.json'; do if sudo -n test -f \"\$f\"; then echo \"\$f\"; break; fi; done" 2>/dev/null) || RC=$?
     if [ "$RC" -eq 255 ]; then
       echo "  ✗ SSH connection failed (exit $RC)"
       FAILED=$((FAILED + 1))
@@ -214,6 +216,8 @@ while IFS= read -r HOST <&3 || [ -n "$HOST" ]; do
   fi
   case "${BACKUP_FILE##*/}" in
     nft.ruleset.*) BACKEND=nft ;;
+    firewalld.*.json) BACKEND=firewalld ;;
+    ufw.*.json) BACKEND=ufw ;;
     *) BACKEND=iptables ;;
   esac
   echo "  Backend: $BACKEND"
@@ -231,7 +235,9 @@ while IFS= read -r HOST <&3 || [ -n "$HOST" ]; do
   # table inet segmentra. iptables: SEGMENTRA-IN/OUT(/FWD) + jumps; the matching ip6tables backup
   # (ip6tables.<timestamp>) is restored too when present. Both families are attempted.
   RC=0
-  if [ "$BACKEND" = "nft" ]; then
+  if [ "$BACKEND" = "firewalld" ] || [ "$BACKEND" = "ufw" ]; then
+    remote "$HOST" "sudo -n python3 '$BACKUP_DIR/segmentra-manager.py' '$BACKEND' restore '$BACKUP_FILE'" 2>&1 | sed 's/^/  /' || RC=$?
+  elif [ "$BACKEND" = "nft" ]; then
     remote_script "$HOST" "$NFT_SH" restore "$BACKUP_FILE" 2>&1 | sed 's/^/  /' || RC=$?
   else
     V6_FILE="$BACKUP_DIR/ip6tables.${BACKUP_FILE##*/iptables.}"
@@ -246,7 +252,9 @@ while IFS= read -r HOST <&3 || [ -n "$HOST" ]; do
 
   if [ "$RC" -eq 0 ]; then
     # Reboot persistence follows the restored state (distribution's own service; never fails the restore).
-    if [ "$BACKEND" = "nft" ]; then
+    if [ "$BACKEND" = "firewalld" ] || [ "$BACKEND" = "ufw" ]; then
+      remote "$HOST" "sudo -n python3 '$BACKUP_DIR/segmentra-manager.py' '$BACKEND' check" 2>&1 | sed 's/^/  /' || true
+    elif [ "$BACKEND" = "nft" ]; then
       remote_script "$HOST" "$NFT_SH" persist 2>&1 | sed 's/^/  /' || true
     else
       remote_script "$HOST" "$IPT_SH" persist iptables 2>&1 | sed 's/^/  /' || true

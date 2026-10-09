@@ -66,6 +66,8 @@ export interface DiscoveredHostFacts {
   osPrettyName: string | null;
   hasNft: boolean;
   hasIptablesRestore: boolean;
+  /** Discovery keeps selection automatic; privileged readiness detects active managers. */
+  hasFirewallManager: boolean;
   sudo: DiscoverySudo;
 }
 
@@ -92,6 +94,7 @@ function discoveryScript(trySudoPassword: boolean): string {
     'fi',
     'if command -v nft >/dev/null 2>&1; then echo NFT=1; else echo NFT=0; fi',
     'if command -v iptables-restore >/dev/null 2>&1; then echo IPTR=1; else echo IPTR=0; fi',
+    'if command -v firewall-cmd >/dev/null 2>&1 || command -v ufw >/dev/null 2>&1; then echo MANAGER=1; else echo MANAGER=0; fi',
     "seg_e=$(sudo -n sh -c 'exit 0' 2>&1 </dev/null) && seg_s=nopasswd || seg_s=",
     'if [ -z "$seg_s" ]; then',
     '  case "$seg_e" in *tty*) seg_s=tty_required ;; esac',
@@ -161,6 +164,7 @@ export async function discoverHostOverSsh(target: SshTarget, opts: SshConnection
       osPrettyName: kv.get('OS_PRETTY') || null,
       hasNft: kv.get('NFT') === '1',
       hasIptablesRestore: kv.get('IPTR') === '1',
+      hasFirewallManager: kv.get('MANAGER') === '1',
       sudo: DISCOVERY_SUDO_VALUES.includes(sudo as DiscoverySudo) ? (sudo as DiscoverySudo) : 'none'
     }
   };

@@ -219,6 +219,7 @@ function sanitizeHostname(raw: string, ip: string): string {
 }
 
 function pickBackend(f: DiscoveredHostFacts): 'nftables' | 'iptables' | 'auto' {
+  if (f.hasFirewallManager) return 'auto';
   if (f.hasNft) return 'nftables';
   if (f.hasIptablesRestore) return 'iptables';
   return 'auto';
@@ -430,7 +431,7 @@ async function importHost(params: {
   const sudoWarning = sudoWarnings[facts.sudo];
   if (sudoWarning) warnings.push(sudoWarning);
   const backend = pickBackend(facts);
-  if (backend === 'auto') warnings.push('neither nft nor iptables-restore found');
+  if (backend === 'auto' && !facts.hasFirewallManager) warnings.push('neither nft nor iptables-restore found');
 
   const client = await pool.connect();
   let hostId: string;

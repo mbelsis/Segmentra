@@ -2,6 +2,8 @@
  * Shared types for executor package
  */
 
+export type FirewallBackend = 'nftables' | 'iptables' | 'firewalld' | 'ufw';
+
 export interface SshHostInfo {
   hostname: string;
   ip: string;
@@ -14,5 +16,5 @@ export interface SshHostInfo {
   keyPassphrase?: string;
   /** sudo password; undefined = passwordless sudo (sudo -n). */
   sudoPassword?: string;
-  backend?: 'nftables' | 'iptables' | 'auto';
+  backend?: FirewallBackend | 'auto';
 }

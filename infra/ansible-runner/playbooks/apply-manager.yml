@@ -1,0 +1,91 @@
+- name: Ensure native-manager backup directory exists
+  become: true
+  file:
+    path: "{{ segmentra_backup_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: Install one-shot native-manager helper
+  become: true
+  copy:
+    src: "{{ segmentra_manager_script }}"
+    dest: "{{ segmentra_backup_dir }}/segmentra-manager.py"
+    mode: "0700"
+
+- name: Generate native-manager deployment identifier
+  set_fact:
+    manager_run: "{{ lookup('pipe', 'date +%s') }}-{{ 100000000 | random }}"
+
+- name: Define native-manager rollback paths
+  set_fact:
+    manager_backup: "{{ segmentra_backup_dir }}/{{ segmentra_backend }}.{{ manager_run }}.json"
+    manager_marker: "{{ segmentra_backup_dir }}/manager-revert.{{ manager_run }}"
+    manager_unit: "segmentra-manager-revert-{{ manager_run }}"
+
+- name: Back up native permanent configuration and validate reload safety
+  become: true
+  command:
+    argv: [python3, "{{ segmentra_backup_dir }}/segmentra-manager.py", "{{ segmentra_backend }}", backup, "{{ manager_backup }}"]
+
+- name: Copy native-manager policy to host
+  become: true
+  copy:
+    src: "{{ seg_policy_file }}"
+    dest: /etc/segmentra.policy
+    mode: "0600"
+
+- name: Schedule unattended rollback before changing the native firewall
+  become: true
+  shell: >-
+    systemd-run --quiet --unit={{ manager_unit | quote }} --on-active=180
+    --timer-property=AccuracySec=1s /bin/sh -c
+    {{ ('touch ' ~ manager_marker ~ '; python3 ' ~ segmentra_backup_dir ~ '/segmentra-manager.py ' ~ segmentra_backend ~ ' restore ' ~ manager_backup) | quote }}
+
+- name: Apply and verify native firewall policy
+  block:
+    - name: Apply permanent native rules and enable the firewall boot service
+      become: true
+      command:
+        argv: [python3, "{{ segmentra_backup_dir }}/segmentra-manager.py", "{{ segmentra_backend }}", apply, /etc/segmentra.policy]
+
+    - name: Close the pre-apply SSH connection
+      meta: reset_connection
+
+    - name: Verify a fresh SSH connection through the new policy
+      wait_for_connection:
+        timeout: 30
+        connect_timeout: 5
+
+    - name: Verify reboot persistence before cancelling rollback
+      become: true
+      command:
+        argv: [python3, "{{ segmentra_backup_dir }}/segmentra-manager.py", "{{ segmentra_backend }}", persist]
+      changed_when: false
+
+    - name: Cancel rollback only if it has not already fired
+      become: true
+      shell: |
+        test ! -e {{ manager_marker | quote }} || exit 9
+        systemctl stop {{ (manager_unit ~ '.timer') | quote }} || exit 1
+        test ! -e {{ manager_marker | quote }} || exit 9
+  rescue:
+    - name: Restore the previous permanent policy and native runtime
+      become: true
+      command:
+        argv: [python3, "{{ segmentra_backup_dir }}/segmentra-manager.py", "{{ segmentra_backend }}", restore, "{{ manager_backup }}"]
+      register: manager_restore
+      failed_when: false
+
+    - name: Stop pending rollback after a successful immediate restore
+      become: true
+      command:
+        argv: [systemctl, stop, "{{ manager_unit }}.timer"]
+      when: manager_restore.rc == 0
+      failed_when: false
+
+    - name: Report native-manager deployment failure
+      fail:
+        msg: "Native firewall apply or persistence verification failed; restore exit code {{ manager_restore.rc }}. The unattended rollback remains scheduled if restore failed."
+
+- name: Finish this host after native-manager deployment
+  meta: end_host

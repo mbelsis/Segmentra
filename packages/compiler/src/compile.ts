@@ -1,7 +1,12 @@
 import crypto from 'node:crypto';
 import { isIP } from 'node:net';
 
-export type FirewallBackend = 'nftables' | 'iptables';
+export type FirewallBackend = 'nftables' | 'iptables' | 'firewalld' | 'ufw';
+
+export function firewallBackend(value: unknown): FirewallBackend {
+  if (value === 'iptables' || value === 'firewalld' || value === 'ufw') return value;
+  return 'nftables';
+}
 
 export type InterfaceScope =
   | { type: 'ALL_INTERFACES' }
@@ -712,7 +717,9 @@ function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Famil
   // rules of other tools after our jump (fail2ban bans, Docker, admins' own rules) still apply.
   // This matches nftables semantics, where an accept in table segmentra doesn't override a drop
   // in another table. Only our final DROP is terminal.
-  const ALLOW = 'RETURN';
+  // Native UFW rules are authoritative before UFW's default-deny chains. RETURN
+  // would leave every Segmentra allow dependent on a second UFW user rule.
+  const ALLOW = input.host.firewallBackend === 'ufw' ? 'ACCEPT' : 'RETURN';
 
   // Baseline traffic is always allowed (also in log-only mode, where it is logged first).
   const baselineAccept = (match: string, label: string) => {
@@ -722,6 +729,11 @@ function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Famil
 
   baselineAccept('-i lo', 'loopback');
   baselineAccept('-m conntrack --ctstate ESTABLISHED,RELATED', 'established');
+  if (fam === 6 && input.host.firewallBackend === 'ufw') {
+    for (const type of [1, 2, 3, 4]) {
+      baselineAccept(`-p ipv6-icmp --icmpv6-type ${type}`, 'ipv6-control');
+    }
+  }
   // Log-only: don't log reply traffic as new outbound flows (see compileNft).
   if (logOnly) push(`-A ${OUT} -m conntrack --ctstate ESTABLISHED,RELATED ${iptComment('established')} -j RETURN`);
   if (fam === 6) {
@@ -794,7 +806,7 @@ function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Famil
     // Forwarded traffic: allow = RETURN (the rest of FORWARD, e.g. DOCKER-USER, still applies),
     // deny = DROP; traffic to protected devices no rule allowed is dropped; anything else
     // forwarded is handed back to FORWARD unchanged.
-    push(`-A ${FWD} -m conntrack --ctstate ESTABLISHED,RELATED ${iptComment('established')} -j RETURN`);
+    push(`-A ${FWD} -m conntrack --ctstate ESTABLISHED,RELATED ${iptComment('established')} -j ${ALLOW}`);
     const fwdRules = rulesSorted.filter((r) => r.direction === 'FORWARD');
     for (const r of fwdRules) {
       const ports = rulePorts(r);
@@ -813,7 +825,7 @@ function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Famil
                 push(`${match} -j LOG --log-prefix ${iptLogPrefix(`${r.action} ${commentText || 'fwd rule'}`)}`);
                 push(`${match} -j RETURN`);
               } else {
-                push(`${match} -j ${r.action === 'ALLOW' ? 'RETURN' : 'DROP'}`);
+                push(`${match} -j ${r.action === 'ALLOW' ? ALLOW : 'DROP'}`);
               }
             }
           }
@@ -839,6 +851,70 @@ function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Famil
 // Entry point
 // ---------------------------------------------------------------------------
 
+function xml(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function compileFirewalld(input: CompileInput): string {
+  if (input.logOnlyMode) throw new CompileError('firewalld learning mode is not supported; enforced policies are never replaced by a persisted learning policy');
+  const sets = prepareSets(input.sets);
+  const mgmt = prepareMgmt(input);
+  const prot = prepareProtected(input, sets);
+  const rules: Record<string, string[]> = { 'segmentra-in': [], 'segmentra-out': [], 'segmentra-fwd': [] };
+  let priority = -32000;
+  const emit = (name: string, family: Family, source: string | null, destination: string | null,
+    protocol: string, ports: Array<[number, number]> | null, action: 'ALLOW' | 'DENY', log = 'NONE') => {
+    for (const port of ports ?? [null]) {
+      if (priority >= 30000) throw new CompileError('firewalld policy expansion exceeds rich-rule priority capacity');
+      const element = port ? `<port port="${port[0] === port[1] ? port[0] : `${port[0]}-${port[1]}`}" protocol="${protocol}"/>`
+        : protocol === 'any' ? '' : `<protocol value="${protocol === 'icmp' && family === 6 ? 'ipv6-icmp' : protocol}"/>`;
+      rules[name].push(`<rule family="ipv${family}" priority="${priority++}">${source ? `<source address="${xml(source)}"/>` : ''}${destination ? `<destination address="${xml(destination)}"/>` : ''}${element}${log === 'NONE' ? '' : `<log prefix="FW-AUDIT: ${action}: ">${log === 'LOG_RATE_LIMITED' ? '<limit value="5/s"/>' : ''}</log>`}<${action === 'ALLOW' ? 'accept' : 'drop'}/></rule>`);
+    }
+  };
+  for (const family of [4, 6] as Family[]) {
+    for (const address of family === 4 ? mgmt.v4 : mgmt.v6) emit('segmentra-in', family, address, null, 'tcp', [[mgmt.port, mgmt.port]], 'ALLOW');
+    if (family === 4 ? mgmt.fallbackV4 : mgmt.fallbackV6) emit('segmentra-in', family, null, null, 'tcp', [[mgmt.port, mgmt.port]], 'ALLOW');
+  }
+  for (const r of [...input.rules].sort((a, b) => a.orderIndex - b.orderIndex)) {
+    validateRuleEnums(r);
+    const ports = rulePorts(r);
+    if (r.direction !== 'FORWARD' && ruleScope(r, input).type !== 'ALL_INTERFACES') {
+      throw new CompileError(`Rule #${r.orderIndex}: firewalld policies require ALL_INTERFACES; interface-scoped rules cannot be translated safely`);
+    }
+    if (r.direction === 'FORWARD') {
+      for (const match of forwardMatches(r, sets)) {
+        for (const fam of match.family ? [match.family] : [4, 6] as Family[]) {
+          for (const source of match.src.iptAddrs.length ? match.src.iptAddrs : [null]) {
+            for (const dest of match.dst.iptAddrs.length ? match.dst.iptAddrs : [null]) emit('segmentra-fwd', fam, source, dest, r.protocol, ports, r.action, r.logMode);
+          }
+        }
+      }
+    } else {
+      for (const target of resolveTargets(r, sets)) {
+        for (const fam of target.family ? [target.family] : [4, 6] as Family[]) {
+          for (const address of target.iptAddrs.length ? target.iptAddrs : [null]) {
+            if (r.direction === 'IN' || r.direction === 'BOTH') emit('segmentra-in', fam, address, null, r.protocol, ports, r.action, r.logMode);
+            if (r.direction === 'OUT' || r.direction === 'BOTH') emit('segmentra-out', fam, null, address, r.protocol, ports, r.action, r.logMode);
+          }
+        }
+      }
+    }
+  }
+  for (const fam of [4, 6] as Family[]) {
+    for (const dest of fam === 4 ? prot.v4 : prot.v6) emit('segmentra-fwd', fam, null, dest, 'any', null, 'DENY');
+  }
+  const policies: Record<string, string> = {};
+  for (const [name, ingress, egress, target] of [
+    ['segmentra-in', 'ANY', 'HOST', (input.defaultInputAction ?? 'DROP') === 'DROP' ? 'DROP' : 'CONTINUE'],
+    ['segmentra-out', 'HOST', 'ANY', 'CONTINUE'],
+    ['segmentra-fwd', 'ANY', 'ANY', 'CONTINUE']
+  ]) {
+    if (name === 'segmentra-fwd' && !forwardingEnabled(input, prot)) continue;
+    policies[name] = `<?xml version="1.0" encoding="utf-8"?>\n<policy target="${target}" priority="-500"><short>Segmentra managed policy</short><ingress-zone name="${ingress}"/><egress-zone name="${egress}"/>${rules[name].join('')}</policy>\n`;
+  }
+  return JSON.stringify({ format: 1, backend: 'firewalld', policies }) + '\n';
+}
+
 /**
  * Compile a host policy. Throws CompileError on invalid input (bad ports,
  * addresses, interface/set names, or ports combined with protocol "any"/"icmp").
@@ -846,6 +922,16 @@ function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Famil
 export function compileHostPolicy(input: CompileInput): CompileOutput {
   const backend = input.host.firewallBackend;
   const logOnly = input.logOnlyMode ?? false;
+
+  if (backend === 'firewalld') {
+    const text = compileFirewalld(input);
+    return { backend, text, sha256: sha256(text) };
+  }
+  if (backend === 'ufw') {
+    if (logOnly) throw new CompileError('UFW learning mode is not supported; enforced policies are never replaced by a persisted learning policy');
+    const text = JSON.stringify({ format: 1, backend, ipv4: compileIptablesFamily(input, false, 4), ipv6: compileIptablesFamily(input, false, 6) }) + '\n';
+    return { backend, text, sha256: sha256(text) };
+  }
 
   if (backend === 'nftables') {
     const text = compileNft(input, logOnly);

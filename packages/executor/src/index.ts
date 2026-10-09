@@ -12,3 +12,4 @@ export * from './firewall-backup.js';
 export * from './discover-host.js';
 export * from './persist-scripts.js';
 export * from './persistence.js';
+export * from './manager-scripts.js';

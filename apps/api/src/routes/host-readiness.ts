@@ -46,7 +46,7 @@ hostReadinessRouter.post('/hosts/:hostId/check', async (req, res) => {
       ip: String(host.mgmt_ip).split('/')[0],
       port: Number(host.ssh_port) || 22,
       ...sshAuthFields(cred),
-      backend: host.firewall_backend === 'iptables' || host.firewall_backend === 'nftables' ? host.firewall_backend : 'auto'
+      backend: ['iptables', 'nftables', 'firewalld', 'ufw'].includes(host.firewall_backend) ? host.firewall_backend : 'auto'
     };
 
     const result = await checkHostReadiness(sshHostInfo);

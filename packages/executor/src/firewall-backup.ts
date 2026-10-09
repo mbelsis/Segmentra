@@ -10,6 +10,8 @@
 import { shq } from './ssh-options.js';
 import { SEGMENTRA_NFT_SH, segmentraNftCommand } from './nft-scripts.js';
 import { SEGMENTRA_IPTABLES_SH, segmentraIptablesCommand } from './iptables-scripts.js';
+import type { FirewallBackend } from './types.js';
+import { HOST_MANAGER_SCRIPT, SEGMENTRA_MANAGER_PY, isManagedBackend, managerCommand } from './manager-scripts.js';
 
 export const SEGMENTRA_BACKUP_DIR = '/var/backups/segmentra';
 /** Root-owned copies of the host scripts, installed by installHostScriptsSnippet() (used by the unattended auto-revert). */
@@ -24,7 +26,8 @@ export const HOST_IPTABLES_SCRIPT = `${SEGMENTRA_BACKUP_DIR}/segmentra-iptables.
 export function installHostScriptsSnippet(): string {
   return [
     [SEGMENTRA_NFT_SH, HOST_NFT_SCRIPT],
-    [SEGMENTRA_IPTABLES_SH, HOST_IPTABLES_SCRIPT]
+    [SEGMENTRA_IPTABLES_SH, HOST_IPTABLES_SCRIPT],
+    [SEGMENTRA_MANAGER_PY, HOST_MANAGER_SCRIPT]
   ]
     .map(
       ([content, dest]) =>
@@ -53,11 +56,12 @@ function iptCmd(args: string[], src: ScriptSource): string {
  * so use it only at the top level of a root script.
  */
 export function scopedBackupSnippet(
-  backend: 'nftables' | 'iptables',
+  backend: FirewallBackend,
   file: string,
   file6?: string,
   src: ScriptSource = 'inline'
 ): string {
+  if (isManagedBackend(backend)) return managerCommand(backend, 'backup', file, src === 'installed');
   if (backend === 'nftables') return nftCmd(['backup', file], src);
   const v4 = iptCmd(['backup', 'iptables', file], src);
   if (!file6) return v4;
@@ -75,11 +79,12 @@ export function scopedBackupSnippet(
  * (3 = backup missing); it does not call `exit`, so it can be composed.
  */
 export function scopedRestoreSnippet(
-  backend: 'nftables' | 'iptables',
+  backend: FirewallBackend,
   file: string,
   file6?: string,
   src: ScriptSource = 'inline'
 ): string {
+  if (isManagedBackend(backend)) return managerCommand(backend, 'restore', file, src === 'installed');
   if (backend === 'nftables') return nftCmd(['restore', file], src);
   const v4 = iptCmd(['restore', 'iptables', file], src);
   if (!file6) return v4;
@@ -100,10 +105,11 @@ export function scopedRestoreSnippet(
  * (SEGMENTRA_PERSIST* lines, parsePersistenceOutput) reports the outcome.
  */
 export function persistSnippet(
-  backend: 'nftables' | 'iptables',
+  backend: FirewallBackend,
   mode: 'persist' | 'unpersist' | 'check',
   src: ScriptSource = 'inline'
 ): string {
+  if (isManagedBackend(backend)) return managerCommand(backend, mode === 'unpersist' ? 'remove' : mode, undefined, src === 'installed');
   if (backend === 'nftables') return `${nftCmd([mode], src)} || :`;
   const v6 = 'if command -v ip6tables-save >/dev/null 2>&1; then';
   if (src === 'installed') {

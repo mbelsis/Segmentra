@@ -6,7 +6,8 @@ import path from 'node:path';
 import { Router } from 'express';
 import { z } from 'zod';
 
-import { compileHostPolicy, type RuleDirection } from '@segmentra/compiler';
+import { compileHostPolicy, firewallBackend, type FirewallBackend, type RuleDirection } from '@segmentra/compiler';
+import { SEGMENTRA_MANAGER_PY } from '@segmentra/executor';
 import { parseAnsibleRecap, runAnsiblePlaybook, runSshDeployment, checkHostReadiness, checkHostPersistence, checkPrivateKey, persistenceSummary, readHostFirewallRules, type AnsibleAgentKey, type PersistenceResult, type SshHost, type SshHostInfo } from '@segmentra/executor';
 
 import { pool } from '../db/pool.js';
@@ -95,7 +96,7 @@ async function failDeployment(deploymentId: string, message: string) {
  * successful run and store it as the drift baseline (same read/normalization as compliance).
  * Best-effort: on failure the baseline stays NULL and compliance reports 'unknown'.
  */
-async function recordLiveBaseline(deploymentId: string, host: any, backend?: 'nftables' | 'iptables'): Promise<{ unreachable?: string }> {
+async function recordLiveBaseline(deploymentId: string, host: any, backend?: FirewallBackend): Promise<{ unreachable?: string }> {
   if (!host?.mgmt_ip) return {};
   let cred: MaterializedSshCredential | null = null;
   try {
@@ -136,7 +137,7 @@ function persistenceColumns(p: PersistenceResult | undefined): [string | null, s
  * Ansible runs the same host scripts (persist) but its output is not parsed: read the reboot
  * persistence state of the host afterwards with a read-only check and store it. Best-effort.
  */
-async function recordPersistence(deploymentId: string, host: any, backend?: 'nftables' | 'iptables'): Promise<void> {
+async function recordPersistence(deploymentId: string, host: any, backend?: FirewallBackend): Promise<void> {
   if (!host?.mgmt_ip || !backend) return;
   let cred: MaterializedSshCredential | null = null;
   try {
@@ -936,7 +937,8 @@ async function generateBundle(deploymentId: string, opts: { ansible: boolean } =
 
   const inventoryLines: string[] = ['[all]'];
   const hostPolicyHashes: Map<string, string> = new Map(); // host_id -> policy hash
-  const hostPolicyFiles: Map<string, { path: string; ip6Path?: string; backend: 'nftables' | 'iptables' }> = new Map();
+  const hostPolicyFiles: Map<string, { path: string; ip6Path?: string; backend: FirewallBackend }> = new Map();
+  fs.writeFileSync(path.join(bundleDir, 'segmentra-manager.py'), SEGMENTRA_MANAGER_PY, { mode: 0o600 });
   const ansibleSecrets = opts.ansible ? new AnsibleSecrets(bundleDir, deploymentId) : null;
   const mgmtSshCidrs = await getManagementVlanCidrs();
 
@@ -950,9 +952,9 @@ async function generateBundle(deploymentId: string, opts: { ansible: boolean } =
       const ifsRes = await pool.query(`SELECT name, role, enabled FROM host_interfaces WHERE host_id=$1`, [h.id]);
 
       // Auto-detect backend if set to 'auto' or null
-      let backend: 'nftables' | 'iptables';
-      if (h.firewall_backend === 'iptables') {
-        backend = 'iptables';
+      let backend: FirewallBackend;
+      if (h.firewall_backend && h.firewall_backend !== 'auto') {
+        backend = firewallBackend(h.firewall_backend);
       } else if (h.firewall_backend === 'auto' || !h.firewall_backend) {
         // Perform auto-detection via SSH (KEY or PASSWORD credential, host-scoped preferred)
         let materialized: MaterializedSshCredential | null = null;
@@ -965,20 +967,24 @@ async function generateBundle(deploymentId: string, opts: { ansible: boolean } =
             ...sshAuthFields(materialized)
           };
           const readinessResult = await checkHostReadiness(sshHostInfo);
-          backend = readinessResult.backend === 'iptables' ? 'iptables' : 'nftables';
+          if (!readinessResult.ready || readinessResult.backend === 'unknown') {
+            throw new Error(`Host readiness failed: ${readinessResult.errors.join('; ')}`);
+          }
+          backend = readinessResult.backend;
 
           // Update host's firewall_backend if auto-detected
-          if (readinessResult.backend !== 'unknown') {
-            await pool.query(
-              `UPDATE hosts SET firewall_backend=$1 WHERE id=$2`,
-              [readinessResult.backend, h.id]
-            );
-          }
+          await pool.query(
+            `UPDATE hosts SET firewall_backend=$1 WHERE id=$2`,
+            [readinessResult.backend, h.id]
+          );
         } catch (detectionError: any) {
           if (detectionError?.message === 'missing_ssh_credential') throw detectionError;
           // eslint-disable-next-line no-console
-          console.warn(`[Auto-detection failed for ${h.hostname}, defaulting to nftables]`, detectionError.message);
-          backend = 'nftables';
+          console.warn(`[Auto-detection failed for ${h.hostname}]`, detectionError.message);
+          const message = truncateMessage(`Firewall detection failed: ${detectionError.message}`);
+          warnings.push(`${h.hostname}: ${message}`);
+          await pool.query(`UPDATE deployment_hosts SET status='FAILED', finished_at=now(), message=$3 WHERE deployment_id=$1 AND host_id=$2`, [deploymentId, h.id, message]);
+          continue;
         } finally {
           materialized?.cleanup();
         }
@@ -1077,7 +1083,7 @@ async function generateBundle(deploymentId: string, opts: { ansible: boolean } =
         }
       }
 
-      const ext = compiled.backend === 'nftables' ? 'nft' : 'iptables';
+      const ext = compiled.backend === 'nftables' ? 'nft' : compiled.backend === 'iptables' ? 'iptables' : `${compiled.backend}.json`;
       const policyFileHostPath = path.join(hostRulesDir, `${h.hostname}.${ext}`);
       fs.writeFileSync(policyFileHostPath, compiled.text, 'utf8');
       let ip6PolicyFileHostPath: string | undefined;
@@ -1088,7 +1094,7 @@ async function generateBundle(deploymentId: string, opts: { ansible: boolean } =
       hostPolicyFiles.set(h.id, {
         path: policyFileHostPath,
         ip6Path: ip6PolicyFileHostPath,
-        backend: compiled.backend === 'iptables' ? 'iptables' : 'nftables'
+        backend: compiled.backend
       });
 
       // Store hash of compiled policy for this host (for drift detection)
@@ -1100,7 +1106,7 @@ async function generateBundle(deploymentId: string, opts: { ansible: boolean } =
 
       const ip6Var = ip6PolicyFileHostPath ? ` segmentra_ip6_policy_file=/bundles/${deploymentId}/host_rules/${h.hostname}.ip6tables` : '';
       inventoryLines.push(
-        `${h.hostname} ansible_host=${String(h.mgmt_ip)} ${connectionVars} ansible_become=yes ansible_become_method=sudo segmentra_policy_file=${policyFileRunnerPath}${ip6Var}`
+        `${h.hostname} ansible_host=${String(h.mgmt_ip)} ${connectionVars} ansible_become=yes ansible_become_method=sudo segmentra_backend=${compiled.backend} segmentra_manager_script=/bundles/${deploymentId}/segmentra-manager.py segmentra_policy_file=${policyFileRunnerPath}${ip6Var}`
       );
   }
 

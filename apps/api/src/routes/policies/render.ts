@@ -1,6 +1,6 @@
 import { Router } from 'express';
 
-import { compileHostPolicy, type RuleDirection } from '@segmentra/compiler';
+import { compileHostPolicy, firewallBackend, type RuleDirection } from '@segmentra/compiler';
 
 import { pool } from '../../db/pool.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
@@ -34,7 +34,7 @@ policyRenderRouter.get('/policy-versions/:versionId/render/host/:hostId', requir
   if (!hostRes.rows[0] || !vRes.rows[0]) return res.status(404).json({ error: 'not_found' });
 
   const backendRaw = String(hostRes.rows[0].firewall_backend ?? 'auto');
-  const backend = backendRaw === 'iptables' ? 'iptables' : 'nftables'; // v1 default to nftables
+  const backend = firewallBackend(backendRaw);
 
   const v = vRes.rows[0];
   const policyInterfaceScope =
@@ -142,5 +142,4 @@ policyRenderRouter.get('/policy-versions/:versionId/render/host/:hostId', requir
 
   res.json({ backend: compiled.backend, sha256: compiled.sha256, text: compiled.text });
 });
-
 

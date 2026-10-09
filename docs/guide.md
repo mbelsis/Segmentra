@@ -52,8 +52,9 @@ This guide walks through every step of using Segmentra — from initial setup to
   segmentra_user ALL=(ALL) NOPASSWD: ALL
   ```
   Do not enable `Defaults requiretty` for this account. Restrict where it can log in from (see [security.md](security.md#checklist)).
-- **nftables** (preferred) or **iptables** installed
-- **rsyslog** installed (required for firewall learning/audit features)
+- One supported backend: **nftables**, **iptables**, **firewalld**, or **UFW**. `auto` prefers an active firewalld/UFW manager before raw tools.
+- Native firewalld/UFW require **Python 3**, **systemd**, and an already active manager. Firewalld requires the policy API and nftables backend; UFW requires `IPV6=yes` and both IPv4/IPv6 save/restore tools. See [native firewall managers](firewall-managers.md).
+- **rsyslog** installed for firewall learning/audit on raw nftables/iptables. Native-manager learning/log-only mode is not yet supported.
 - **For rules that survive a reboot** (Segmentra never installs packages or disables firewalld; see [Persistence across reboots](../README.md#persistence-across-reboots)):
 
   | Distribution | nftables backend | iptables backend |
@@ -61,7 +62,7 @@ This guide walks through every step of using Segmentra — from initial setup to
   | Debian, Ubuntu | `nftables` package (`nftables.service`; Segmentra enables it) | `iptables-persistent` package (`netfilter-persistent.service`) |
   | RHEL, Rocky, AlmaLinux (Fedora, CentOS Stream) | `nftables` package (`nftables.service`) and **firewalld disabled** | `iptables-services` package (`iptables` / `ip6tables.service`) and **firewalld disabled** |
 
-  With firewalld active or enabled the rules work at runtime but are gone after a reboot until the next deployment; the deployment and the readiness check show a warning. Other distributions (Alpine, SUSE, Arch, ...) are not supported for persistence.
+  This table covers raw nftables/iptables persistence. With firewalld active, use the native `firewalld` backend instead of a conflicting raw boot service. Native firewalld writes permanent policy XML; UFW writes marked IPv4/IPv6 before-rule blocks. Both verify boot-service enablement and saved/live state, and roll back on persistence failure. Raw persistence on other distributions is unsupported; native manager support depends on its prerequisites, not this distribution table.
 
 ---
 
@@ -153,12 +154,13 @@ Go to **Inventory → Hosts** tab:
 **Individual hosts:**
 - Click **+ Add Host**
 - Enter hostname, management IP, SSH port (default 22)
-- Select firewall backend (`auto` for automatic detection, or `nftables`/`iptables`)
+- Select firewall backend (`auto`, `nftables`, `iptables`, `firewalld`, or `ufw`)
 - Assign VLAN and tags
 - *SSH credential* (admins only): leave *Automatic (by credential scope)* or assign a credential explicitly
 
 **Bulk import via CSV:**
 - Click **Bulk Import** and upload a CSV file with the header `hostname,mgmt_ip,ssh_port,vlan,tags,firewall_backend,enabled` (`vlan` = VLAN name or tag number, `tags` = comma-separated tag names; only `hostname` is required)
+- `firewall_backend` accepts `auto`, `nftables`, `iptables`, `firewalld`, and `ufw`.
 
 ### Step 4: Add Network Interfaces
 
@@ -172,10 +174,10 @@ Interface roles are used when policies target specific interface roles instead o
 ### Step 5: Verify Host Readiness
 
 Click **Check Readiness** on a host row to verify:
-- nftables/iptables is installed and accessible
+- The selected backend is installed and accessible; native-manager prerequisites and active state are verified
 - sudo works with the credential's privilege escalation setting (`sudo -n` or `sudo -S` with the sudo password) and runs `sh` as root; a wrong sudo password, a missing password, `requiretty` or an account not allowed to run `sh` as root are reported as specific errors
 - The `nf_tables` kernel module is loaded (for nftables; a warning only)
-- Firewall backend is auto-detected if set to `auto`
+- Firewall backend is auto-detected if set to `auto`, preferring active firewalld/UFW; conflicting active managers or failed detection stop deployment
 
 ### Step 6: (Optional) Discover Hosts Automatically
 
@@ -277,7 +279,7 @@ FORWARD rules filter traffic routed *through* a host, such as an IoT/OT gateway;
 
 ### Step 4: Preview Compiled Output
 
-There is no render button in the UI. Operators and admins can call `GET /api/policy-versions/:versionId/render/host/:hostId` to see the nftables/iptables rules that would be generated for one host. It returns:
+There is no render button in the UI. Operators and admins can call `GET /api/policy-versions/:versionId/render/host/:hostId` to see the nftables/iptables rules or native firewalld/UFW artifact generated for one host. It returns:
 - The compiled ruleset text
 - SHA-256 hash of the output
 - Which firewall backend will be used
@@ -292,6 +294,8 @@ Rules are evaluated in `order_index` order. The compiled output follows:
 3. Default deny for **inbound** traffic. Outbound traffic is allowed unless an OUT rule denies it, and forwarded traffic is only filtered for devices protected by a gateway.
 
 Segmentra only manages its own rules: on nftables the table `inet segmentra`, on iptables the chains `SEGMENTRA-IN`, `SEGMENTRA-OUT` (and `SEGMENTRA-FWD` for forwarding), reached by jumps from `INPUT` / `OUTPUT` / `FORWARD`. In those chains an ALLOW returns to the built-in chain (`RETURN`) instead of accepting, so other tools' rules (Docker, fail2ban, Kubernetes) are left alone and still apply.
+
+Firewalld uses reserved native policy objects; UFW uses marked blocks in its before-rules files. Native allows can be terminal within the manager, and existing administrator rules can still affect other traffic. Firewalld non-forward rules require `ALL_INTERFACES`; native learning/log-only mode is rejected. See [native semantics and limits](firewall-managers.md#rule-semantics-and-limits).
 
 ---
 
@@ -598,6 +602,8 @@ dbserver01 ansible_host=10.0.2.10 ansible_user=segmentra ansible_port=2222 ansib
 
 The playbook (`infra/ansible-runner/playbooks/apply-firewall.yml`) runs these tasks on each host:
 
+For `firewalld`/`ufw`, it delegates to `apply-manager.yml`: install the one-shot Python helper, take a scoped backup, schedule a systemd rollback, apply permanent native configuration, reconnect, verify persistence, and cancel the rollback only on success. The steps below describe the raw nftables/iptables path.
+
 1. **Generate timestamp** for backup filenames
 2. **Validate policy file** (fail early if not provided)
 3. **Create backup directory** (`/var/backups/segmentra`, mode 0700)
@@ -607,7 +613,7 @@ The playbook (`infra/ansible-runner/playbooks/apply-firewall.yml`) runs these ta
 7. **Apply rules** (`nft -f`, replacing only `table inet segmentra`, or the iptables chains and their `INPUT`/`OUTPUT`(/`FORWARD`) jumps)
 8. **On failure: rollback** from this run's backup and fail with an error message
 
-Unlike SSH Direct, the Ansible path has no post-apply reachability check with an automatic revert, and it ignores the canary/progressive gates.
+The raw Ansible path has no post-apply reachability check with automatic revert. The native-manager path has both. All Ansible backends ignore canary/progressive gates.
 
 ### Ansible Pros and Cons
 
@@ -615,12 +621,14 @@ Unlike SSH Direct, the Ansible path has no post-apply reachability check with an
 |------|------|
 | Parallel execution across hosts | Requires Docker container |
 | Built-in rollback block/rescue | Requires Docker socket access (not available with the hardened override) |
-| Industry-standard tooling | No lockout auto-revert, no canary/progressive gates |
+| Industry-standard tooling | No raw-backend lockout auto-revert; no canary/progressive gates |
 | | More complex setup, slightly slower startup |
 
 ---
 
 ## 12. Firewall Learning (Traffic Discovery)
+
+This workflow supports raw nftables/iptables only. Firewalld/UFW learning and log-only policy-test sessions are not yet supported; attempts are rejected without changing the enforced permanent ACL. Ordinary policy simulation and drift/compliance still work with native managers.
 
 Firewall Learning discovers what traffic actually flows to/from a server, so you can write accurate policies without guessing.
 

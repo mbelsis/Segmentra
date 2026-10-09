@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import type { FirewallBackend } from './types.js';
+import { isManagedBackend, managerCommand } from './manager-scripts.js';
 import fs from 'node:fs';
 import { promisify } from 'node:util';
 import { hashLiveRuleset, liveRulesReadScript } from './read-rules.js';
@@ -43,7 +45,7 @@ export interface SshHost {
   policyFilePath: string; // local path to policy file
   /** iptables backend only: local path to the ip6tables-restore file (CompileOutput.ip6tablesRules). */
   ip6PolicyFilePath?: string;
-  backend: 'nftables' | 'iptables';
+  backend: FirewallBackend;
 }
 
 export interface SshExecutionResult {
@@ -142,7 +144,8 @@ type DeployOpts = SshConnectionOptions & { rollbackTimeoutSec: number };
  * other tools' tables/chains are never touched. Uses the script copies installed on the
  * host in step 3, so it also works unattended (auto-revert via systemd-run / nohup).
  */
-function buildRestoreScript(backend: 'nft' | 'iptables', paths: BackupPaths): string {
+function buildRestoreScript(backend: 'nft' | 'iptables' | 'firewalld' | 'ufw', paths: BackupPaths): string {
+  if (isManagedBackend(backend)) return scopedRestoreSnippet(backend, paths.backupFile, undefined, 'installed');
   const restore =
     backend === 'nft'
       ? scopedRestoreSnippet('nftables', paths.backupFile, undefined, 'installed')
@@ -175,7 +178,7 @@ function iptablesApplyScript(): string {
 async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecutionResult> {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
   const nonce = crypto.randomBytes(4).toString('hex');
-  const ext = host.backend === 'nftables' ? 'nft' : 'iptables';
+  const ext = host.backend === 'nftables' ? 'nft' : host.backend;
   const remoteUpload = `.segmentra-${timestamp}-${nonce}.policy`; // in the SSH user's home (not world-writable /tmp)
   const remoteUpload6 = `.segmentra-${timestamp}-${nonce}.policy6`;
   const unit = `segmentra-revert-${timestamp.replace(/[^0-9A-Za-z]/g, '')}-${nonce}`;
@@ -214,7 +217,7 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
 
     // Step 2: Make sure the tool for the policy's backend exists. Both may be installed (modern
     // distros ship iptables-nft next to nft), so only the required tool is checked.
-    const requiredTool = ext === 'nft' ? 'nft' : 'iptables-restore';
+    const requiredTool = ext === 'nft' ? 'nft' : ext === 'firewalld' ? 'firewall-cmd' : ext === 'ufw' ? 'ufw' : 'iptables-restore';
     const detectResult = await run(
       `PATH="$PATH:/usr/sbin:/sbin"; command -v ${requiredTool} >/dev/null 2>&1 && echo present || echo missing`
     );
@@ -222,9 +225,9 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
       add(detectResult);
       return fail(detectResult.exitCode, 'Error: backend detection failed');
     }
-    stdout += `Backend: ${ext === 'nft' ? 'nftables' : 'iptables'} (${requiredTool} ${detectResult.stdout.trim()})\n`;
+    stdout += `Backend: ${host.backend} (${requiredTool} ${detectResult.stdout.trim()})\n`;
     if (detectResult.stdout.trim() !== 'present') {
-      return fail(1, `Error: ${requiredTool} is not installed on the host, but the policy targets ${ext === 'nft' ? 'nftables' : 'iptables'}`);
+      return fail(1, `Error: ${requiredTool} is not installed on the host, but the policy targets ${host.backend}`);
     }
 
     // Step 3: Back up Segmentra's own state (as root). The deploy is aborted if this fails.
@@ -233,7 +236,9 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
     // (the full iptables-save is kept next to it as <file>.full). The host scripts are
     // installed first so the scheduled revert is self-contained.
     const paths: BackupPaths =
-      ext === 'nft'
+      isManagedBackend(host.backend)
+        ? { backupFile: `${BACKUP_DIR}/${host.backend}.${timestamp}-${nonce}.json`, backupFile6: '' }
+        : ext === 'nft'
         ? { backupFile: `${BACKUP_DIR}/nft.ruleset.${timestamp}`, backupFile6: '' }
         : { backupFile: `${BACKUP_DIR}/iptables.${timestamp}`, backupFile6: `${BACKUP_DIR}/ip6tables.${timestamp}` };
     const backupScript = [
@@ -243,7 +248,9 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
       ...(ext === 'nft'
         ? [`if [ -f /etc/nftables.conf ]; then cp /etc/nftables.conf ${shq(`${BACKUP_DIR}/nftables.conf.${timestamp}`)}; fi`]
         : []),
-      ext === 'nft'
+      isManagedBackend(host.backend)
+        ? scopedBackupSnippet(host.backend, paths.backupFile, undefined, 'installed')
+        : ext === 'nft'
         ? scopedBackupSnippet('nftables', paths.backupFile, undefined, 'installed')
         : scopedBackupSnippet('iptables', paths.backupFile, paths.backupFile6, 'installed'),
       `test -s ${shq(paths.backupFile)}`
@@ -333,7 +340,8 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
     // nft: replaces only table inet segmentra. iptables: fills only the SEGMENTRA-IN/OUT(/FWD)
     // chains (iptables-restore --noflush) and inserts the INPUT/OUTPUT(/FORWARD) jumps in the same
     // transaction, then cleans up rules left by the legacy full-table design.
-    const applyScript = ext === 'nft' ? 'nft -f /etc/segmentra.policy' : iptablesApplyScript();
+    const applyScript = isManagedBackend(host.backend) ? managerCommand(host.backend, 'apply', '/etc/segmentra.policy', true)
+      : ext === 'nft' ? 'nft -f /etc/segmentra.policy' : iptablesApplyScript();
     const applyResult = await sudo(applyScript);
     add(applyResult);
 
@@ -409,16 +417,21 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
     // a revert or rollback before this point leaves the previous boot configuration in place.
     // Never fails the deployment; missing pieces (firewalld, package not installed, unsupported
     // distro) are reported as warnings.
-    const persistRes = await sudo(persistSnippet(ext === 'nft' ? 'nftables' : 'iptables', 'persist', 'installed'));
+    const persistRes = await sudo(persistSnippet(host.backend, 'persist', 'installed'));
     add(persistRes);
     const persistence = parsePersistenceOutput(persistRes.stdout);
     stdout += `Reboot persistence: ${persistenceSummary(persistence)}\n`;
+    if (isManagedBackend(host.backend) && (persistRes.exitCode !== 0 || persistence.status !== 'persisted')) {
+      const rb = await sudo(restoreScript);
+      add(rb);
+      return fail(1, 'Native manager reboot persistence verification failed; rollback attempted', { backupPath, rolledBack: true, persistence });
+    }
 
     // Step 10: Read back live ruleset for drift detection (same read + normalization as readHostFirewallRules)
     let liveRulesHash: string | undefined;
-    const live = await sudo(liveRulesReadScript(ext === 'nft' ? 'nftables' : 'iptables'));
+    const live = await sudo(liveRulesReadScript(host.backend));
     if (live.exitCode === 0) {
-      liveRulesHash = hashLiveRuleset(ext === 'nft' ? 'nftables' : 'iptables', live.stdout);
+      liveRulesHash = hashLiveRuleset(host.backend, live.stdout);
     } else {
       stderr += `Warning: could not read back live ruleset: ${live.stdout.trim()} ${live.stderr.trim()}\n`;
     }

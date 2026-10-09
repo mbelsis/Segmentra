@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import type { SshHostInfo } from './types.js';
+import { DETECT_FIREWALL_BACKEND, isManagedBackend, managerCommand } from './manager-scripts.js';
 import { runSshSudo, shq, type SshConnectionOptions } from './ssh-options.js';
 import {
   LEGACY_POLICY_FILE,
@@ -45,8 +46,22 @@ export interface RemovePolicyResult {
  * With host.backend 'auto'/undefined, both are attempted where the tools exist.
  */
 export async function removeSegmentraPolicy(host: SshHostInfo, opts: SshConnectionOptions = {}): Promise<RemovePolicyResult> {
+  if (!host.backend || host.backend === 'auto') {
+    const detected = await runSshSudo(host, DETECT_FIREWALL_BACKEND, opts);
+    if (detected.exitCode !== 0 || !['nftables', 'iptables', 'firewalld', 'ufw'].includes(detected.stdout.trim())) {
+      return { success: false, exitCode: detected.exitCode || 1, stdout: detected.stdout, stderr: detected.stderr || 'No supported firewall manager detected' };
+    }
+    host = { ...host, backend: detected.stdout.trim() as Exclude<SshHostInfo['backend'], 'auto'> };
+  }
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
   const ts = `${timestamp}-${crypto.randomBytes(2).toString('hex')}`;
+  if (isManagedBackend(host.backend)) {
+    const backup = `${BACKUP_DIR}/${host.backend}.remove.${ts}.json`;
+    const script = ['set -e', 'umask 077', `mkdir -p ${shq(BACKUP_DIR)}`, installHostScriptsSnippet(),
+      managerCommand(host.backend, 'backup', backup, true), managerCommand(host.backend, 'remove', undefined, true)].join('\n');
+    const result = await runSshSudo(host, script, opts);
+    return { success: result.exitCode === 0, ...result, persistence: parsePersistenceOutput(result.stdout) };
+  }
   const doNft = host.backend !== 'iptables';
   const doIpt = host.backend !== 'nftables';
   const b = (name: string) => shq(`${BACKUP_DIR}/${name}.${ts}`);

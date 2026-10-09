@@ -1,4 +1,4 @@
-import { compileHostPolicy, type PolicyRule } from '@segmentra/compiler';
+import { compileHostPolicy, firewallBackend, type PolicyRule } from '@segmentra/compiler';
 import { pool } from '../db/pool.js';
 import {
   cidrContains,
@@ -154,7 +154,7 @@ export async function checkDeploymentSafety(params: {
           id: host.id,
           hostname: host.hostname,
           mgmtIp: host.mgmt_ip ? String(host.mgmt_ip) : null,
-          firewallBackend: host.firewall_backend === 'iptables' ? 'iptables' : 'nftables',
+          firewallBackend: firewallBackend(host.firewall_backend),
           interfaces: typeof host.interfaces === 'string' ? JSON.parse(host.interfaces) : (host.interfaces || []),
           sshPort,
         },

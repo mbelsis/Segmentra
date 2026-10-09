@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import type { FirewallBackend } from './types.js';
+import { isManagedBackend } from './manager-scripts.js';
 import fs from 'node:fs';
 import { promisify } from 'node:util';
 import {
@@ -29,7 +31,7 @@ export interface AuditSshHost {
   keyPassphrase?: string;
   /** sudo password; undefined = passwordless sudo (sudo -n). */
   sudoPassword?: string;
-  backend: 'nftables' | 'iptables';
+  backend: FirewallBackend;
 }
 
 export interface AuditSessionResult {
@@ -77,6 +79,9 @@ export async function startAuditSession(
   logFilePath: string,
   opts: SshConnectionOptions = {}
 ): Promise<AuditSessionResult> {
+  if (isManagedBackend(host.backend)) {
+    return { hostname: host.hostname, success: false, exitCode: 1, stdout: '', stderr: 'Learning sessions are not supported for native firewalld/UFW backends; the enforced permanent policy was not changed.' };
+  }
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
   const backupPath = `${BACKUP_DIR}/${host.backend === 'nftables' ? 'nft' : 'iptables'}.audit-backup.${timestamp}`;
   const c = collector(host);

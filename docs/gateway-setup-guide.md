@@ -9,7 +9,7 @@ This guide explains how to configure a Linux server as an IoT/OT gateway firewal
 A gateway is a Linux server with **two or more network interfaces**:
 - One interface connects to the IT/corporate network
 - One or more interfaces connect to OT/IoT network segments
-- The server runs nftables or iptables to filter traffic between the networks
+- The server runs nftables, iptables, firewalld, or UFW to filter traffic between the networks
 - Segmentra deploys and manages the firewall rules via SSH
 
 ```
@@ -27,7 +27,7 @@ A gateway is a Linux server with **two or more network interfaces**:
 ## Prerequisites
 
 - **Linux server** with 2+ NICs (Ubuntu 22.04+, RHEL 8+, or similar)
-- **nftables** or **iptables** installed
+- A supported backend: **nftables**, **iptables**, **firewalld**, or **UFW**. Native managers also require Python 3, systemd, and the prerequisites in [native firewall managers](firewall-managers.md).
 - **SSH access** with a user that has full sudo rights (see [Step 5](#step-5-configure-ssh-access-for-segmentra))
 - **Two network connections**: one to IT, one to OT
 - Physical or virtual network segmentation between IT and OT
@@ -115,6 +115,8 @@ cat /proc/sys/net/ipv4/ip_forward
 ---
 
 ## Step 3: Install Firewall Backend
+
+If firewalld or UFW already manages the gateway, select that native backend (or `auto`) in Segmentra instead of enabling a conflicting raw firewall service. Native permanent ACLs, rollback, removal, and drift are supported. Firewalld non-forward rules require `ALL_INTERFACES`; native learning/log-only sessions are unsupported. The native host path passed live Docker tests, but routed gateway traffic still needs validation. The raw-tool installation examples below are for gateways deliberately using nftables/iptables without a native manager.
 
 ### nftables (recommended)
 

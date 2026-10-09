@@ -119,7 +119,7 @@ packages/
       migrate.js
       seed-roles.js            # Roles + initial admin user
   shared/                      # shared TS types
-  compiler/                    # nftables/iptables rendering
+  compiler/                    # nftables/iptables and native firewalld/UFW rendering
     src/
       compile.ts               # Per-host rulesets; supports logOnlyMode for firewall learning
   executor/                    # Ansible runner + SSH direct executor
@@ -175,7 +175,7 @@ Routers are mounted in `apps/api/src/index.ts` (inventory and policy sub-routers
 #### Hosts
 - `GET /hosts?hostname=&ip=&tag=&vlan=&env=&backend=&enabled=&page=&limit=` — hosts with tags, VLAN info and `effective_credential` (paginated, default 50, max 1000 per page)
 - `GET /hosts/:id` — host with tags, VLAN info and `effective_credential`
-- `POST /hosts` — Body: `{ hostname, mgmtIp?, sshPort?, environment?, osFamily?, firewallBackend?: 'nftables'|'iptables'|'auto', vlanId?, tagIds?, enabled?, sshCredentialId? }`
+- `POST /hosts` — Body: `{ hostname, mgmtIp?, sshPort?, environment?, osFamily?, firewallBackend?: 'nftables'|'iptables'|'firewalld'|'ufw'|'auto', vlanId?, tagIds?, enabled?, sshCredentialId? }`
 - `PUT /hosts/:id` — same fields, all optional
 - `DELETE /hosts/:id` — deletes the host; `409 host_has_deployment_history` if it has deployment history (disable it instead)
 - `POST /hosts/bulk/delete`, `/bulk/assign-vlan`, `/bulk/assign-tag`, `/bulk/set-enabled`, `/bulk/import` (CSV import)
@@ -301,7 +301,7 @@ Host deployments that stay `RUNNING` for more than 10 minutes are marked `FAILED
 
 ### Host Readiness (`operator`, `admin`)
 
-- `POST /host-readiness/hosts/:hostId/check` — `{ hostname, ready, backend: 'nftables'|'iptables'|'unknown', nftVersion?, iptablesVersion?, sudoAccess, sudoMode: 'nopasswd'|'password', sudoError?: 'password_required'|'wrong_password'|'tty_required'|'not_permitted', kernelSupport, errors[], warnings[] }`
+- `POST /host-readiness/hosts/:hostId/check` — `{ hostname, ready, backend: 'nftables'|'iptables'|'firewalld'|'ufw'|'unknown', nftVersion?, iptablesVersion?, sudoAccess, sudoMode: 'nopasswd'|'password', sudoError?: 'password_required'|'wrong_password'|'tty_required'|'not_permitted', kernelSupport, errors[], warnings[] }`
   - Verifies nft/iptables availability, sudo with the credential's privilege escalation mode (`id -u` + a ruleset read via `sudo sh -c`) and kernel support
   - Updates `firewall_backend` if it is `auto`
   - Also returns `persistence?: { distro, method, available, status, warnings[], notes[] }` (read-only check of reboot persistence; see [Reboot persistence](#reboot-persistence))
@@ -500,7 +500,7 @@ Migrations live in `packages/db/migrations/` as plain `NNN_description.sql` file
 - `ssh_port` (int, default 22) — SSH port for deployments
 - `environment` (text)
 - `os_family` (text)
-- `firewall_backend` (text) — `auto|nftables|iptables`
+- `firewall_backend` (text) — `auto|nftables|iptables|firewalld|ufw`
 - `vlan_id` (uuid, FK → vlans.id, nullable)
 - `enabled` (boolean, default true) — Disabled hosts are skipped from deployments
 - `ssh_credential_id` (uuid, FK → ssh_credentials.id, nullable, ON DELETE SET NULL) — explicit SSH credential assignment; overrides scope resolution (migration 030)
@@ -630,7 +630,7 @@ Migrations live in `packages/db/migrations/` as plain `NNN_description.sql` file
 - `expiry_status`, `expiry_message` (text, nullable), `expiry_processed_at` (timestamptz, nullable) — per-host result of the expiry action (migration 026)
 - `rollback_performed` (boolean, default false)
 - `persistence_status` (text, nullable) — reboot persistence of this host after the deployment: `persisted|not_persisted|removed|unknown`; NULL = not reported (host failed before that step, or deployed by an older version) (migration 032)
-- `persistence_method` (text, nullable) — `nftables.service|netfilter-persistent|iptables-services` (migration 032)
+- `persistence_method` (text, nullable) — `nftables.service|netfilter-persistent|iptables-services|firewalld|ufw` (migration 032)
 - `persistence_message` (text, nullable) — summary plus warnings/notes, e.g. `firewalld_active: …`, `iptables_persistent_missing: …`, `unsupported_distro: …` (migration 032)
 - Primary key: `(deployment_id, host_id)`
 
@@ -907,8 +907,9 @@ Segmentra supports two deployment executors, selectable in **Admin → Deploymen
 ### Ansible
 
 - Runs `infra/ansible-runner/playbooks/apply-firewall.yml` against all target hosts in one playbook run (Ansible's parallel forks)
-- On a failed apply, a `rescue` block restores the host from that run's scoped backup (only `table inet segmentra` / the `SEGMENTRA-*` chains)
-- No lockout auto-revert (unlike SSH Direct), and the `CANARY` / `PROGRESSIVE` gates are not applied: all hosts are deployed in the same run
+- On a failed apply, a `rescue` block restores the host from that run's scoped backup (raw table/chains or native Segmentra policy objects/blocks)
+- Raw nftables/iptables have no lockout auto-revert; native firewalld/UFW use `apply-manager.yml` with a systemd rollback timer, fresh SSH connection, and strict persistence verification
+- The `CANARY` / `PROGRESSIVE` gates are not applied: all hosts are deployed in the same run
 - Requires the Ansible container (`segmentra-ansible-runner`) and the Docker socket in the API container
 - Uses `become: true` (sudo) for privileged operations; the sudo password (if any) is passed as `ansible_become_password` in a temporary `host_vars` file, passphrase-protected keys are loaded into an `ssh-agent` in the runner (see [security.md](security.md#how-secrets-are-used-when-connecting-to-hosts))
 
@@ -1005,9 +1006,9 @@ This runs the `docker` CLI command from inside the API container, which communic
 
 **Both executors:**
 - Need an account with full sudo rights (`ALL`), not root
-- Back up only Segmentra's own state (`table inet segmentra`, or the `SEGMENTRA-IN/OUT/FWD` chains and their jumps) to `/var/backups/segmentra/` before applying
+- Back up only Segmentra's own raw table/chains or native policy objects/marked blocks to `/var/backups/segmentra/` before applying
 - Roll back to that backup on failure
-- Work with nftables and iptables (see [Generated rules](#generated-firewall-rules))
+- Work with nftables, iptables, firewalld, and UFW (see [Generated rules](#generated-firewall-rules) and [native managers](firewall-managers.md))
 - Make the final state survive a reboot with the distribution's own service (see [Reboot persistence](#reboot-persistence))
 
 ---
@@ -1015,6 +1016,8 @@ This runs the `docker` CLI command from inside the API container, which communic
 ## Advanced Features
 
 ### Firewall Learning (Traffic Discovery)
+
+Learning/log-only sessions currently support raw nftables/iptables only. Native firewalld/UFW attempts are rejected before changing live or permanent ACLs. Ordinary host/gateway policy simulation and drift/compliance support native managers.
 
 Firewall Learning is a powerful feature that helps administrators discover the correct firewall rules by observing actual network traffic patterns. This is particularly useful when deploying firewall policies to new systems or when you need to understand what traffic should be allowed without accidentally blocking legitimate communication.
 
@@ -1278,9 +1281,9 @@ Before deploying, verify that hosts are ready to receive firewall policies.
 #### Checks Performed
 
 1. **Firewall Backend Detection**:
-   - Checks for `nft` command availability
-   - Checks for `iptables` command availability
-   - Determines preferred backend (nftables preferred)
+   - Uses privileged SSH to check active firewalld/UFW first; two active managers are an error
+   - Falls back to installed nftables, then iptables, only when no native manager is active
+   - Native readiness verifies Python 3, systemd, manager capabilities, IPv6 requirements, and absence of an old raw Segmentra policy
 
 2. **Version Detection**:
    - Reads `nft --version` if available
@@ -1308,7 +1311,7 @@ Before deploying, verify that hosts are ready to receive firewall policies.
 {
   hostname: string;
   ready: boolean;
-  backend: 'nftables' | 'iptables' | 'unknown';
+  backend: 'nftables' | 'iptables' | 'firewalld' | 'ufw' | 'unknown';
   nftVersion?: string;
   iptablesVersion?: string;
   sudoAccess: boolean;
@@ -1752,9 +1755,13 @@ Segmentra supports multiple firewall backends to accommodate different Linux dis
 
 ### Firewall Backend Options
 
-- **`auto`**: Detected over SSH during the deployment's checking phase (same check as **Check Readiness**); the result is stored on the host. If detection fails, `nftables` is used. Hosts without a backend value are treated as `auto`.
-- **`nftables`**: Uses nftables (modern Linux firewall, preferred). Used by default on RHEL 8+, Ubuntu 20.04+, and other modern distributions.
+- **`auto`**: Detected over privileged SSH during the deployment's checking phase (same check as **Check Readiness**); active firewalld/UFW take precedence over installed nftables/iptables. The result is stored on the host. Detection failure fails the host's deployment; two active managers are an error. Hosts without a backend value are treated as `auto`.
+- **`nftables`**: Uses nftables directly, with a dedicated Segmentra table.
 - **`iptables`**: Uses iptables (legacy Linux firewall). Required for older systems that don't support nftables.
+- **`firewalld`**: Uses permanent native policies and ordered rich rules, requiring the native policy API and nftables backend. Supports all-interface rules; unsupported interface scopes and learning mode fail before changing rules.
+- **`ufw`**: Uses marked blocks in UFW's IPv4/IPv6 before-rules framework. Requires active UFW with IPv6 enabled; learning mode is rejected.
+
+See [native firewall managers](firewall-managers.md) for permanent storage, boot-service verification, rollback/removal, drift handling, native verdict semantics, and test scope.
 
 ### How Mixed Backend Deployments Work
 
@@ -1763,15 +1770,19 @@ When deploying policies to multiple hosts with different firewall backends (e.g.
 1. **Individual Policy Compilation**: Each host's policy is compiled separately based on its configured `firewall_backend` field:
    - Hosts with `nftables` (or `auto` detected as nftables) → `.nft` file
    - Hosts with `iptables` → `.iptables` file (IPv4) plus `.ip6tables` (IPv6) when needed
+   - Hosts with `firewalld` → `.firewalld.json` manifest containing permanent native policy XML
+   - Hosts with `ufw` → `.ufw.json` manifest containing both family before-rule fragments
 
 2. **Separate Policy Files**: Each host receives its own policy file with the appropriate format:
    - `hostname.nft` for nftables hosts
    - `hostname.iptables` for iptables hosts
+   - `hostname.firewalld.json` / `hostname.ufw.json` for native-manager hosts
 
 3. **Unified Deployment**: All hosts are included in a single deployment operation:
    - The Ansible inventory includes all hosts regardless of backend
    - Each host's inventory entry points to its specific policy file format
    - The playbook applies each host's file with the matching tool (`nft -f`, or `iptables-restore --noflush` / `ip6tables-restore --noflush`); the SSH Direct executor does the same per host
+   - Native managers use the one-shot Python helper; Ansible delegates to `apply-manager.yml`, while SSH Direct uploads and executes the same native artifact
 
 4. **Independent Status Tracking**: Each host's deployment status is tracked independently, so you can see which hosts succeeded or failed regardless of their firewall backend.
 
@@ -1805,6 +1816,7 @@ web-04 ansible_host=... segmentra_policy_file=/bundles/xxx/host_rules/web-04.nft
 - **Use `auto` for most hosts**: the backend is detected on the first deployment (or readiness check) and stored.
 - **Set `iptables` explicitly**: Only when you know a host requires iptables (older systems, compatibility requirements).
 - **Set `nftables` explicitly**: When you want to ensure nftables is used even if the system might support both.
+- **Use native `firewalld`/`ufw` on manager-controlled hosts**: preserve native boot persistence instead of adding a conflicting raw boot service. Remove any old raw Segmentra policy before switching.
 
 ### Generated Firewall Rules
 
@@ -1816,6 +1828,8 @@ Segmentra only manages its own objects, so rules of Docker, Kubernetes, fail2ban
 - **Backups/restores** (rollback, lockout auto-revert, Firewall Learning, policy tests, `scripts/restore-previous-policy.sh`) cover only this table / these chains and jumps. Hosts last deployed by an older version that replaced the whole iptables `filter` table are restored that way once; redeploying moves them to the chain design.
 
 ### Reboot persistence
+
+Native firewalld/UFW deployments use permanent manager configuration and require successful boot-service and live-state verification; persistence failure triggers rollback. The following distribution-specific shell-script behavior describes the raw nftables/iptables backends. See [native firewall managers](firewall-managers.md) for the native-manager paths.
 
 Deployments load rules into the running kernel only; persistence uses the **distribution's own mechanism**, so nothing of Segmentra runs at boot. The host scripts (`segmentra-nft.sh` / `segmentra-iptables.sh`, modes `persist`, `unpersist`, `check`; shared shell in `packages/executor/src/persist-scripts.ts`) detect the distribution from `/etc/os-release` (`ID` / `ID_LIKE`) and copy Segmentra's **live** state into the boot configuration:
 
@@ -2377,7 +2391,7 @@ Segmentra encrypts sensitive data stored in the database: SSH private keys, key 
 - SSH Direct runs sequentially (one host at a time); Ansible runs hosts in parallel.
 - Deployment timeout is fixed at 10 minutes per host.
 - No rollback button: rollback happens automatically on failure (and via the lockout auto-revert with SSH Direct); `scripts/restore-previous-policy.sh` restores a host manually.
-- Firewall backend `auto` is detected over SSH before compilation; if detection fails, `nftables` is used. The detected backend is stored on the host.
+- Firewall backend `auto` is detected over privileged SSH before compilation; active native managers take precedence. Detection failure fails the host instead of guessing. The detected backend is stored on the host.
 - Drift detection requires SSH access and sudo. Hosts without an applicable SSH credential cannot be checked.
 - Scheduled deployments use a simple datetime comparison: no recurrence or calendar rules.
 - SSH credentials: no per-environment scope and no fallback to another credential when the chosen one fails (see [SSH credential resolution](#ssh-credential-resolution)).

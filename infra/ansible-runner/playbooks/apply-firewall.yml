@@ -26,6 +26,10 @@
   # (xtables-compat expressions), and replaying it would clobber their tables anyway.
 
   tasks:
+    - name: Deploy through the native firewall manager
+      include_tasks: apply-manager.yml
+      when: (segmentra_backend | default('')) in ['firewalld', 'ufw']
+
     - name: Generate timestamp
       set_fact:
         segmentra_ts: "{{ lookup('pipe', 'date +%Y-%m-%dT%H-%M-%S') }}"

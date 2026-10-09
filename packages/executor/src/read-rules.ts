@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
-import type { SshHostInfo } from './types.js';
+import type { SshHostInfo, FirewallBackend } from './types.js';
+import { DETECT_FIREWALL_BACKEND, isManagedBackend, managerCommand } from './manager-scripts.js';
 import { runSshCommand, runSshSudo, sudoSh, type SshConnectionOptions } from './ssh-options.js';
 
 export interface ReadRulesResult {
@@ -7,7 +8,7 @@ export interface ReadRulesResult {
   success: boolean;
   rulesText: string;
   rulesHash: string;
-  backend: 'nftables' | 'iptables';
+  backend: FirewallBackend;
   error?: string;
   /**
    * False when Segmentra's table (nft) or SEGMENTRA-IN chain / INPUT+OUTPUT jumps
@@ -33,9 +34,9 @@ export async function readHostFirewallRules(host: SshHostInfo, opts: SshConnecti
   const run = (cmd: string) => runSshCommand(host, cmd, opts);
 
   // Detect backend if auto
-  let backend: 'nftables' | 'iptables' = host.backend === 'iptables' ? 'iptables' : 'nftables';
-  if (host.backend === 'auto') {
-    const detectResult = await run('command -v nft >/dev/null 2>&1 && echo nft || echo iptables');
+  let backend: FirewallBackend = host.backend && host.backend !== 'auto' ? host.backend : 'nftables';
+  if (!host.backend || host.backend === 'auto') {
+    const detectResult = await runSshSudo(host, DETECT_FIREWALL_BACKEND, opts);
     if (detectResult.exitCode !== 0) {
       return {
         hostname: host.hostname,
@@ -46,7 +47,11 @@ export async function readHostFirewallRules(host: SshHostInfo, opts: SshConnecti
         error: detectResult.stderr || 'Failed to detect firewall backend'
       };
     }
-    backend = detectResult.stdout.trim() === 'nft' ? 'nftables' : 'iptables';
+    const detected = detectResult.stdout.trim();
+    if (!['nftables', 'iptables', 'firewalld', 'ufw'].includes(detected)) {
+      return { hostname: host.hostname, success: false, rulesText: '', rulesHash: '', backend, error: 'No supported firewall backend detected' };
+    }
+    backend = detected as FirewallBackend;
   }
 
   const result = await runSshSudo(host, liveRulesReadScript(backend), opts);
@@ -83,7 +88,8 @@ export const IP6TABLES_SECTION_MARKER = '# ---- segmentra: ip6tables-save ----';
  * followed by `ip6tables-save` (when available) after IP6TABLES_SECTION_MARKER. Exit status
  * is that of nft / iptables-save. Run it with runSshSudo (honours the host's sudo mode).
  */
-export function liveRulesReadScript(backend: 'nftables' | 'iptables'): string {
+export function liveRulesReadScript(backend: FirewallBackend): string {
+  if (isManagedBackend(backend)) return managerCommand(backend, 'read');
   if (backend === 'nftables') return 'nft list ruleset 2>&1';
   return (
     `iptables-save 2>&1 || exit $?; ` +
@@ -92,7 +98,7 @@ export function liveRulesReadScript(backend: 'nftables' | 'iptables'): string {
 }
 
 /** liveRulesReadScript wrapped in passwordless sudo (`sudo -n sh -c ...`). */
-export function liveRulesReadCommand(backend: 'nftables' | 'iptables'): string {
+export function liveRulesReadCommand(backend: FirewallBackend): string {
   return sudoSh(liveRulesReadScript(backend));
 }
 
@@ -148,7 +154,12 @@ function iptablesSegmentraLines(section: string): {
  * Kubernetes, fail2ban, ...) are ignored. `present` is false when the table /
  * chain / jumps are missing.
  */
-export function extractSegmentraState(backend: 'nftables' | 'iptables', text: string): { present: boolean; normalized: string } {
+export function extractSegmentraState(backend: FirewallBackend, text: string): { present: boolean; normalized: string } {
+  if (isManagedBackend(backend)) {
+    const state = JSON.parse(text) as { backend: string; present: boolean };
+    if (state.backend !== backend) throw new Error('Native manager state backend mismatch');
+    return { present: state.present, normalized: JSON.stringify(state) };
+  }
   if (backend === 'nftables') {
     const table = extractNftTable(text);
     if (table === null) return { present: false, normalized: 'nft:table-missing' };
@@ -178,7 +189,7 @@ export function extractSegmentraState(backend: 'nftables' | 'iptables', text: st
  * Normalize a live ruleset for drift hashing: only Segmentra's own state is
  * kept (see extractSegmentraState), so changes by other tools are not drift.
  */
-export function normalizeRulesText(text: string, backend: 'nftables' | 'iptables'): string {
+export function normalizeRulesText(text: string, backend: FirewallBackend): string {
   return extractSegmentraState(backend, text).normalized;
 }
 
@@ -187,6 +198,6 @@ export function normalizeRulesText(text: string, backend: 'nftables' | 'iptables
  * identical to readHostFirewallRules().rulesHash. Prefixed with "v2:" so hashes
  * of the older full-ruleset scheme are distinguishable.
  */
-export function hashLiveRuleset(backend: 'nftables' | 'iptables', text: string): string {
+export function hashLiveRuleset(backend: FirewallBackend, text: string): string {
   return LIVE_HASH_VERSION_PREFIX + crypto.createHash('sha256').update(normalizeRulesText(text, backend), 'utf8').digest('hex');
 }

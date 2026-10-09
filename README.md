@@ -4,7 +4,7 @@
 
 # Segmentra
 
-***Segmentra*** is an on-prem, web-based **fleet firewall & microsegmentation management** tool for Linux servers. It lets security and infrastructure teams centrally define **host firewall policies** (allow/deny), and deploy them at scale to nftables/iptables, via SSH or Ansible Playbook. It extends enforcement to **Kubernetes containers** and **OT/IoT devices** through gateway firewalls.
+***Segmentra*** is an on-prem, web-based **fleet firewall & microsegmentation management** tool for Linux servers. It lets security and infrastructure teams centrally define **host firewall policies** (allow/deny), and deploy them at scale to nftables, iptables, firewalld, and UFW, via SSH or Ansible Playbook. It extends enforcement to **Kubernetes containers** and **OT/IoT devices** through gateway firewalls.
 
 The platform enables:
 - **Inventory creation and auto-tagging**
@@ -98,14 +98,17 @@ Click an image to open it full size.
 - **Separation of Duties** — a policy version cannot be approved by the user who created, edited or submitted it; high-risk policies require a different approver even for admins
 
 ### Inventory Management
-- **Host Management** — add Linux servers with management IPs, SSH ports, firewall backend selection (nftables/iptables/auto)
+- **Host Management** — add Linux servers with management IPs, SSH ports, firewall backend selection (nftables/iptables/firewalld/ufw/auto)
 - **Tags & VLANs** — organize hosts by custom tags and VLAN membership; VLANs also serve as OT/IoT zones. A tag or VLAN that policy or template rules still reference can't be deleted
 - **Auto-Tagging Rule Engine** — define criteria (hostname regex, CIDR ranges, OS family, VLAN, existing tags) with AND/OR logic to automatically classify hosts; evaluates every 5 minutes and on-demand
 - **Automated Discovery** — discovery profiles scan IPv4 networks (CIDRs and/or VLAN subnets, max /20 per network and 8192 addresses per run) for SSH, log in with existing or new SSH credentials (read-only fact collection: hostname, OS, nft/iptables, sudo) and import new hosts with a default tag (`new-server`); manual **Run Now** or on a schedule, with per-address run history
 - **System Tags** — `iot-gateway` and `bastion` are protected tags that cannot be deleted
 - **Interface Configuration** — define network interfaces with roles (data, management, backup, etc.)
 - **Bulk Operations** — CSV import, bulk tag/VLAN assignment, bulk enable/disable
-- **Host Readiness Check** — verify nftables/iptables, sudo access, and kernel support before deployment
+- **Host Readiness Check** — detect active firewall managers and verify firewall tools, sudo access, and reboot persistence before deployment
+- **Native Firewall Managers** — persistent firewalld policy objects and UFW custom-rule blocks, loaded by the native boot service without a Segmentra agent. Persistence failure fails native-manager deployment. See [requirements and limits](docs/firewall-managers.md).
+
+Supported Linux backends are **nftables, iptables, firewalld, and UFW**. Select one in Inventory or use `auto`, which prefers an active native manager. Firewalld/UFW support enforced ACL deployment, removal, rollback, IPv4/IPv6, and drift/compliance. Native learning/log-only sessions are not yet supported.
 - **Compliance & Drift Detection** (agentless) — SSH-based comparison of current firewall rules vs. last deployed policy hash
 - **Policy Visualization** — interactive SVG diagrams showing connections per host (color-coded allow/deny)
 
@@ -224,7 +227,7 @@ This is the typical path from an empty installation to enforced firewall rules. 
 
 ### 2. Inventory: tell Segmentra what you have (`operator` or `admin`)
 
-- **Hosts:** add hosts one by one or with **Bulk Import** (CSV). Each host has a management IP, SSH port and firewall backend (`nftables`, `iptables` or auto).
+- **Hosts:** add hosts one by one or with **Bulk Import** (CSV). Each host has a management IP, SSH port and firewall backend (`nftables`, `iptables`, `firewalld`, `ufw` or auto).
 - **Check Readiness:** confirms Segmentra can log in over SSH, use `sudo`, and find the firewall tool.
 - **Tags and VLANs:** group hosts (e.g. `web`, `db`) and network zones (VLANs with subnets). Rules can target whole groups instead of single IPs.
 - **Auto-Tagging:** tag hosts automatically by hostname, IP, OS and so on. Use **Preview Matches** before saving.
@@ -349,7 +352,7 @@ TypeScript monorepo:
 |-----------|----------|---------|
 | **API** | `apps/api` | Express + PostgreSQL backend |
 | **UI** | `apps/web` | React (Vite) frontend |
-| **Compiler** | `packages/compiler` | Policy → nftables/iptables rules |
+| **Compiler** | `packages/compiler` | Policy → nftables/iptables rules or native firewalld/UFW artifacts |
 | **Executor** | `packages/executor` | SSH Direct + Ansible deployment |
 | **DB** | `packages/db` | PostgreSQL migrations + seed scripts |
 
@@ -393,17 +396,22 @@ Segmentra only manages its own firewall objects and leaves rules created by othe
 - **nftables:** everything lives in `table inet segmentra`, which is replaced atomically on each deploy. Other tables (Docker, Kubernetes, fail2ban) are not touched.
 - **iptables / ip6tables:** rules live in the dedicated chains `SEGMENTRA-IN` and `SEGMENTRA-OUT`, applied with `iptables-restore --noflush` and reached from a single jump at the top of `INPUT` / `OUTPUT`. `DOCKER*`, `KUBE-*` and `f2b-*` chains, the `FORWARD` chain (except the one jump described below for gateways) and the built-in chain policies are not modified. The default inbound drop is the last rule of `SEGMENTRA-IN`. Allowed traffic leaves Segmentra's chain with `RETURN` (not `ACCEPT`), so rules after the jump still apply, such as fail2ban bans or your own `DROP`s. This matches nftables, where an accept in `table inet segmentra` doesn't override a drop in another table. If you set the `INPUT` policy to `DROP` yourself, you also need your own accept rules for traffic Segmentra allows.
 - **Backend tools:** a host configured for iptables only needs `iptables-restore`, and one configured for nftables only needs `nft`. Having both installed is fine; modern distributions ship `iptables-nft` alongside `nft`.
+- **Native firewalld/UFW:** Segmentra writes permanent native policy objects/custom-rule blocks, verifies live rules and boot-service enablement, and includes both live and saved state in drift checks. Native allows are authoritative within the manager; see [native firewall managers](docs/firewall-managers.md) for coexistence, prerequisites, and scope/learning limitations.
 - **Upgrading hosts deployed by older versions** (which replaced the whole iptables filter table): the first deploy removes the old Segmentra rules from `INPUT`/`OUTPUT` and resets the `INPUT`/`OUTPUT` policy to `ACCEPT` (only if Segmentra had set it to `DROP`). Rules that can't be positively identified as Segmentra's are left in place and reported as warnings in the deployment output. `FORWARD` is left at `DROP` when Docker or Kubernetes chains are present.
 
 - **Forwarded traffic (IoT/OT gateways):** forwarding is filtered only on hosts whose policy has FORWARD rules or that protect IoT devices (assets assigned to the host on the OT/IoT page). With nftables this is a `chain forward` inside `table inet segmentra` (policy `accept`). With iptables it is a `SEGMENTRA-FWD` chain reached from a single jump at the top of `FORWARD`. Only traffic *to protected devices* is dropped unless a FORWARD rule allows it. Other forwarded traffic, including Docker's, passes as before. Allowed traffic leaves `SEGMENTRA-FWD` with `RETURN`, so `DOCKER-USER` and other `FORWARD` rules after the jump still apply. Deploying a version without forwarding, or removing the policy, deletes the forward chain and its jump. On other hosts nothing changes.
 
-- **Reboot persistence** uses the distribution's own service and touches only Segmentra's part of its files: one `include` line plus `segmentra.nft` for nftables, or only the `SEGMENTRA-*` lines of the `*filter` section in `rules.v4`/`rules.v6` or `/etc/sysconfig/iptables`/`ip6tables`. Docker and Kubernetes chains are never written into these files (they recreate their own rules when they start). See [Persistence across reboots](#persistence-across-reboots).
+- **Reboot persistence** uses the distribution's own service and touches only Segmentra's part of its files: one `include` line plus `segmentra.nft` for nftables, only the `SEGMENTRA-*` lines of the saved filter table for iptables, permanent native policy XML for firewalld, or marked before-rule blocks for UFW. Docker and Kubernetes chains are not copied into these files. See [Persistence across reboots](#persistence-across-reboots).
 
-Drift detection only fingerprints Segmentra's own table/chains (including `SEGMENTRA-FWD` and its jump), so rule changes made by Docker, Kubernetes or fail2ban are not reported as drift.
+Drift detection only fingerprints Segmentra's own objects. Native-manager hashes cover both permanent configuration and live enforcement; unrelated administrator rules and counters are excluded.
 
 ### Persistence across reboots
 
 Deployments load the rules into the running kernel. To make them survive a reboot, Segmentra writes them into the files the **distribution's own firewall service** loads at boot. Segmentra stays agentless: no Segmentra service, timer, cron job or script runs at boot.
+
+For **firewalld**, permanent policies are stored in `/etc/firewalld/policies/segmentra-{in,out,fwd}.xml` (`fwd` only when needed) and loaded by `firewalld.service`. For **UFW**, marked blocks are stored in `/etc/ufw/before.rules` and `/etc/ufw/before6.rules`, loaded by enabled UFW and `ufw.service`. Both require Python 3, systemd, and an already active manager. Deployment verifies live enforcement, permanent state, and boot-service enablement; persistence failure triggers rollback. Native reloads are required, and firewalld operations refuse unrelated unsaved runtime changes. See [native firewall managers](docs/firewall-managers.md).
+
+The following table and service behavior apply to the **raw nftables/iptables backends**, not native firewalld/UFW:
 
 | | Debian, Ubuntu | RHEL, Rocky, AlmaLinux (Fedora, CentOS Stream) |
 |---|---|---|
@@ -425,14 +433,15 @@ Deployments load the rules into the running kernel. To make them survive a reboo
 - **sudo on target hosts.** Segmentra is agentless and runs every root step as `sudo sh -c '…'`, so the account needs **full sudo rights** (`ALL`): a sudoers rule limited to `nft` / `iptables` is not enough. sudo may ask for a password (the login password or a separate sudo password, set per credential), or be passwordless. Not supported: sudoers with `Defaults requiretty` for the account (readiness checks and deployments report it with a clear error; disable it for that account), privilege escalation other than sudo (`su`, `doas`, `pbrun`), and sudo configured to ask for the root or target user's password via `rootpw` / `targetpw` unless you enter that password as the separate sudo password.
 - **SIEM forwarding.** Notification webhooks connect only to the exact address that was validated, so DNS rebinding doesn't work against them. Syslog/SIEM destinations configured by admins don't get the same connect-time address check.
 - **Sessions after a password change.** Changing or resetting a password does not end existing sessions: JWTs stay valid until they expire (up to 12 hours). Deactivating the user blocks them immediately (roles are also re-read on every request), but reactivating the account within those 12 hours makes its unexpired tokens valid again.
-- **Reboot persistence on RHEL-family hosts with firewalld.** firewalld conflicts with `nftables.service` and `iptables-services`, and Segmentra neither disables it nor translates policies into firewalld zones/policies. While firewalld is active or enabled, Segmentra's rules work at runtime (next to firewalld's own table, whose rejects still apply) but are gone after a reboot until the next deployment; deployments and the readiness check warn (`firewalld_active`). Disable firewalld and let Segmentra enable `nftables.service` (or install `iptables-services`) to persist them.
-- **Reboot persistence on other distributions.** Only Debian, Ubuntu and RHEL-family distributions (detected from `/etc/os-release`) are supported. On Alpine, SUSE, Arch and others the rules are applied but not persisted (`unsupported_distro` warning). Missing packages (`nftables` with its systemd unit, `iptables-persistent`, `iptables-services`) are reported, never installed. If the saved iptables file of the distribution ends `INPUT` with its own catch-all `REJECT`/`DROP` (RHEL's stock `/etc/sysconfig/iptables` does), that rule also applies after a reboot to traffic Segmentra allows; this is reported as a note.
+- **Raw-backend persistence with firewalld.** Raw nftables/iptables persistence still conflicts with active/enabled firewalld and reports `firewalld_active`. Use the supported native `firewalld` backend to persist ACLs through firewalld itself; remove any old raw Segmentra policy before switching.
+- **Native-manager limits.** Firewalld requires its native policy API, nftables backend, and `ALL_INTERFACES` for non-forward rules. UFW requires IPv6 enabled and both family save/restore tools. Learning/log-only sessions are rejected without changing the ACL. Native prerequisites and persistence checks fail deployment instead of silently applying runtime-only rules.
+- **Raw-backend persistence on other distributions.** Distribution-specific raw persistence supports Debian, Ubuntu and RHEL-family hosts. Other distributions report `unsupported_distro`. Native firewalld/UFW persistence instead depends on the manager/service prerequisites; this is not certification of every distribution. Missing packages are reported, never installed. Saved administrator catch-all REJECT/DROP rules can still block raw-backend allows after reboot.
 - **Docker socket.** The Ansible executor runs `docker exec` and therefore needs `/var/run/docker.sock`, which is root-equivalent on the Docker host. SSH-executor-only installations can remove the mount.
 - **Ansible executor:**
   - It needs **Python on the target hosts** (readiness warns if it's missing).
   - It deploys all hosts in one run: canary and progressive modes have no effect.
-  - It has no lockout auto-revert. A policy that cuts off SSH is detected and reported as FAILED ("possible lockout"), but not undone automatically.
-  - Use SSH Direct for these protections.
+  - Raw nftables/iptables deployments have no lockout auto-revert. Native firewalld/UFW deployments schedule a systemd rollback, reconnect over SSH, and require persistence verification before cancelling it.
+  - The native-manager Ansible path is syntax-checked but still needs end-to-end testing on systemd targets. SSH Direct native deployment was tested live.
 - **`scripts/restore-previous-policy.sh`** needs SSH key or agent login and passwordless sudo on the hosts (it reports clearly when sudo asks for a password).
 
 ---
@@ -446,7 +455,8 @@ Everything below was exercised against Docker containers. The core workflow went
 - **Core workflow (web UI), on Alpine containers with iptables and nftables:** inventory, policy sets and versions, approvals, deployments, drift, expiry REMOVE and REVERT, simulator, topology, templates, OT/IoT, security audit, SIEM syslog, webhooks and role-based access. The automated Docker SSH integration test also passes.
 - **Real distributions:** Debian 12, Ubuntu 24.04 and Rocky Linux 9.3, each running its stock packages and PAM-based sudo with a password:
   - discovery, readiness, nftables and iptables deployments, drift and expiry REMOVE;
-  - **reboot persistence** through each OS's own service. Restarting a systemd container wipes the firewall like a reboot; the rules came back, saved admin rules stayed byte-identical, and removal cleaned up. Rocky with firewalld running is correctly reported as not persisted.
+  - **reboot persistence** through each OS's own service. In the raw-backend systemd-container tests the rules came back, saved admin rules stayed byte-identical, and removal cleaned up. Raw deployments on Rocky with firewalld running correctly report their persistence conflict; this does not describe the new native firewalld backend.
+- **Native firewalld and UFW, Ubuntu 24.04 containers on Docker Desktop (2026-10-09):** production SSH readiness/auto-detection, deployment, readback, removal, IPv4/IPv6 allowed/blocked TCP traffic, native reload, restart persistence, live drift, scoped rollback, and administrator-rule preservation passed. Unsupported learning attempts left the enforced ACL unchanged. The containers use a test-only systemctl wrapper and the actual native managers; no Segmentra code reapplies rules at startup. This is not a full systemd VM/server reboot test. Reproduce with `npm run test:integration:firewall-managers`; add `-- --keep` to retain containers and inspect their PASS logs.
 - **Credentials:**
   - private keys (ed25519, and RSA in PEM format) with and without a passphrase, and password login;
   - sudo with no password, with the login password, or with a separate password;
@@ -492,7 +502,8 @@ Everything below was exercised against Docker containers. The core workflow went
 - **Microsoft Active Directory itself, and LDAPS with a real certificate.** Only OpenLDAP was tested.
 - **The real AbuseIPDB service**, as opposed to the mock, and real Slack workspaces.
 - **Hosts that log only to journald (no rsyslog).** Firewall Learning reads the rsyslog file, so such hosts capture no flows. FORWARD traffic on gateways is not analyzed by Learning or Policy Impact Analysis, by design.
-- **RHEL with SELinux enforcing and firewalld running**, and SUSE, Arch, older releases and Alpine. Persistence reports `unsupported_distro` on the last group.
+- **Native-manager full systemd VM/server reboots, native Ansible end-to-end, and native gateway forwarding traffic.** Host TCP enforcement and container restarts were tested; native gateway compilation has regression coverage.
+- **RHEL with SELinux enforcing and native firewalld**, and SUSE, Arch, older releases and Alpine. The raw-backend persistence path reports `unsupported_distro` outside Debian/Ubuntu/RHEL families; native managers have their own prerequisites.
 - **ECDSA and PKCS#8-encrypted keys** on a live host (they pass validation), and OpenSSH clients older than 8.4.
 - **The Windows scripts were not run on Windows.** `start.bat` was only reviewed.
 - **Real OT protocols** beyond a TCP test listener on gateways.
@@ -520,7 +531,7 @@ See also [Known Limitations](#known-limitations) and the [OT/IoT guide](docs/iot
 - **Microsoft Active Directory** (only OpenLDAP was tested), and LDAPS with a real certificate.
 - **The real AbuseIPDB service and real Slack workspaces.** Both were tested against mocks.
 - **Hosts that log only to journald** (no rsyslog) for Firewall Learning and Policy Impact Analysis.
-- **RHEL with SELinux enforcing and firewalld running.** Today, persistence is reported as not possible while firewalld manages the firewall.
+- **Full systemd VM/server reboot validation for native firewalld/UFW**, native Ansible end-to-end, and RHEL with SELinux enforcing and native firewalld. Native ACL persistence is implemented; these target environments still require validation.
 - **ECDSA and PKCS#8-encrypted SSH keys** on live hosts, and OpenSSH clients older than 8.4.
 - **Running the Windows scripts on Windows** (`start.bat`, `run.ps1`, `install.ps1`, `scripts/check-db-status.ps1`). They were only parsed and reviewed.
 
@@ -533,6 +544,7 @@ See also [Known Limitations](#known-limitations) and the [OT/IoT guide](docs/iot
 | [Installation Guide](docs/installation.md) | Dev and production setup |
 | [Architecture](docs/Architecture.md) | API endpoints, database schema, RBAC matrix |
 | [User Guide](docs/guide.md) | Step-by-step usage for all features |
+| [Native Firewall Managers](docs/firewall-managers.md) | Firewalld/UFW support, permanent ACLs, prerequisites, limitations, and verification |
 | [Security: Credentials, Secrets and Hardening](docs/security.md) | How credentials are encrypted, the encryption key, who can access them, and how to harden a production install |
 | [OT/IoT Guide](docs/iot.md) | IoT microsegmentation with gateway model |
 | [Gateway Setup](docs/gateway-setup-guide.md) | Linux gateway firewall configuration |

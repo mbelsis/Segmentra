@@ -152,7 +152,7 @@ Also verified:
 
 1. **Prepare the gateway** (Linux): IP forwarding, routing, firewall tool, SSH user with sudo. See the [Gateway Setup Guide](gateway-setup-guide.md).
 2. **Store credentials:** **Admin → SSH Credentials**, a key or password for the gateway's SSH user. Use a global credential, or scope one to the gateway (tag `iot-gateway`, its VLAN or the host itself). Credentials are encrypted at rest; see [security.md](security.md).
-3. **Inventory → Hosts:** add the gateway (management IP, SSH port, firewall backend `nftables` or `iptables`) and give it the tag **`iot-gateway`**. Optionally create VLANs for your OT zones (**Inventory → VLANs**). Run **Check Readiness**.
+3. **Inventory → Hosts:** add the gateway (management IP, SSH port, firewall backend `auto`, `nftables`, `iptables`, `firewalld`, or `ufw`) and give it the tag **`iot-gateway`**. Native-manager prerequisites and limits are in [firewall-managers.md](firewall-managers.md). Optionally create VLANs for your OT zones (**Inventory → VLANs**). Run **Check Readiness**.
 4. **OT/IoT → Assets:** register each device with its **IP address** and assign it to the gateway(s) under "Protecting Gateway(s)". The **Gateways** tab lists, per gateway, the protected devices and the number of FORWARD rules in the currently deployed version.
 5. **Policy Sets → + New Policy Set:** scope it to TAG `iot-gateway` (all gateways) or to a host list (one gateway).
 6. **New version → + Add Rule:** choose direction **FORWARD (through gateway)**, then a source and a **Destination Type** (`IoT device`, `CIDR`, `VLAN`, `TAG`, `HOST`) and **Destination Value**. Add one rule per allowed flow; anything else to the protected devices is denied. Add IN rules only for services on the gateway itself. To preview the compiled ruleset for a gateway, including the forward chain, call `GET /api/policy-versions/:versionId/render/host/:hostId` (API only; there is no UI button for this).
@@ -180,7 +180,7 @@ Also verified:
 
 - **IP forwarding** enabled (`net.ipv4.ip_forward=1`; `net.ipv6.conf.all.forwarding=1` for IPv6).
 - **Routing:** traffic between IT and OT must actually pass through the gateway. Devices use the gateway's OT address as their default route (or a route to the IT subnets), and IT clients or routers route the OT subnets via the gateway. Segmentra does not configure routes.
-- `nft` (nftables backend) or `iptables-restore` / `ip6tables-restore` (iptables backend), SSH access with a key (optionally passphrase-protected) or a password, and **full `sudo` rights** for the SSH user, with or without a sudo password (Segmentra runs `sudo sh -c '…'`; set *Privilege escalation* on the credential; see [security.md](security.md#checklist)).
+- Tools for the selected backend: `nft` for nftables, `iptables-restore` / `ip6tables-restore` for iptables, or the active native firewalld/UFW manager with Python 3 and systemd. Native requirements are in [firewall-managers.md](firewall-managers.md). SSH access can use a key (optionally passphrase-protected) or password, with **full sudo rights**; see [security.md](security.md#checklist).
 - No manual forward default deny for the protected networks. See [Gateway Setup Guide, step 4](gateway-setup-guide.md#step-4-leave-forwarding-to-segmentra).
 
 ---
@@ -194,7 +194,8 @@ Also verified:
 - **Firewall Learning** logs forwarded traffic but does not generate FORWARD rule suggestions. The policy-test analyzer does not evaluate FORWARD rules.
 - **Policy templates:** FORWARD rules with destinations can be added to templates (API and template editor).
 - Kubernetes NetworkPolicy export skips FORWARD rules with a warning.
-- Switching a host's backend (nftables ↔ iptables) does not remove the rules of the previous backend. Remove the policy first (expiry REMOVE), as with any host.
+- Switching a host's backend does not migrate/remove the previous backend's policy. Remove it through its original backend first. Native readiness rejects remaining raw Segmentra objects to avoid double enforcement.
+- **Native firewalld/UFW:** gateway rules compile into native artifacts, but routed gateway traffic is not yet tested live. Learning/log-only sessions are unsupported; the learning workflow above applies only to raw nftables/iptables. Native removal deletes permanent Segmentra objects/blocks; the manager's unrelated forwarding rules remain effective.
 - **Not tested live:** IPv6 protected devices and IPv6 FORWARD rules (covered by compiler output only), the Ansible executor path with FORWARD rules (it uses the same host script as SSH Direct), REVERT expiry on a gateway, multiple gateways protecting the same device, and real OT protocols beyond a TCP listener on port 502.
 
 ---

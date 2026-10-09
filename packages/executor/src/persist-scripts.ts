@@ -119,10 +119,10 @@ drop_include() {
 `;
 
 export type PersistenceStatus = 'persisted' | 'not_persisted' | 'removed' | 'unknown';
-export type PersistenceMethod = 'nftables.service' | 'netfilter-persistent' | 'iptables-services';
+export type PersistenceMethod = 'nftables.service' | 'netfilter-persistent' | 'iptables-services' | 'firewalld' | 'ufw';
 
 export interface PersistenceFamilyResult {
-  family: 'nft' | 'iptables' | 'ip6tables';
+  family: 'nft' | 'iptables' | 'ip6tables' | 'firewalld' | 'ufw';
   status: Exclude<PersistenceStatus, 'unknown'>;
   method: PersistenceMethod | null;
   state: string;
@@ -160,9 +160,9 @@ export function parsePersistenceOutput(stdout: string): PersistenceResult {
     let m = /^SEGMENTRA_PERSIST status=(\S+) method=(\S+) distro=(\S+) family=(\S*) state=(\S+)$/.exec(line);
     if (m) {
       const status = (['persisted', 'not_persisted', 'removed'].includes(m[1]) ? m[1] : 'not_persisted') as PersistenceFamilyResult['status'];
-      const method = (['nftables.service', 'netfilter-persistent', 'iptables-services'].includes(m[2]) ? m[2] : null) as PersistenceMethod | null;
+      const method = (['nftables.service', 'netfilter-persistent', 'iptables-services', 'firewalld', 'ufw'].includes(m[2]) ? m[2] : null) as PersistenceMethod | null;
       distro = (['debian', 'rhel', 'unsupported'].includes(m[3]) ? m[3] : 'unsupported') as PersistenceResult['distro'];
-      const family = (['nft', 'iptables', 'ip6tables'].includes(m[4]) ? m[4] : 'nft') as PersistenceFamilyResult['family'];
+      const family = (['nft', 'iptables', 'ip6tables', 'firewalld', 'ufw'].includes(m[4]) ? m[4] : 'nft') as PersistenceFamilyResult['family'];
       families.push({ family, status, method, state: m[5] });
       continue;
     }

@@ -29,6 +29,20 @@ runAnsiblePlaybook({
 
 The order below is simplified; see the playbook for the exact task list.
 
+### Native firewalld/UFW path
+
+Inventory entries with `segmentra_backend=firewalld` or `segmentra_backend=ufw` delegate to `apply-manager.yml`. The bundle supplies a native JSON artifact and `segmentra_manager_script`, the one-shot Python helper. This path:
+
+1. Installs the helper and backs up only Segmentra's permanent policies or marked UFW blocks.
+2. Schedules an unattended systemd rollback before applying the ACL.
+3. Writes permanent configuration, reloads the native manager, and verifies live enforcement and boot-service enablement.
+4. Resets the SSH connection, checks reachability and persistence, and cancels the rollback only on success.
+5. Restores the scoped backup on failure; a failed restore leaves the rollback protection in place.
+
+Unlike the raw path, native persistence failures fail deployment. No Segmentra service runs at boot. Firewalld requires its native policy API/nftables backend; UFW requires IPv6 enabled. Learning/log-only sessions are unsupported. This playbook path has passed syntax checking; live native-manager tests currently cover SSH Direct, not Ansible end-to-end. See [native firewall managers](firewall-managers.md).
+
+The numbered sections below describe the raw nftables/iptables path.
+
 ### 1. **Backup Directory Creation**
 
 The playbook ensures a backup directory exists on each target host:
@@ -39,6 +53,8 @@ The playbook ensures a backup directory exists on each target host:
 ### 2. **Firewall Backend Check**
 
 The backend comes from the compiled policy file (`.nft` or `.iptables`, set by the host's `firewall_backend`). The playbook only checks that the tool it needs is installed: `nft` for nftables, `iptables-restore` for iptables. Having both installed is fine; modern distributions ship `iptables-nft` next to `nft`.
+
+Native artifacts use `.firewalld.json` or `.ufw.json` and the explicit `segmentra_backend` inventory value. Before compilation, `auto` detection prefers an active native manager and fails on conflicting managers or detection errors.
 
 ### 3. **Backup Current Rules (Segmentra state only)**
 
@@ -229,7 +245,6 @@ For Kubernetes clusters, Segmentra generates a NetworkPolicy manifest (Ingress o
 
 ### OT/IoT ACL Deployment
 
-Linux IoT/OT gateways are regular inventory hosts: their FORWARD rules are compiled into the same nftables/iptables policy and deployed by this playbook (or the SSH executor). See [iot.md](iot.md).
+Linux IoT/OT gateways are regular inventory hosts: their FORWARD rules are compiled into the host's selected nftables/iptables/firewalld/UFW artifact and deployed by this playbook (or the SSH executor). Native gateway forwarding has compiler regression coverage but still needs live routed-traffic validation. See [iot.md](iot.md).
 
 Enforcement points (switches, firewalls) are not configured by Segmentra: `POST /api/enforcement-points/:id/deploy-acl` only records an ACL with status `PENDING` for manual application on the device.
-

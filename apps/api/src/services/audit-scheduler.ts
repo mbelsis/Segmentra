@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { firewallBackend } from '@segmentra/compiler';
 
 import { restoreAuditSession, retrieveAuditLogs, type AuditSshHost } from '@segmentra/executor';
 
@@ -39,7 +40,7 @@ export function buildAuditHost(
     ip,
     port: Number(host.ssh_port) || 22,
     ...sshAuthFields(cred),
-    backend: host.firewall_backend === 'iptables' ? 'iptables' : 'nftables'
+    backend: firewallBackend(host.firewall_backend)
   };
 }
 

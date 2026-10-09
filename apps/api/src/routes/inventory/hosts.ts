@@ -180,7 +180,7 @@ const createHostSchema = z.object({
   sshPort: z.number().int().min(1).max(65535).optional(),
   environment: z.string().optional(),
   osFamily: z.string().optional(),
-  firewallBackend: z.enum(['nftables', 'iptables', 'auto']).optional(),
+  firewallBackend: z.enum(['nftables', 'iptables', 'firewalld', 'ufw', 'auto']).optional(),
   vlanId: z.string().uuid().nullable().optional(),
   tagIds: z.array(z.string().uuid()).optional().default([]),
   enabled: z.boolean().optional(),
@@ -657,7 +657,7 @@ hostsRouter.post('/bulk/import', requireRole('operator', 'admin'), async (req, r
       }
 
       const firewallBackend = backendIdx >= 0 ? (row[backendIdx]?.trim().toLowerCase() || 'auto') : 'auto';
-      if (!['nftables', 'iptables', 'auto'].includes(firewallBackend)) {
+      if (!['nftables', 'iptables', 'firewalld', 'ufw', 'auto'].includes(firewallBackend)) {
         fail(`Invalid firewall backend: ${firewallBackend}`);
         continue;
       }
@@ -766,5 +766,4 @@ hostsRouter.post('/bulk/set-enabled', requireRole('operator', 'admin'), async (r
 
   res.json({ ok: true, updated: rowCount });
 });
-
 

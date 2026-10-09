@@ -2,6 +2,14 @@
 
 This directory contains security regression checks and the Docker-based integration test flow for Segmentra's SSH deployment path.
 
+## Native Firewall Manager Checks
+
+Run `npm run test:firewall-managers` for focused compiler/helper regressions and `npm run test:integration:firewall-managers` for disposable Ubuntu Linux containers running actual firewalld and UFW. The latter needs Docker, container NET_ADMIN capability, and local OpenSSH tools. It uses temporary SSH keys and loopback-only published SSH ports to exercise the production readiness, SSH deployment, readback, and auto-detected removal paths. It also checks native reload and container-restart persistence, IPv4/IPv6 traffic enforcement, drift, rollback, post-removal traffic, and preservation of administrator rules. Learning-session and log-only compilation attempts must be rejected without changing the enforced ACL, because native-manager learning is not yet supported. Containers, their test network, temporary keys, and known-host files are removed on completion or failure.
+
+The containers use a test-only systemctl wrapper and native boot loaders on restart. This verifies persistent ACL loading without any Segmentra startup code, but does not substitute for an actual systemd VM/server reboot on each target distribution. See [native firewall managers](../docs/firewall-managers.md).
+
+Run `npm run test:integration:firewall-managers -- --keep` to leave both containers running for Docker Desktop inspection. This retains the test network and temporary SSH keys, writes results into each container's logs and `/var/backups/segmentra/test-results.log`, and redeploys the sample enforced ACL after testing removal. The runner prints the retained resource names and temporary directory; remove those resources when finished. Without `--keep`, resources are cleaned up automatically.
+
 ## Security Regression Checks
 
 Run `npm run test:security` from the repository root. This builds the API and its dependencies, then uses Node's built-in test runner without Docker or a database.

@@ -381,7 +381,7 @@ export const api = {
     status: 'compliant' | 'drifted' | 'unknown' | 'error';
     currentHash: string | null;
     expectedHash: string | null;
-    backend: 'nftables' | 'iptables';
+    backend: 'nftables' | 'iptables' | 'firewalld' | 'ufw';
     lastDeployment: {
       hash: string;
       createdAt: string;
@@ -408,7 +408,7 @@ export const api = {
   checkHostReadiness: (hostId: string) => request<{
     hostname: string;
     ready: boolean;
-    backend: 'nftables' | 'iptables' | 'unknown';
+    backend: 'nftables' | 'iptables' | 'firewalld' | 'ufw' | 'unknown';
     nftVersion?: string;
     iptablesVersion?: string;
     sudoAccess: boolean;
@@ -418,7 +418,7 @@ export const api = {
     /** Reboot persistence with the distribution's own service (only when sudo works). */
     persistence?: {
       distro: 'debian' | 'rhel' | 'unsupported' | null;
-      method: 'nftables.service' | 'netfilter-persistent' | 'iptables-services' | null;
+      method: 'nftables.service' | 'netfilter-persistent' | 'iptables-services' | 'firewalld' | 'ufw' | null;
       available: boolean;
       status: string;
       warnings: string[];
