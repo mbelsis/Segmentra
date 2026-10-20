@@ -825,7 +825,7 @@ export function TroubleshootPage() {
             results.policies.map((policy: any, idx: number) => (
               <div key={idx} style={{ marginBottom: 32, padding: 16, background: '#f9f9f9', borderRadius: 8 }}>
                 <h3 style={{ marginTop: 0 }}>
-                  {policy.policyVersion.policySetName} v{policy.policyVersion.versionNumber}
+                  {policy.policyVersion.policySetName} v{policy.policyVersion.versionNumber}{policy.current && <span className="active-rules-badge" title="The deployment whose rules are currently enforced on this host">ACTIVE NOW</span>}
                   <span style={{ marginLeft: 12, fontSize: '0.85em', fontWeight: 'normal', color: '#666' }}>
                     ({policy.policyVersion.status})
                   </span>

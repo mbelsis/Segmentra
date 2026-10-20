@@ -754,3 +754,128 @@ small {
   line-height: 1.5;
 }
 .nav-badge-warn { background: #a63d2f; }
+
+/* Active rules panel (Inventory -> host -> Active Rules) */
+.active-rules-modal {
+  width: 1100px;
+  max-width: 95vw;
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.active-rules-body {
+  padding: 16px 24px 24px;
+  overflow: auto;
+}
+
+.active-rules-section {
+  margin-bottom: 24px;
+}
+
+.active-rules-section h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #292018;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.active-rules-section h4 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #3d2e1e;
+}
+
+.active-rules-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 6px 24px;
+  font-size: 13.5px;
+  margin-bottom: 8px;
+}
+
+.active-rules-label {
+  display: inline-block;
+  min-width: 110px;
+  color: #78644e;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.active-rules-muted {
+  color: #8a7a66;
+  font-size: 12.5px;
+}
+
+.active-rules-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.active-rules-table {
+  margin-top: 8px;
+}
+
+.active-rules-action {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.active-rules-action.allow {
+  background: #e3f1e4;
+  color: #2e7d32;
+}
+
+.active-rules-action.deny {
+  background: #fbe4e1;
+  color: #b3261e;
+}
+
+.active-rules-badge {
+  display: inline-block;
+  margin-left: 10px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: #e3f1e4;
+  color: #2e7d32;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+}
+
+.active-rules-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+@media (max-width: 900px) {
+  .active-rules-columns {
+    grid-template-columns: 1fr;
+  }
+}
+
+.active-rules-pre {
+  background: #2b2520;
+  color: #efe8dc;
+  padding: 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre;
+}

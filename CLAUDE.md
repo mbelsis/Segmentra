@@ -32,6 +32,7 @@ npm run dev             # Start API only (runs/watches apps/api/dist/index.js �
 npm run lint            # Lint all workspaces (only apps/web has a real ESLint config)
 npm run db:migrate      # Run database migrations (packages/db/scripts/migrate.js -> node-pg-migrate)
 npm run db:seed         # Seed RBAC roles, system tags and the initial admin user
+npm run db:demo         # Load the sample dataset (packages/db/demo/demo-data.sql; idempotent, refuses NODE_ENV=production)
 npm run test:integration:ssh-docker   # Docker-based SSH deployment integration test
 
 # Workspace-specific
@@ -70,6 +71,10 @@ Policy version approved → deployment created → compiler generates per-host r
 ### Kubernetes
 
 `apps/api/src/routes/kubernetes.ts` generates NetworkPolicy manifests from approved policy versions (`ipBlock` peers; TAG sources also yield `namespaceSelector` + `podSelector` peers for workloads mapped to the tag) and, with stored cluster credentials, applies/checks/removes them through `apps/api/src/services/k8s-client.ts` (a small HTTPS client; server-side apply; kubeconfig, bearer-token and native EKS/GKE/AKS logins via `k8s-cloud-auth.ts`, which mints tokens in-process and never runs exec plugins; only touches policies labelled `app.kubernetes.io/managed-by: segmentra`). Cilium ignores `ipBlock` for in-cluster pod traffic, so clusters record their CNI and generation warns. `npm run test:integration:k8s -- <kindnet|calico|cilium>` tests all of it on a kind cluster; `npm run test:k8s-auth` unit-tests the cloud token minting (needs Docker, kind, kubectl, and cilium-cli for Cilium) against a running API.
+
+### Active rules per host
+
+Inventory → host row → **Active Rules** opens `HostActiveRulesPanel` (`apps/web/src/components/`): the deployment flagged `current` by `GET /api/troubleshoot/hosts/:id/policies` (latest successful deployment not removed on expiry) with its rules in readable form, the drift status (`GET /api/compliance/hosts/:id`), and for operators the live ruleset text (`GET /api/compliance/hosts/:id/live-rules`, read over SSH with `readHostFirewallRules`) next to the expected one (`GET /api/policy-versions/:v/render/host/:id`). Older deployments are listed as history.
 
 ### Compliance reports
 

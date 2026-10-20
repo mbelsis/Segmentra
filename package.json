@@ -10,6 +10,7 @@
     "build": "npm run build -w @segmentra/shared && npm run build:self -w @segmentra/compiler && npm run build -w @segmentra/executor && npm run build:self -w @segmentra/api && npm run build -w web",
     "db:migrate": "npm run migrate:up -w @segmentra/db",
     "db:seed": "npm run seed -w @segmentra/db",
+    "db:demo": "node packages/db/scripts/load-demo.js",
     "lint": "npm run lint --workspaces --if-present",
     "test:integration:ssh-docker": "node ./tests/run-docker-ssh-integration.mjs",
     "test:security": "npm run build -w @segmentra/api && node --test tests/security-regressions.test.mjs",

@@ -8,7 +8,8 @@
     "migrate": "node-pg-migrate --help",
     "migrate:up": "node ./scripts/migrate.js up",
     "migrate:down": "node ./scripts/migrate.js down",
-    "seed": "node ./scripts/seed-roles.js"
+    "seed": "node ./scripts/seed-roles.js",
+    "demo": "node ./scripts/load-demo.js"
   },
   "dependencies": {
     "pg": "^8.11.5",

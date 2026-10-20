@@ -408,6 +408,19 @@ export const api = {
     }
   },
 
+  // Live firewall rules as currently enforced on the host (read over SSH; operator/admin)
+  hostLiveRules: (hostId: string) => request<{
+    hostId: string;
+    hostname: string;
+    success: boolean;
+    backend: 'nftables' | 'iptables' | 'firewalld' | 'ufw';
+    segmentraPresent: boolean | null;
+    rulesText: string;
+    rulesHash: string | null;
+    expectedHash: string | null;
+    error: string | null;
+    readAt: string;
+  }>(`/compliance/hosts/${hostId}/live-rules`),
   // Compliance/Drift Detection
   checkHostCompliance: (hostId: string) => request<{
     hostId: string;

@@ -58,88 +58,81 @@ After approval the version is only `APPROVED`; no rule is on any host yet. An op
 Segmentra backs up each host, applies the rules over SSH or Ansible, checks it can still reach the host (and rolls back if not), and records the result per host. The version then becomes `DEPLOYED`. For **IoT gateways** this is the same flow: their policy set is deployed to the gateway. For **Kubernetes**, open the approved version and **Generate NetworkPolicy**, then **Apply** it to a cluster (also a manual step); Segmentra can check and remove what it applied.
 
 **6. Verify and operate**
-**Check Compliance** finds rules changed by hand on a host (drift), **View Visualization** shows what a host allows, **Firewall Learning** and **Policy Impact Analysis** observe real traffic, and the **Audit Log**, **Compliance Report**, **Notifications** and **Integrations** (SIEM) give you the trail and the alerts. Details of every step, with roles, are in the [User Journey](#user-journey).
+**Active Rules** shows, per host, the policy version and rules enforced right now, its drift status and the live ruleset next to the expected one; **Check Compliance** finds rules changed by hand on a host (drift), **View Visualization** draws what a host allows, **Firewall Learning** and **Policy Impact Analysis** observe real traffic, and the **Audit Log**, **Compliance Report**, **Notifications** and **Integrations** (SIEM) give you the trail and the alerts. Details of every step, with roles, are in the [User Journey](#user-journey).
 
 ---
 
 ## Screenshots
 
-Click an image to open it full size.
+Click an image to open it full size. The screenshots show the sample dataset that ships with the repository: load it with `npm run db:demo` after the migrations and the seed (see [Demo data](#demo-data-optional)) to get the same hosts, policies, OT devices and deployments on your own installation.
 
 <table>
   <tr>
     <td align="center" width="33%">
-      <a href="screehsots/01-dashboard.png"><img src="screehsots/01-dashboard.png" alt="Dashboard" width="100%"></a><br>
+      <a href="docs/screenshots/01-dashboard.png"><img src="docs/screenshots/01-dashboard.png" alt="Dashboard" width="100%"></a><br>
       <b>Dashboard</b><br>
-      <sub>Deployment statistics, managed hosts, pending approvals and the latest security audit</sub>
+      <sub>Deployment statistics, managed hosts, IoT assets, pending approvals and the latest security audit</sub>
     </td>
     <td align="center" width="33%">
-      <a href="screehsots/02-policy-sets.png"><img src="screehsots/02-policy-sets.png" alt="Policy Sets" width="100%"></a><br>
+      <a href="docs/screenshots/02-policy-sets.png"><img src="docs/screenshots/02-policy-sets.png" alt="Policy Sets" width="100%"></a><br>
       <b>Policy Sets</b><br>
-      <sub>Policies with their scope (tag, VLAN or host list) and version status</sub>
+      <sub>Policies with their scope (tag, VLAN or host list) and the status of every version</sub>
     </td>
     <td align="center" width="33%">
-      <a href="screehsots/03-policy-templates.png"><img src="screehsots/03-policy-templates.png" alt="Policy Templates" width="100%"></a><br>
-      <b>Policy Templates</b><br>
-      <sub>Reusable rule sets, optionally auto-applied when a host gets a tag</sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="33%">
-      <a href="screehsots/04-inventory.png"><img src="screehsots/04-inventory.png" alt="Inventory" width="100%"></a><br>
-      <b>Inventory</b><br>
-      <sub>Hosts with tags, VLAN, firewall backend, effective SSH credential and compliance</sub>
-    </td>
-    <td align="center" width="33%">
-      <a href="screehsots/05-topology.png"><img src="screehsots/05-topology.png" alt="Topology" width="100%"></a><br>
-      <b>Topology</b><br>
-      <sub>Draw allowed and denied flows between groups and generate policies from them</sub>
-    </td>
-    <td align="center" width="33%">
-      <a href="screehsots/06-troubleshoot.png"><img src="screehsots/06-troubleshoot.png" alt="Troubleshoot" width="100%"></a><br>
-      <b>Troubleshoot</b><br>
-      <sub>Firewall Learning (log-only traffic discovery) and the communication simulator</sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="33%">
-      <a href="screehsots/07-policy-impact-analysis.png"><img src="screehsots/07-policy-impact-analysis.png" alt="Policy Impact Analysis" width="100%"></a><br>
-      <b>Policy Impact Analysis</b><br>
-      <sub>Test a policy against real traffic in log-only mode before enforcing it</sub>
-    </td>
-    <td align="center" width="33%">
-      <a href="screehsots/08-security-audit.png"><img src="screehsots/08-security-audit.png" alt="Security Audit" width="100%"></a><br>
-      <b>Security Audit</b><br>
-      <sub>Findings by severity, e.g. hosts without a deployed policy</sub>
-    </td>
-    <td align="center" width="33%">
-      <a href="screehsots/09-audit-log.png"><img src="screehsots/09-audit-log.png" alt="Audit Log" width="100%"></a><br>
-      <b>Audit Log</b><br>
-      <sub>Every change and deployment, with actor and details</sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="33%">
-      <a href="screehsots/10-policy-rules.png"><img src="screehsots/10-policy-rules.png" alt="Policy rules" width="100%"></a><br>
+      <a href="docs/screenshots/03-policy-rules.png"><img src="docs/screenshots/03-policy-rules.png" alt="Policy Rules" width="100%"></a><br>
       <b>Policy Rules</b><br>
       <sub>Interface scope, the automatic baseline rules and the rules of a policy version</sub>
     </td>
+  </tr>
+  <tr>
     <td align="center" width="33%">
-      <a href="screehsots/11-inventory-discovery.png"><img src="screehsots/11-inventory-discovery.png" alt="Inventory Discovery" width="100%"></a><br>
-      <b>Inventory Discovery</b><br>
-      <sub>Scan networks for SSH servers and import them as hosts</sub>
+      <a href="docs/screenshots/04-approvals.png"><img src="docs/screenshots/04-approvals.png" alt="Approvals" width="100%"></a><br>
+      <b>Approvals</b><br>
+      <sub>Versions waiting for review, with the requester and the reason</sub>
     </td>
     <td align="center" width="33%">
-      <a href="screehsots/12-compliance-report.png"><img src="screehsots/12-compliance-report.png" alt="Compliance Report" width="100%"></a><br>
-      <b>Compliance Report</b><br>
-      <sub>Point-in-time evidence for PCI DSS, ISO 27001, SOC 2 and HIPAA, stored with a SHA-256</sub>
+      <a href="docs/screenshots/05-inventory.png"><img src="docs/screenshots/05-inventory.png" alt="Inventory" width="100%"></a><br>
+      <b>Inventory</b><br>
+      <sub>Hosts with tags, VLAN, backend, SSH credential, compliance, and the <b>Active Rules</b> action</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="docs/screenshots/06-ot-iot.png"><img src="docs/screenshots/06-ot-iot.png" alt="OT/IoT" width="100%"></a><br>
+      <b>OT/IoT</b><br>
+      <sub>Devices behind a gateway with vendor, zone, criticality and coverage</sub>
     </td>
   </tr>
   <tr>
     <td align="center" width="33%">
-      <a href="screehsots/13-admin.png"><img src="screehsots/13-admin.png" alt="Admin" width="100%"></a><br>
+      <a href="docs/screenshots/07-docker-swarm.png"><img src="docs/screenshots/07-docker-swarm.png" alt="Docker Swarm" width="100%"></a><br>
+      <b>Docker Swarm</b><br>
+      <sub>Setup guide and overview of the registered Swarm nodes</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="docs/screenshots/08-troubleshoot.png"><img src="docs/screenshots/08-troubleshoot.png" alt="Troubleshoot" width="100%"></a><br>
+      <b>Troubleshoot</b><br>
+      <sub>Firewall Learning, the communication simulator and policy search by IP or host</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="docs/screenshots/09-policy-impact-analysis.png"><img src="docs/screenshots/09-policy-impact-analysis.png" alt="Policy Impact Analysis" width="100%"></a><br>
+      <b>Policy Impact Analysis</b><br>
+      <sub>Test a policy against real traffic in log-only mode before enforcing it</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="docs/screenshots/10-security-audit.png"><img src="docs/screenshots/10-security-audit.png" alt="Security Audit" width="100%"></a><br>
+      <b>Security Audit</b><br>
+      <sub>Findings by severity: broad rules, duplicates, hosts without a deployed policy</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="docs/screenshots/11-audit-log.png"><img src="docs/screenshots/11-audit-log.png" alt="Audit Log" width="100%"></a><br>
+      <b>Audit Log</b><br>
+      <sub>Every change, approval and deployment, with actor and details</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="docs/screenshots/12-admin.png"><img src="docs/screenshots/12-admin.png" alt="Admin" width="100%"></a><br>
       <b>Admin</b><br>
-      <sub>SSH and Kubernetes credentials, users and roles</sub>
+      <sub>LDAP group mappings, SSH and Kubernetes credentials, users and roles</sub>
     </td>
   </tr>
 </table>
@@ -173,9 +166,10 @@ Click an image to open it full size.
 Supported Linux backends are **nftables, iptables, firewalld, and UFW**. Select one in Inventory or use `auto`, which prefers an active native manager. Firewalld/UFW support enforced ACL deployment, removal, rollback, IPv4/IPv6, and drift/compliance. Native learning/log-only sessions are not yet supported.
 - **Compliance & Drift Detection** (agentless) — SSH-based comparison of current firewall rules vs. last deployed policy hash
 - **Policy Visualization** — interactive SVG diagrams showing connections per host (color-coded allow/deny)
+- **Active Rules per host** — one click on a host shows the policy set and version enforced on it, its access-control rules in plain language (tags, VLANs, hosts and IoT assets resolved to names), the drift status, and for operators the live nftables/iptables ruleset read from the host side by side with the ruleset Segmentra expects; older deployments are listed as history
 
 <div align="center">
-  <img src="docs/images/inventory.png" alt="Inventory Management" style="max-width: 100%; height: auto;" />
+  <img src="docs/screenshots/05-inventory.png" alt="Inventory" style="max-width: 100%; height: auto;" />
 </div>
 
 ### Policy Management
@@ -199,9 +193,6 @@ Supported Linux backends are **nftables, iptables, firewalld, and UFW**. Select 
 - **Real-time Tracking** — per-host deployment status with 10-minute timeout for unresponsive hosts; **Retry Failed Hosts**, pause/resume/stop, and a deployment-level approval for high-risk deployments
 - **Lockout protection** — after applying rules Segmentra checks that it can still reach the host over SSH; if not, the previous rules are restored automatically after 120 seconds
 
-<div align="center">
-  <img src="docs/images/deployments.png" alt="Deployments" style="max-width: 100%; height: auto;" />
-</div>
 
 ### Troubleshooting & Analysis
 - **Communication Simulation** — test if traffic between two IPs would be blocked by deployed policies
@@ -210,7 +201,7 @@ Supported Linux backends are **nftables, iptables, firewalld, and UFW**. Select 
 - **Policy Search** — find which policies apply to a specific IP, host, or policy version
 
 <div align="center">
-  <img src="docs/images/troubleshooting.png" alt="Troubleshooting" style="max-width: 100%; height: auto;" />
+  <img src="docs/screenshots/08-troubleshoot.png" alt="Troubleshooting" style="max-width: 100%; height: auto;" />
 </div>
 
 ### OT/IoT Microsegmentation
@@ -359,43 +350,35 @@ A Swarm node is an ordinary Linux server, so Segmentra manages its **host firewa
 - **Top Deployers** — most active users
 
 <div align="center">
-  <img src="docs/images/dashboard.png" alt="Dashboard" style="max-width: 100%; height: auto;" />
+  <img src="docs/screenshots/01-dashboard.png" alt="Dashboard" style="max-width: 100%; height: auto;" />
 </div>
 
 ---
 ### ACL Audit 
 
 <div align="center">
-  <img src="docs/images/Policies_audit.png" alt="Dashboard" style="max-width: 100%; height: auto;" />
+  <img src="docs/screenshots/10-security-audit.png" alt="Security Audit" style="max-width: 100%; height: auto;" />
 </div>
 
 
-### Topology 
+### Topology
+
+Draw the allowed and denied flows between tags, VLANs and hosts on a canvas and generate policy sets from the drawing. Still work in progress.
+
+### IOT / OT
 
 <div align="center">
-  <img src="docs/images/Topology.png" alt="Dashboard" style="max-width: 100%; height: auto;" />
+  <img src="docs/screenshots/06-ot-iot.png" alt="OT/IoT" style="max-width: 100%; height: auto;" />
 </div>
 
+### Kubernetes
 
-Still Work in progress :) :) 
+Approved policy versions are rendered as NetworkPolicy manifests and, with stored cluster credentials, applied, checked and removed from the UI. See [docs/kubernetes.md](docs/kubernetes.md).
 
-### IOT / OT 
+### Integrations
 
-<div align="center">
-  <img src="docs/images/IOT.png" alt="Dashboard" style="max-width: 100%; height: auto;" />
-</div>
+Webhooks, SIEM forwarding of the audit log, threat-intelligence feeds and LDAP. See the Integrations and Admin pages.
 
-### Kubernetes 
-
-<div align="center">
-  <img src="docs/images/Kubernetes.png" alt="Dashboard" style="max-width: 100%; height: auto;" />
-</div>
-
-### Integrations 
-
-<div align="center">
-  <img src="docs/images/Integrations.png" alt="Dashboard" style="max-width: 100%; height: auto;" />
-</div>
 
 
 ## User Journey
@@ -446,6 +429,7 @@ A **policy set** is a named policy with a **scope**: the hosts it applies to, ch
 
 ### 7. Operate: verify, troubleshoot and audit
 
+- **Inventory → Active Rules:** answers "what exactly is enforced on this host right now?" (policy version, rules, drift status, live versus expected ruleset).
 - **Inventory → Check Compliance:** detects drift when someone changes Segmentra's rules on a host by hand.
 - **Troubleshoot:** simulate whether traffic between two IPs would be allowed, search which policies affect an IP or host, or run **Firewall Learning** (log-only mode) to discover real traffic.
 - **Policy Impact Analysis:** run a version in log-only mode on a host before enforcing it, then analyze which observed traffic it would allow or block.
@@ -487,6 +471,16 @@ Typical lifecycle of a version: `DRAFT` → `PENDING_APPROVAL` → `APPROVED` (o
 
 - **Development**: `admin` / `admin123` (created by the seed when `SEGMENTRA_ADMIN_PASSWORD` is not set — change it after first login)
 - **Production** (`NODE_ENV=production`): `admin` / the value of `SEGMENTRA_ADMIN_PASSWORD` (min. 12 chars). Without it the seed refuses to create the default admin; use `SEGMENTRA_BOOTSTRAP_TOKEN` instead if you only use LDAP.
+
+### Demo data (optional)
+
+To explore the UI without real servers, load the sample dataset after the migrations and the seed:
+
+```bash
+npm run db:demo        # uses DATABASE_URL; refuses NODE_ENV=production unless SEGMENTRA_DEMO_FORCE=1
+```
+
+It adds four VLANs, nine tags, ten Linux hosts (web, app, database, bastion, monitoring, SCADA and an OT gateway), four policy sets with versions in every lifecycle state (deployed, draft, pending approval, approved and scheduled), six OT/IoT devices protected by the gateway with FORWARD rules, deployments in several states and an audit trail. The file is `packages/db/demo/demo-data.sql` (plain SQL, idempotent: re-running changes nothing); `npm run db:demo -- --remove` deletes it again. Three demo users are created with the password `SegmentraDemo2026!`: `maria.p` (operator), `nikos.k` (approver) and `ana.v` (viewer). The demo hosts have no SSH credentials, so readiness, compliance and live-rule checks against them fail honestly; attach a credential and point a host at a real machine to go further.
 
 ### Docker
 

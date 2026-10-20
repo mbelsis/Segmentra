@@ -205,4 +205,51 @@ export async function checkHostCompliance(hostId: string): Promise<any> {
   return checkHost(hostRes.rows[0], deployments.get(hostId));
 }
 
+/**
+ * Read the live firewall rules of a host (what is really enforced right now).
+ * GET /compliance/hosts/:hostId/live-rules
+ * Returns the raw ruleset text read over SSH (nft: table inet segmentra; iptables: Segmentra's
+ * chains plus the jumps), its live hash and whether Segmentra's table/chains are present. Read-only.
+ */
+complianceRouter.get('/hosts/:hostId/live-rules', async (req, res) => {
+  const hostId = req.params.hostId;
+  const hostRes = await pool.query(
+    `SELECT h.id, h.hostname, h.mgmt_ip, h.ssh_port, h.firewall_backend
+     FROM hosts h
+     WHERE h.id=$1 AND h.enabled=true`,
+    [hostId]
+  );
+  const host = hostRes.rows[0];
+  if (!host) return res.status(404).json({ error: 'host_not_found' });
+  if (!host.mgmt_ip) return res.status(400).json({ error: 'host_without_mgmt_ip', message: 'host has no management IP' });
+
+  let cred: MaterializedSshCredential | null = null;
+  try {
+    cred = await getSshCredentialForHost(host.id);
+    const read = await readHostFirewallRules(sshHostInfo(host, cred));
+    const deployments = await lastDeployments([hostId]);
+    const last = deployments.get(hostId);
+    return res.json({
+      hostId: host.id,
+      hostname: host.hostname,
+      success: read.success,
+      backend: read.backend,
+      segmentraPresent: read.segmentraPresent ?? null,
+      rulesText: read.success ? read.rulesText : '',
+      rulesHash: read.success ? read.rulesHash : null,
+      expectedHash: last?.applied_live_hash ?? null,
+      error: read.success ? null : (read.error ?? 'read failed'),
+      readAt: new Date().toISOString()
+    });
+  } catch (error: any) {
+    const msg = error?.message ?? String(error);
+    return res.status(502).json({
+      error: 'live_read_failed',
+      message: msg === 'missing_ssh_credential' ? 'No SSH credential configured for this host' : msg
+    });
+  } finally {
+    cred?.cleanup();
+  }
+});
+
 export default complianceRouter;

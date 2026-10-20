@@ -15,6 +15,7 @@ function effectiveCredentialLabel(ec: any): string {
 }
 import { Pagination } from '../components/Pagination';
 import { HostPolicyVisualization } from '../components/HostPolicyVisualization';
+import { HostActiveRulesPanel } from '../components/HostActiveRulesPanel';
 import { ReadinessSummary } from '../components/ReadinessSummary';
 import { DiscoveryTab } from '../components/DiscoveryTab';
 
@@ -82,6 +83,9 @@ export function InventoryPage() {
 
   // Visualization modal state
   const [visualizationHost, setVisualizationHost] = useState<{ id: string; hostname: string } | null>(null);
+
+  // Active rules panel state (which policy/rules are enforced on a host right now)
+  const [activeRulesHost, setActiveRulesHost] = useState<{ id: string; hostname: string } | null>(null);
   
   // Tags state
   const [tags, setTags] = useState<any[]>([]);
@@ -1193,6 +1197,17 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                           </div>
                         </div>
                         </>)}
+                        <div className="tooltip-wrapper">
+                          <button
+                            onClick={() => setActiveRulesHost({ id: h.id, hostname: h.hostname })}
+                            className="btn-small btn-action"
+                          >
+                            Active Rules
+                          </button>
+                          <div className="tooltip">
+                            Show the policy set, version and access-control rules currently enforced on this host, its drift status, and (operators) the live ruleset read from the host next to the expected one.
+                          </div>
+                        </div>
                         <button 
                           onClick={() => setVisualizationHost({ id: h.id, hostname: h.hostname })} 
                           className="btn-small btn-action"
@@ -1635,6 +1650,15 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
           hostId={visualizationHost.id}
           hostname={visualizationHost.hostname}
           onClose={() => setVisualizationHost(null)}
+        />
+      )}
+
+      {activeRulesHost && (
+        <HostActiveRulesPanel
+          hostId={activeRulesHost.id}
+          hostname={activeRulesHost.hostname}
+          canOperate={canEdit}
+          onClose={() => setActiveRulesHost(null)}
         />
       )}
     </div>
