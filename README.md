@@ -345,6 +345,60 @@ A Swarm node is an ordinary Linux server, so Segmentra manages its **host firewa
 - **Encrypted Secret Storage** — SSH keys, key passphrases, SSH and sudo passwords and LDAP passwords encrypted with AES-256-GCM (key: `SEGMENTRA_KEK_B64`); see [docs/security.md](docs/security.md)
 - **Integrations** — registry for SIEM, SOAR, vulnerability databases and threat intelligence feeds. Working adapters: **SIEM** (syslog over UDP/TCP; every Audit Log entry is forwarded once, see [docs/security.md](docs/security.md)) and **AbuseIPDB** threat intelligence (sync, optional auto-block into a DRAFT version of a policy set; repeated syncs reuse the open auto-block draft and skip IPs already blocked). SOAR and vulnerability-database entries only store configuration and sync status.
 
+### Backup & Restore
+
+Two mechanisms, for two needs. The **configuration backup** is a JSON file made in the UI that restores into any installation, including a fresh one after a disaster. The **full database dump** is a `pg_dump` for routine backups of a production install. See [docs/backup-restore.md](docs/backup-restore.md).
+
+**Configuration backup (Admin → Backup & Restore, or `GET /api/backup/export`, `admin` role)**
+
+One file, `segmentra-backup-<timestamp>.json` (`apiVersion: segmentra.io/v1`, `kind: Backup`), that refers to everything **by name** and never by database id, so it can be restored into a database whose ids are different:
+
+| Exported | Fields |
+|---|---|
+| **VLANs** | tag number, name, description, subnet |
+| **Tags** | name, description, system flag |
+| **Hosts** | hostname, management IP, SSH port, environment, OS family, firewall backend, VLAN (by tag number), enabled, Swarm profile (name, role, address, encrypted overlay), Docker-published-ports flag, tags (by name, manually assigned ones), interfaces (name, role, IP, prefix, VLAN, primary, enabled) |
+| **Auto-tagging rules** | name, description, target tag, enabled, priority, criteria (a condition on `vlan_id` is rewritten as the equivalent `vlan_tag` condition so it survives new ids) |
+| **OT/IoT assets** | name, description, type, vendor, model, firmware, MAC, IP, VLAN, zone, criticality, fingerprint, discovered-by, enabled, gateways (by hostname), tags |
+| **Policy templates** | name, description, category, target tag, auto-apply, interface scope, rules |
+| **Policy sets** | name, description, scope (tag, VLAN tag number, or host list by hostname), source template, creator, creation time, and **every version**: number, status, change summary, interface scope, high-risk flag, expiry, the approval trail (submitted/approved/rejected by whom and when, submission note, rejection reason) and **every rule** (order, direction, action, protocol, ports, source and destination by name, log mode, comment, interface scope) |
+| **Settings** | management VLAN (by tag number), deployment executor |
+
+| Not exported | Why / what to do |
+|---|---|
+| SSH, Kubernetes, LDAP and integration **credentials** | Encrypted with the installation's `SEGMENTRA_KEK_B64`; enter them again (or use the database dump with the original `.env`) |
+| **Users and roles** | Recreate them or configure LDAP; usernames in the approval trail are kept in the file and matched on restore |
+| **Deployments**, their artifacts and the **audit log** | History of this installation; the dump keeps it |
+| Notification channels, discovery profiles, Kubernetes clusters and workloads, topology views, compliance reports | Configure again, or use the dump |
+| Policy sets with a Kubernetes scope | Reported as a warning |
+
+A rule whose tag, VLAN, host or IoT asset was deleted is exported with the raw id and listed in the file's `warnings`.
+
+**Restore (Admin → Backup & Restore → choose file → Check (dry run) → Restore, or `POST /api/backup/import?dryRun=true|false`)**
+
+- Runs in **one transaction**: a dry run rolls it back and shows what would be created; any error rolls everything back.
+- **Creates what is missing, never changes what exists.** VLANs are matched by tag number, policy versions by policy set name and version number, everything else by name. Importing the same file twice changes nothing, and importing into a half-populated installation only adds the missing parts (for example the missing versions of an existing policy set).
+- **Policy versions keep their status and approval trail.** A username that does not exist on the target is dropped from the trail; the version keeps its status. The importing admin becomes the creator when the original creator is unknown.
+- **Nothing is deployed.** A restored `DEPLOYED` version means "this was deployed when the backup was taken"; check **Inventory → Active Rules** or **Check Compliance** and redeploy where needed.
+- A rule whose source or destination cannot be resolved on the target is skipped and reported; the version is still created. The management VLAN and executor settings are only filled in when they are empty on the target.
+- The result lists, per item type, what was created and what was already present, plus warnings. A malformed file is refused with the path of every problem. Export and import are written to the audit log (`BACKUP_EXPORT`, `BACKUP_IMPORT`).
+
+After restoring into a fresh installation you still create users (or LDAP), add SSH credentials and assign them, re-enter Kubernetes and integration credentials, recreate notification channels and discovery profiles, and redeploy.
+
+**Full database dump (Docker install)**
+
+```bash
+./scripts/segmentra-backup.sh dump                       # pg_dump -> backups/segmentra-<timestamp>.sql.gz (mode 600)
+./scripts/segmentra-backup.sh list
+docker compose stop segmentra-app
+./scripts/segmentra-backup.sh restore backups/<file> --yes   # replaces the whole database; refuses while the API runs
+docker compose up -d segmentra-app                       # runs pending migrations
+```
+
+The dump holds everything, including users, deployments, the audit log and the encrypted secrets. Keep a copy of `.env` with it: without the original `SEGMENTRA_KEK_B64` the secrets cannot be decrypted. Restore into the same Segmentra version or a newer one. For a nightly backup put the `dump` command in cron and prune old files.
+
+**Tested** (against the demo dataset, through the API): export; dry run (everything already present); deleting the content and restoring it, after which a second export was identical to the first; a repeated import that created nothing; an invalid file rejected with paths; the export refused for a viewer; and a dump followed by a restore of the whole database. **Not tested yet:** the browser's own download and file-picker steps (the same endpoints were exercised with `curl`), restoring a file from an older Segmentra version into a newer schema, and very large inventories (rows are inserted one by one).
+
 ### Dashboard
 - **Real-time Overview** — deployment status, success rates, activity charts
 - **Current Deployments** — live progress tracking with per-host status
@@ -517,10 +571,7 @@ The full guide, including what is already hardened and the remaining gaps, is in
 
 ### Backup and restore
 
-- **Configuration backup (JSON):** **Admin → Backup & Restore** exports VLANs, tags, hosts, auto-tagging rules, OT/IoT assets, templates and every policy set with all its versions and rules as one file that refers to things by name, and restores it into any installation, including a fresh one after a disaster. Existing items are left untouched, versions keep their status and approval trail, nothing is deployed. Credentials, users, deployments and the audit log are not in it.
-- **Full database dump:** `./scripts/segmentra-backup.sh dump` (and `restore FILE --yes`) for the Docker install; keep `.env` with it, since the encrypted secrets need the same `SEGMENTRA_KEK_B64`.
-
-Details in [docs/backup-restore.md](docs/backup-restore.md).
+**Admin → Backup & Restore** exports the whole configuration (inventory, auto-tagging rules, OT/IoT assets, templates, every policy set with all versions and rules, settings) as one JSON file and restores it into any installation, including a fresh one; `./scripts/segmentra-backup.sh dump` takes a full database dump. What each one contains and how a restore behaves is in [Backup & Restore](#backup--restore) and [docs/backup-restore.md](docs/backup-restore.md).
 
 For detailed installation instructions, see [installation.md](docs/installation.md).
 
