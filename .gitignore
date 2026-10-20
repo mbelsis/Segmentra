@@ -33,3 +33,6 @@ apps/api/data/
 
 # Integration test runtime artifacts
 tests/docker-ssh-integration/.runtime/
+
+# database dumps written by scripts/segmentra-backup.sh
+backups/

@@ -78,6 +78,52 @@ function ScopePicker(props: {
 }
 
 export function AdminPage() {
+  // Backup & Restore
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupMessage, setBackupMessage] = useState<string | null>(null);
+  const [restoreText, setRestoreText] = useState('');
+  const [restoreFilename, setRestoreFilename] = useState('');
+  const [restoreBusy, setRestoreBusy] = useState(false);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [restoreResult, setRestoreResult] = useState<{ dryRun: boolean; counts: Record<string, { created: number; skipped: number }>; warnings: string[] } | null>(null);
+
+  async function downloadBackup() {
+    setBackupBusy(true);
+    setBackupMessage(null);
+    try {
+      const b = await api.backup.export();
+      const url = URL.createObjectURL(new Blob([b.text], { type: 'application/json' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = b.filename;
+      a.click();
+      URL.revokeObjectURL(url);
+      setBackupMessage(`Downloaded ${b.filename}${b.warnings ? ` (${b.warnings} warning(s) inside the file)` : ''}`);
+    } catch (e) {
+      setBackupMessage(`Export failed: ${errorMessage(e)}`);
+    } finally {
+      setBackupBusy(false);
+    }
+  }
+
+  async function runRestore(dryRun: boolean) {
+    if (!restoreText) return;
+    if (!dryRun && !window.confirm('Restore this backup into the current installation? Existing items are kept; missing ones are created.')) return;
+    setRestoreBusy(true);
+    setRestoreError(null);
+    setRestoreResult(null);
+    try {
+      const r = await api.backup.import(restoreText, dryRun);
+      setRestoreResult(r);
+      if (!dryRun) loadData();
+    } catch (e: any) {
+      const problems = e?.body?.problems as Array<{ path: string; message: string }> | undefined;
+      setRestoreError(problems ? `Invalid backup file: ${problems.slice(0, 5).map((p) => `${p.path}: ${p.message}`).join('; ')}${problems.length > 5 ? ` (+${problems.length - 5} more)` : ''}` : errorMessage(e));
+    } finally {
+      setRestoreBusy(false);
+    }
+  }
+
   const [ldap, setLdap] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>('');
@@ -638,6 +684,84 @@ export function AdminPage() {
       </div>
 
       {/* Deployment Executor Setting */}
+      {/* Backup & Restore */}
+      <div className="card">
+        <h3>Backup &amp; Restore</h3>
+        <p style={{ marginBottom: 12, color: '#666', fontSize: '0.9em' }}>
+          Export the configuration (VLANs, tags, hosts with interfaces, auto-tagging rules, OT/IoT assets, policy templates, policy sets with
+          every version and rule, management VLAN and executor settings) as one JSON file that refers to things by name, and restore it into any
+          installation, including a fresh one. Items that already exist are left untouched, policy versions keep their status and approval trail,
+          and nothing is deployed. Credentials, users, deployments and the audit log are not included: for those take a full database dump
+          (<code>scripts/segmentra-backup.sh</code>). See <code>docs/backup-restore.md</code>.
+        </p>
+        <div className="form-actions" style={{ justifyContent: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
+          <button type="button" className="btn-primary" onClick={downloadBackup} disabled={backupBusy}>
+            {backupBusy ? 'Exporting...' : 'Download backup (JSON)'}
+          </button>
+          {backupMessage && <span style={{ fontSize: '0.9em', color: '#555' }}>{backupMessage}</span>}
+        </div>
+        <div style={{ marginTop: 16 }}>
+          <label style={{ display: 'block', fontWeight: 500, marginBottom: 6 }}>Restore from backup</label>
+          <input
+            type="file"
+            accept=".json,application/json"
+            onChange={async (e) => {
+              const f = e.target.files?.[0];
+              setRestoreResult(null);
+              setRestoreError(null);
+              if (f) {
+                setRestoreText(await f.text());
+                setRestoreFilename(f.name);
+              } else {
+                setRestoreText('');
+                setRestoreFilename('');
+              }
+            }}
+          />
+          {restoreFilename && <div style={{ fontSize: '0.85em', color: '#666', marginTop: 4 }}>Selected: {restoreFilename}</div>}
+          <div className="form-actions" style={{ justifyContent: 'flex-start', gap: 12, marginTop: 10 }}>
+            <button type="button" className="btn-secondary" onClick={() => runRestore(true)} disabled={!restoreText || restoreBusy}>
+              {restoreBusy ? 'Working...' : 'Check (dry run)'}
+            </button>
+            <button type="button" className="btn-primary" onClick={() => runRestore(false)} disabled={!restoreText || restoreBusy}>
+              Restore
+            </button>
+          </div>
+          {restoreError && <div className="error-banner" style={{ marginTop: 10 }}>{restoreError}</div>}
+          {restoreResult && (
+            <div style={{ marginTop: 12, fontSize: '0.9em' }}>
+              <strong>{restoreResult.dryRun ? 'Dry run: nothing was written.' : 'Restore complete.'}</strong>
+              <table className="data-table" style={{ marginTop: 8, maxWidth: 520 }}>
+                <thead>
+                  <tr><th>Item</th><th>{restoreResult.dryRun ? 'Would create' : 'Created'}</th><th>Already present</th></tr>
+                </thead>
+                <tbody>
+                  {Object.entries(restoreResult.counts).map(([k, v]) => (
+                    <tr key={k}><td>{k}</td><td>{v.created}</td><td>{v.skipped}</td></tr>
+                  ))}
+                  {Object.keys(restoreResult.counts).length === 0 && (
+                    <tr><td colSpan={3} style={{ color: '#888' }}>The document contains nothing to import.</td></tr>
+                  )}
+                </tbody>
+              </table>
+              {restoreResult.warnings.length > 0 && (
+                <div style={{ marginTop: 10 }}>
+                  <strong>Warnings ({restoreResult.warnings.length})</strong>
+                  <ul style={{ marginTop: 4 }}>
+                    {restoreResult.warnings.map((w, i) => <li key={i}>{w}</li>)}
+                  </ul>
+                </div>
+              )}
+              {!restoreResult.dryRun && (
+                <p style={{ color: '#666', marginTop: 8 }}>
+                  Restored policy versions are not deployed by this step. Add SSH credentials, check Inventory → Active Rules, and redeploy where needed.
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
       <div className="card">
         <h3>Deployment Executor</h3>
         <p style={{ marginBottom: 20, color: '#666', fontSize: '0.9em' }}>

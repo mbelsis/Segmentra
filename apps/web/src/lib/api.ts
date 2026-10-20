@@ -296,6 +296,27 @@ export const api = {
   addGroupMap: (b: any) => request<{ map: any }>('/admin/ad-group-role-map', { method: 'POST', body: JSON.stringify(b) }),
   groupMaps: () => request<{ maps: Array<{ id: string; ad_group_dn: string; role_name: string }> }>('/admin/ad-group-role-map'),
   deleteGroupMap: (id: string) => request<{ ok: boolean }>(`/admin/ad-group-role-map/${id}`, { method: 'DELETE' }),
+  // Configuration backup (admin): JSON export and name-based import
+  backup: {
+    export: async () => {
+      const token = getToken();
+      const resp = await fetch(`${API_BASE}/backup/export`, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+      if (!resp.ok) throw new ApiError(`${resp.status} ${resp.statusText}`, resp.status, undefined);
+      const disposition = resp.headers.get('content-disposition') || '';
+      return {
+        text: await resp.text(),
+        filename: /filename="([^"]+)"/.exec(disposition)?.[1] ?? 'segmentra-backup.json',
+        warnings: Number(resp.headers.get('x-segmentra-backup-warnings') || 0)
+      };
+    },
+    import: (content: string, dryRun: boolean) =>
+      request<{
+        dryRun: boolean;
+        counts: Record<string, { created: number; skipped: number }>;
+        warnings: string[];
+        problems: Array<{ path: string; message: string }>;
+      }>(`/backup/import?dryRun=${dryRun}`, { method: 'POST', body: JSON.stringify({ content }) })
+  },
   executorSetting: () => request<{ executor: string }>('/admin/executor-setting'),
   putExecutorSetting: (b: any) => request<{ executor: string }>('/admin/executor-setting', { method: 'PUT', body: JSON.stringify(b) }),
   managementVlanSetting: () => request<{ managementVlan: any }>('/admin/management-vlan-setting'),

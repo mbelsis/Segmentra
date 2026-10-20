@@ -16,6 +16,7 @@ The platform enables:
 - **Segregation of duties**
 - **Approval tracking**
 - **Audit trails**
+- **Backup and restore** of the whole configuration, into a fresh installation if needed
 - **Compliance monitoring**
 - **Topology building**
 - **OT/IoT protection** through gateway firewalls, with device discovery
@@ -514,6 +515,13 @@ Segmentra can change the firewall of every managed host and stores SSH credentia
 
 The full guide, including what is already hardened and the remaining gaps, is in [docs/security.md](docs/security.md#hardening-a-production-install).
 
+### Backup and restore
+
+- **Configuration backup (JSON):** **Admin → Backup & Restore** exports VLANs, tags, hosts, auto-tagging rules, OT/IoT assets, templates and every policy set with all its versions and rules as one file that refers to things by name, and restores it into any installation, including a fresh one after a disaster. Existing items are left untouched, versions keep their status and approval trail, nothing is deployed. Credentials, users, deployments and the audit log are not in it.
+- **Full database dump:** `./scripts/segmentra-backup.sh dump` (and `restore FILE --yes`) for the Docker install; keep `.env` with it, since the encrypted secrets need the same `SEGMENTRA_KEK_B64`.
+
+Details in [docs/backup-restore.md](docs/backup-restore.md).
+
 For detailed installation instructions, see [installation.md](docs/installation.md).
 
 ---
@@ -741,6 +749,7 @@ See also [Known Limitations](#known-limitations) and the [OT/IoT guide](docs/iot
 | [Architecture](docs/Architecture.md) | API endpoints, database schema, RBAC matrix |
 | [User Guide](docs/guide.md) | Step-by-step usage for all features |
 | [Native Firewall Managers](docs/firewall-managers.md) | Firewalld/UFW support, permanent ACLs, prerequisites, limitations, and verification |
+| [Backup and Restore](docs/backup-restore.md) | Configuration export/import (Admin page, API) and full database dumps |
 | [Security: Credentials, Secrets and Hardening](docs/security.md) | How credentials are encrypted, the encryption key, who can access them, and how to harden a production install |
 | [OT/IoT Guide](docs/iot.md) | IoT microsegmentation with gateway model |
 | [Gateway Setup](docs/gateway-setup-guide.md) | Linux gateway firewall configuration |
