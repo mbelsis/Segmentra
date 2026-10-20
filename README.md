@@ -210,7 +210,7 @@ Supported Linux backends are **nftables, iptables, firewalld, and UFW**. Select 
 - **VLANs as Zones** — OT network zones (Purdue levels) are defined as VLANs in the inventory
 - **Traffic Discovery** — run Firewall Learning on the gateway host to observe IoT traffic passively
 - **Deployment Warning** — deploying to IoT gateways triggers a warning about impact on protected devices
-- **Protocol Catalog** — about 35 OT/IoT services (Modbus/TCP, DNP3, EtherNet/IP, S7, OPC UA, BACnet, MQTT, ...) with default ports and a cleartext/encrypted flag; pick one in the rule form or write `service: modbus-tcp` in a policy document. Port matching only, no deep inspection
+- **Protocol Catalog** — 30 OT/IoT services (Modbus/TCP, DNP3, EtherNet/IP, S7, OPC UA, BACnet, MQTT, ...) with default ports and a cleartext/encrypted flag; pick one in the rule form or write `service: modbus-tcp` in a policy document. Port matching only, no deep inspection
 - **Protection Coverage** — shows which assets are protected, by which gateway and which services are allowed to reach them (zones, cleartext warnings); it is derived from recorded deployments, not a live check
 - **Discovery** — lists devices from a gateway's ARP/NDP table over SSH (passive: nothing is sent to the devices) and, as an explicit opt-in with a warning, probes a subnet of up to a /24 from the gateway with one ICMP echo per address to find quiet devices, with vendors from an IEEE OUI list you import, and imports them as assets
 - **Compliance integration** — IoT coverage appears in the compliance reports
@@ -354,7 +354,7 @@ A Swarm node is an ordinary Linux server, so Segmentra manages its **host firewa
 </div>
 
 ---
-### ACL Audit 
+### Security Audit
 
 <div align="center">
   <img src="docs/screenshots/10-security-audit.png" alt="Security Audit" style="max-width: 100%; height: auto;" />
@@ -474,13 +474,21 @@ Typical lifecycle of a version: `DRAFT` → `PENDING_APPROVAL` → `APPROVED` (o
 
 ### Demo data (optional)
 
-To explore the UI without real servers, load the sample dataset after the migrations and the seed:
+To explore the UI without real servers, load the sample dataset after the migrations and the seed. In the local development setup (`./run.sh --start --development`) the database runs on `127.0.0.1:15432` and the loader uses that connection when `DATABASE_URL` is not set:
 
 ```bash
-npm run db:demo        # uses DATABASE_URL; refuses NODE_ENV=production unless SEGMENTRA_DEMO_FORCE=1
+npm run db:demo                 # local dev; set DATABASE_URL for another database
+npm run db:demo -- --remove     # delete the demo data again
 ```
 
-It adds four VLANs, nine tags, ten Linux hosts (web, app, database, bastion, monitoring, SCADA and an OT gateway), four policy sets with versions in every lifecycle state (deployed, draft, pending approval, approved and scheduled), six OT/IoT devices protected by the gateway with FORWARD rules, deployments in several states and an audit trail. The file is `packages/db/demo/demo-data.sql` (plain SQL, idempotent: re-running changes nothing); `npm run db:demo -- --remove` deletes it again. Three demo users are created with the password `SegmentraDemo2026!`: `maria.p` (operator), `nikos.k` (approver) and `ana.v` (viewer). The demo hosts have no SSH credentials, so readiness, compliance and live-rule checks against them fail honestly; attach a credential and point a host at a real machine to go further.
+The loader refuses to run with `NODE_ENV=production` unless `SEGMENTRA_DEMO_FORCE=1`. In the Docker (production) install there is no Node.js on the host; load the file straight into the database container instead:
+
+```bash
+docker compose exec -T segmentra-db psql -U segmentra -d segmentra < packages/db/demo/demo-data.sql
+docker compose exec -T segmentra-db psql -U segmentra -d segmentra < packages/db/demo/demo-remove.sql   # to remove it
+```
+
+It adds four VLANs, nine tags, ten Linux hosts (web, app, database, bastion, monitoring, SCADA and an OT gateway), four policy sets with versions in every lifecycle state (deployed, draft, pending approval, approved and scheduled), six OT/IoT devices protected by the gateway with FORWARD rules, deployments in several states and an audit trail. The file is `packages/db/demo/demo-data.sql` (plain SQL, idempotent: re-running changes nothing). Three demo users are created with the password `SegmentraDemo2026!`: `maria.p` (operator), `nikos.k` (approver) and `ana.v` (viewer). The demo hosts have no SSH credentials, so readiness, compliance and live-rule checks against them fail honestly; attach a credential and point a host at a real machine to go further.
 
 ### Docker
 
@@ -711,7 +719,7 @@ See also [Known Limitations](#known-limitations) and the [OT/IoT guide](docs/iot
 - **Compliance report follow-ups.** Scheduled generation and delivery, reports scoped by tag or VLAN (for example only the cardholder-data environment), more frameworks, signed PDF output, and continuous firewall-log evidence (see [Compliance Reports](docs/compliance-reports.md#not-supported-yet)).
 - **Policy as code follow-ups.** Segmentra pulling from Git itself, hosts/tags/VLANs/templates as code, a published JSON Schema, and atomic multi-document imports (see [Policy as Code](docs/policy-as-code.md#not-supported-yet)).
 - **Docker Swarm awareness.** Read services, stacks and published ports from the Docker API so policies can refer to services, warn when a swarm node is missing from the inventory, and cover container-to-container and overlay traffic.
-- **UI for API-only features.** These work through the API but have no screens yet: policy recommendations, enforcement points (network device ACLs), IoT baselines and observed flows, host interfaces, and the per-host compiled-policy preview (`render`).
+- **UI for API-only features.** These work through the API but have no screens yet: policy recommendations, enforcement points (network device ACLs), IoT baselines and observed flows, and host interfaces.
 - **More integrations.** SOAR and vulnerability-database integrations can be configured but don't do anything yet.
 
 ### Testing still to do

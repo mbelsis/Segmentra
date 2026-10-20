@@ -32,7 +32,7 @@ npm run dev             # Start API only (runs/watches apps/api/dist/index.js â€
 npm run lint            # Lint all workspaces (only apps/web has a real ESLint config)
 npm run db:migrate      # Run database migrations (packages/db/scripts/migrate.js -> node-pg-migrate)
 npm run db:seed         # Seed RBAC roles, system tags and the initial admin user
-npm run db:demo         # Load the sample dataset (packages/db/demo/demo-data.sql; idempotent, refuses NODE_ENV=production)
+npm run db:demo         # Load the sample dataset (packages/db/demo/demo-data.sql; idempotent, defaults to the dev DATABASE_URL, refuses NODE_ENV=production; -- --remove deletes it)
 npm run test:integration:ssh-docker   # Docker-based SSH deployment integration test
 
 # Workspace-specific

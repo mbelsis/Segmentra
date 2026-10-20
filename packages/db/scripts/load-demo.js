@@ -13,10 +13,16 @@ import { fileURLToPath } from 'node:url';
 
 import pg from 'pg';
 
-const databaseUrl = process.env.DATABASE_URL;
+// Outside production the local development database (start.sh / run.sh) is the default.
+const DEV_DATABASE_URL = 'postgres://segmentra:segmentra@127.0.0.1:15432/segmentra';
+let databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
-  console.error('DATABASE_URL is required');
-  process.exit(1);
+  if (process.env.NODE_ENV === 'production') {
+    console.error('DATABASE_URL is required');
+    process.exit(1);
+  }
+  databaseUrl = DEV_DATABASE_URL;
+  console.log(`DATABASE_URL not set; using the local development database ${DEV_DATABASE_URL}`);
 }
 
 if (process.env.NODE_ENV === 'production' && process.env.SEGMENTRA_DEMO_FORCE !== '1') {
