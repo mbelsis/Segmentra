@@ -407,7 +407,7 @@ export function PolicyVersionPage() {
                       <optgroup key={cat} label={cat[0].toUpperCase() + cat.slice(1)}>
                         {catalog.filter((c) => c.category === cat).flatMap((c) =>
                           c.transports.map((t) => (
-                            <option key={`${c.id}-${t.protocol}`} value={`${t.protocol}|${t.ports}`}>
+                            <option key={`${c.id}-${t.protocol}-${t.ports}`} value={`${t.protocol}|${t.ports}`}>
                               {c.name} ({t.protocol} {t.ports}){c.security === 'cleartext' ? ' - cleartext' : ''}
                             </option>
                           ))

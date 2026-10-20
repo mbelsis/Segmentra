@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 
 import { api } from '../lib/api';
 
@@ -383,8 +383,8 @@ export function HostActiveRulesPanel({ hostId, hostname, canOperate, onClose }: 
                     </thead>
                     <tbody>
                       {history.map((p) => (
-                        <>
-                          <tr key={p.deployment.id}>
+                        <Fragment key={p.deployment.id}>
+                          <tr>
                             <td>{fmtDate(p.deployment.finishedAt ?? p.deployment.createdAt)}</td>
                             <td>{p.policyVersion.policySetName} v{p.policyVersion.versionNumber}</td>
                             <td><code>{shortId(p.deployment.id)}</code> {p.deployment.mode} <code>{p.deployment.status}</code></td>
@@ -399,11 +399,11 @@ export function HostActiveRulesPanel({ hostId, hostname, canOperate, onClose }: 
                             </td>
                           </tr>
                           {expandedHistory.has(p.deployment.id) && (
-                            <tr key={`${p.deployment.id}-rules`}>
+                            <tr>
                               <td colSpan={5}>{renderRulesTable(p.rules)}</td>
                             </tr>
                           )}
-                        </>
+                        </Fragment>
                       ))}
                     </tbody>
                   </table>
