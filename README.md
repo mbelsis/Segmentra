@@ -23,7 +23,7 @@ The platform enables:
 - **Notifications** to Slack and webhooks on approvals, deployments and expiry
 - **Default access rules for each policy**
 
-**Future plans** include more integration adapters (SOAR, vulnerability databases), Kubernetes workload discovery from the cluster, and a real email notification channel. See [Future Work](#future-work).
+**Future plans** include more integration adapters (SOAR, vulnerability databases), Kubernetes workload discovery from the cluster, and a real email notification channel. See [Testing status and future work](docs/testing-status.md#not-implemented-yet).
 
 ---
 
@@ -697,102 +697,9 @@ The following table and service behavior apply to the **raw nftables/iptables ba
 
 ---
 
-## Not Yet Tested
+## Testing Status
 
-### What has been tested
-
-Everything below was exercised against Docker containers. The core workflow went through the web UI; the rest went through the same REST calls the UI makes.
-
-- **Inventory and policy workflow end to end in Chrome, on two real Docker Linux servers (Alpine, SSH key login):** an SSH key credential; a Discovery profile that found both servers (hostname, OS, backend and sudo read from the hosts) and imported them with a tag; an Auto-Tagging rule with preview; a tag-scoped policy set with two rules; submit, then approval by a second user; a Canary deployment; the real `iptables` chains on both servers; live traffic (port 80 reachable, 8080 blocked, ping answered); Check Compliance (Compliant, then Drifted after a rule was deleted by hand on one server); Check Readiness; and View Visualization. This run found and fixed three problems (the default interface scope, ICMP rules missing from the visualization, and an overlapping label). A second pass covered the approval chain through two users: a reason on submit, View Rules and Reject dialogs, a rejection and what the author sees (Dashboard card, menu counter, policy set page), a new version, approval, a deployment that replaced the old rules on both servers (checked with `iptables` and live traffic), Check Compliance, Check Readiness, View Visualization, the Created-by filter on Deployments, a YAML export, an import with validation errors and then a valid import, and the Audit Log entries; that pass found one more bug (the web client dropped the new Created-by filter). Two prompts in the UI (Start deployment, Delete user) use the browser's native confirm box, which the browser tool used here cannot click, so those were accepted by script.
-- **UAT through the web UI on the Docker SSH lab (2026-10-21, three Alpine iptables targets, automated Chrome):** as admin, operator and approver: Active Rules on a deployed host (compliant, live and expected rulesets shown and matching), a rule deleted by hand on a host reported as Drifted with the live ruleset missing it, Check Readiness, a new tag assigned through the host form, a policy set scoped to the tag with three rules (8080 only from one host, ICMP from the subnet, default deny with logging), submission with a reason, approval by a second user through View Rules, a Full deployment started by the operator, real traffic between the containers matching the rules (8080 open from the allowed host only, ping allowed, other ports dropped with the deny counter rising, baseline SSH still open), the communication simulator and the policy searches agreeing with the live firewall, a second deployment with a two-minute expiry and the REMOVE action that removed Segmentra's chains on time while a fake fail2ban chain survived, and the security audit, audit log, dashboard, compliance report, configuration backup download and the remaining pages. Found and fixed: a duplicate option key in the rule form's service list, a missing list key and a column overflow in the Active Rules panel. The three items this run left out were covered the same day (next entry).
-- **Ansible executor, Firewall Learning and Policy Impact Analysis on the Docker lab (2026-10-21, Debian 12 target with rsyslog and python3 added to the lab, API and automated Chrome):** readiness on the Debian host; a Full deployment through the Ansible executor (playbook run in the runner container, 21 tasks, per-host recap, key material removed afterwards, rules and live traffic verified, host compliant); a Firewall Learning session started from the Troubleshoot page, restored by the scheduler when it expired, and its 12 captured flows (SSH from the API, 8080 from two hosts, ICMP, a probe on 9999) shown in the UI; a Policy Impact Analysis session on the deployed version with logs collected while it ran, stopped and analysed (13 flows, 7 matched, 6 reported as "would be blocked", 0 DENY hits) and the result shown on its page; the configuration restore through the browser's file control (a deleted host came back, dry run and restore tables shown). Found and fixed: on a host without systemd or an init script, Segmentra's rsyslog drop-in was never loaded (SIGHUP only makes rsyslog 8 reopen its files), so both session types silently captured nothing; sessions now restart rsyslog properly, self-test the drop-in through the syslog socket and otherwise collect this session's FW-AUDIT lines from journald or the kernel log file (`kern.log`, `messages`, `syslog`), and the flow timestamps keep their zone offset. All of this is now part of `npm run test:integration:ssh-docker` (including the kernel-log fallback with the drop-in disabled).
-- **OT gateway lab and Docker Swarm (2026-10-21):** a new Docker lab (`npm run test:integration:ot-gateway`) with a Debian 12 gateway routing between an IT and an OT network, two Debian OT devices behind it and two IT clients, driven through the API and the SSH executor: readiness, two assets assigned to the gateway, ARP discovery from the gateway, a tag-scoped policy with FORWARD rules (HMI to PLC on Modbus, SCADA to RTU on DNP3, a logged DENY of Modbus to the RTU), the deployed `SEGMENTRA-FWD` chain, then real traffic through the gateway (allowed ports open, other ports, other clients and ICMP dropped by the per-device default deny, the DENY counter and the kernel log line for it, device-to-device traffic on the OT side unfiltered, SSH to the gateway still open), protection coverage with service names and cleartext flags, Active Rules on the gateway, drift when a FORWARD rule is deleted by hand and its repair by redeploying, unassigning a device (default deny stays until the next deployment), and a one-minute expiry with REMOVE that strips the chain. The existing Docker Swarm test (`npm run test:integration:swarm`, three Docker-in-Docker nodes, published nginx service, two clients) passed with 35 of 35 checks on the same day. Found and fixed: the per-rule **log mode** (LOG, LOG_RATE_LIMITED) was only honoured by the firewalld backend; nftables and iptables rulesets now get a log rule (prefix `SEGMENTRA: ALLOW|DENY <comment>: `, rate limit 5/s burst 10) in front of the verdict rule.
-- **Kubernetes NetworkPolicy test on kind (2026-10-21):** `npm run test:integration:k8s` run for kindnet, Calico and Cilium against the dev stack, three-node kind clusters each time, 80 of 80 checks per CNI (generated manifests, real pod-to-pod TCP/UDP probes for CIDR/HOST/TAG/VLAN sources, selector peers, updates and removal, the cluster-management API with kubeconfig and service-account credentials, drift, and the Cilium `ipBlock` warning with in-cluster allows expected to be blocked there). No code changes were needed.
-- **Core workflow (web UI), on Alpine containers with iptables and nftables:** inventory, policy sets and versions, approvals, deployments, drift, expiry REMOVE and REVERT, simulator, topology, templates, OT/IoT, security audit, SIEM syslog, webhooks and role-based access. The automated Docker SSH integration test also passes.
-- **Real distributions:** Debian 12, Ubuntu 24.04 and Rocky Linux 9.3, each running its stock packages and PAM-based sudo with a password:
-  - discovery, readiness, nftables and iptables deployments, drift and expiry REMOVE;
-  - **reboot persistence** through each OS's own service. In the raw-backend systemd-container tests the rules came back, saved admin rules stayed byte-identical, and removal cleaned up. Raw deployments on Rocky with firewalld running correctly report their persistence conflict; this does not describe the new native firewalld backend.
-- **Native firewalld and UFW, Ubuntu 24.04 containers on Docker Desktop (2026-10-09):** production SSH readiness/auto-detection, deployment, readback, removal, IPv4/IPv6 allowed/blocked TCP traffic, native reload, restart persistence, live drift, scoped rollback, and administrator-rule preservation passed. Unsupported learning attempts left the enforced ACL unchanged. The containers use a test-only systemctl wrapper and the actual native managers; no Segmentra code reapplies rules at startup. This is not a full systemd VM/server reboot test. Reproduce with `npm run test:integration:firewall-managers`; add `-- --keep` to retain containers and inspect their PASS logs.
-- **Credentials:**
-  - private keys (ed25519, and RSA in PEM format) with and without a passphrase, and password login;
-  - sudo with no password, with the login password, or with a separate password;
-  - a wrong sudo password and `requiretty` (both give a clear error);
-  - credential scoping: global, tag, VLAN, host, not assigned, and explicit host assignment, including the Admin and Inventory UI.
-- **Executors:**
-  - SSH Direct, including lockout auto-revert through both `nohup` and `systemd-run` (Debian with systemd);
-  - Ansible end to end through the API with all three credential types, including rescue rollback, FORWARD/IPv6 rules, per-host results from the play recap, lockout detection and an unresponsive host.
-- **Rollout modes:** canary and progressive with 6–8 hosts, plus pause, resume and stop.
-- **Approvals:** high-risk deployment approval, including the creator not being allowed to approve.
-- **Firewall Learning and Policy Impact Analysis with real captured traffic** on Debian 12 (rsyslog, kernel logging enabled for the test): flows, recommendations and impact-analysis coverage.
-- **IoT gateways:**
-  - FORWARD rules on nftables and iptables, including IPv6 devices and rules;
-  - two gateways protecting one device;
-  - expiry REVERT on a gateway, and unassigning a device;
-  - the Ansible executor with FORWARD rules.
-- **Discovery:**
-  - a /24, and a /20 (4,094 addresses in about 100 s);
-  - hosts that drop or reject SSH probes are counted as closed without hanging;
-  - scheduled runs, and credentials that need a sudo password.
-- **Auto-tagging and template auto-apply:**
-  - all condition fields, including `environment`, with AND/OR;
-  - disable, retarget and delete, and priority between rules;
-  - the 5-minute job adding and removing tags;
-  - auto-apply creating a DRAFT policy.
-- **LDAP** against OpenLDAP:
-  - group-to-role mapping, both via memberOf and via a group-filter lookup;
-  - injection attempts;
-  - disabled LDAP, and deactivated users.
-- **Notifications:**
-  - webhook delivery, and Slack against a mock webhook;
-  - event subscriptions;
-  - SSRF checks.
-- **Threat intelligence:** AbuseIPDB against a mock of its API (error handling, auto-block drafts, deduplication).
-- **SIEM forwarding:** every audit event forwarded exactly once (including a second API replica and a reconnect), with no secrets in messages. Integration and notification secrets are encrypted at rest; a database dump showed none of them.
-- **Compliance reports:** `npm run test:integration:compliance` runs 35 checks against the real API (see [Compliance Evidence Reports](#compliance-evidence-reports)).
-- **Policy as code:** `npm run test:integration:policy-code` runs 48 checks against the real API and the CLI: dry run writes nothing, create, idempotency (YAML text, JSON, `{content}`), deterministic export and export-import round trip (including FORWARD rules and interface scopes), diff on change and reordering detection, the approval workflow and separation of duties on imported drafts, all validation problems reported together with their paths (typos, unknown tags, duplicate order, bad CIDR and ports, FORWARD without destination), scope protection (`updateScope`), permissions (viewer and approver cannot import), ambiguous names, and the CLI's `plan`/`apply` exit codes.
-- **Docker Swarm:** `npm run test:integration:swarm` builds a 3-node Swarm on Docker Desktop (privileged Docker-in-Docker nodes with sshd, an overlay network, a published nginx service and two client containers) and runs 35 checks through the real API and SSH executor: the allowed client reaches the published port on every node and a client the policy does not allow is blocked on every node, the overlay stays healthy without the policy mentioning any Swarm port, a port published later is blocked without a redeployment even after Docker re-ordered its `FORWARD` jumps, redeploying is idempotent, remove, backup and restore handle the `DOCKER-USER` jump and leave Docker's chain alone, the saved-rules rendering merges with existing fail2ban/Docker lines, and each feature makes a difference when switched off. `npm run test:swarm-compile` unit-tests the generated rules for both backends.
-- **Kubernetes:** `npm run test:integration:k8s` builds 3-node kind clusters with **kindnet**, **Calico** and **Cilium** and runs 69 checks on each against the real API: stored kubeconfig and service-account token credentials, apply, dry run, drift check and removal through Segmentra, real pod-to-pod TCP/UDP enforcement (CIDR, HOST, TAG, VLAN, `any`, port ranges, same-node and cross-node clients, selector peers, updates), refusal to overwrite or delete a policy Segmentra did not create, read-only RBAC failure, and no credential material in any API response. The cloud-login token minting has unit tests (`npm run test:k8s-auth`: SigV4 against AWS's documented example, JWT signature, mocked token endpoints). Earlier generated manifests were also applied to k3s v1.30 and enforced.
-- **Other:** `scripts/restore-previous-policy.sh` (`--latest` / `--timestamp`); password change and reset; and the PowerShell scripts parse under PowerShell 7 and as Windows PowerShell 5.1 would read them.
-
-### Not yet tested or not implemented
-
-- **Email notifications are not implemented.** There is no SMTP sending; email channels report FAILED.
-- **Kubernetes: see [Not tested yet / Not supported yet](#kubernetes-not-tested-yet).** Workload discovery is not implemented (the sync endpoint returns `501`), only kind clusters were tested (the EKS/GKE/AKS cloud logins never against real clouds), and generated manifests use `podSelector: {}` (all pods in the namespace).
-- **Docker Swarm: see [Not tested yet / Not supported yet](#docker-swarm-and-docker-published-ports).** Only a Docker Desktop lab was used (one kernel, Docker 27.5, `iptables-nft`): real multi-machine swarms, reboots, Docker daemon restarts and upgrades, the nftables backend on a live Docker host, Docker 28+, encrypted overlays, host-mode and IPv6 published ports are untested.
-- **Microsoft Active Directory itself, and LDAPS with a real certificate.** Only OpenLDAP was tested.
-- **The real AbuseIPDB service**, as opposed to the mock, and real Slack workspaces.
-- **Hosts that log only to journald (no rsyslog).** Firewall Learning and Policy Impact Analysis fall back to `journalctl -k` (and to `kern.log` / `messages` / `syslog`) when rsyslog is missing or its drop-in is not picked up; the file fallback was tested on the Docker lab, the journald path has not been run against a real systemd host yet. FORWARD traffic on gateways is not analyzed by Learning or Policy Impact Analysis, by design.
-- **Native-manager full systemd VM/server reboots, native Ansible end-to-end, and native gateway forwarding traffic.** Host TCP enforcement and container restarts were tested; native gateway compilation has regression coverage.
-- **RHEL with SELinux enforcing and native firewalld**, and SUSE, Arch, older releases and Alpine. The raw-backend persistence path reports `unsupported_distro` outside Debian/Ubuntu/RHEL families; native managers have their own prerequisites.
-- **ECDSA and PKCS#8-encrypted keys** on a live host (they pass validation), and OpenSSH clients older than 8.4.
-- **The Windows scripts were not run on Windows.** `start.bat` was only reviewed.
-- **Real OT protocols** beyond a TCP test listener on gateways.
-- **A full deployment through a browser with the Ansible executor.** Ansible was tested through the API (and is part of the Docker integration test).
-
-See also [Known Limitations](#known-limitations) and the [OT/IoT guide](docs/iot.md#9-limitations-and-what-is-not-tested).
-
----
-
-## Future Work
-
-### Features not implemented yet
-
-- **Email notifications.** Email channels can be configured but there is no SMTP sending yet; they report FAILED with "Email delivery is not implemented yet". Plan: add an SMTP client (e.g. nodemailer) with TLS, authentication stored encrypted like other secrets, and a test-send button.
-- **Kubernetes workload discovery.** The sync endpoint returns `501 not_implemented`. Workloads are registered by hand; with the stored cluster credentials Segmentra could now read namespaces, workloads and pod labels from the cluster and map labels to tags automatically. Generated NetworkPolicies still select all pods in the namespace (`podSelector: {}`).
-- **Compliance report follow-ups.** Scheduled generation and delivery, reports scoped by tag or VLAN (for example only the cardholder-data environment), more frameworks, signed PDF output, and continuous firewall-log evidence (see [Compliance Reports](docs/compliance-reports.md#not-supported-yet)).
-- **Policy as code follow-ups.** Segmentra pulling from Git itself, hosts/tags/VLANs/templates as code, a published JSON Schema, and atomic multi-document imports (see [Policy as Code](docs/policy-as-code.md#not-supported-yet)).
-- **Docker Swarm awareness.** Read services, stacks and published ports from the Docker API so policies can refer to services, warn when a swarm node is missing from the inventory, and cover container-to-container and overlay traffic.
-- **UI for API-only features.** These work through the API but have no screens yet: policy recommendations, enforcement points (network device ACLs), IoT baselines and observed flows, and host interfaces.
-- **More integrations.** SOAR and vulnerability-database integrations can be configured but don't do anything yet.
-
-### Testing still to do
-
-- **Microsoft Active Directory** (only OpenLDAP was tested), and LDAPS with a real certificate.
-- **The real AbuseIPDB service and real Slack workspaces.** Both were tested against mocks.
-- **Hosts that log only to journald** (no rsyslog) for Firewall Learning and Policy Impact Analysis: the `journalctl -k` fallback exists but was not run against a real systemd host (the Docker lab covers the kernel-log-file fallback).
-- **Full systemd VM/server reboot validation for native firewalld/UFW**, native Ansible end-to-end, and RHEL with SELinux enforcing and native firewalld. Native ACL persistence is implemented; these target environments still require validation.
-- **ECDSA and PKCS#8-encrypted SSH keys** on live hosts, and OpenSSH clients older than 8.4.
-- **Running the Windows scripts on Windows** (`start.bat`, `run.ps1`, `install.ps1`, `scripts/check-db-status.ps1`). They were only parsed and reviewed.
+Segmentra has been tested mainly in lab environments: Docker containers (Alpine, Debian 12, Ubuntu 24.04 and Rocky Linux 9.3), kind clusters, and automated runs through the web UI. The feature sections above each carry a short **Tested** / **Not tested yet** note. The full record of what has been exercised, what has not, and what is not implemented yet is kept in [docs/testing-status.md](docs/testing-status.md).
 
 ---
 
@@ -812,6 +719,7 @@ See also [Known Limitations](#known-limitations) and the [OT/IoT guide](docs/iot
 | [Docker Swarm Guide](docs/docker-swarm.md) | Swarm node profile and Docker-published ports |
 | [Policy as Code](docs/policy-as-code.md) | YAML/JSON export and import, CLI and CI workflow |
 | [Compliance Reports](docs/compliance-reports.md) | Evidence reports mapped to PCI DSS, ISO 27001, SOC 2 and HIPAA |
+| [Testing Status](docs/testing-status.md) | What has been tested, what has not, and what is not implemented yet |
 | [Ansible Playbook](docs/playbook-ansible.md) | Deployment playbook documentation |
 | [Original Specification](docs/segmentra_fleet_microsegmentation_firewall_manager_full_specification.md) | The original product specification (historical; the implementation differs in places) |
 
@@ -833,6 +741,6 @@ Segmentra is licensed under the [Apache License 2.0](LICENSE). Copyright 2026 Be
 - misconfigured, missing or ineffective firewall rules, and traffic that is blocked or allowed by mistake;
 - financial, business, legal or regulatory loss, including failed audits (compliance reports are supporting evidence, not an audit opinion or a certification).
 
-Segmentra changes firewall rules on real hosts, clusters and gateways, and is a **work in progress** that has been tested mainly in lab environments (see [Not Yet Tested](#not-yet-tested)). **You use it entirely at your own risk and responsibility.** Test it on non-critical systems first, keep out-of-band access, keep backups, and review every policy before deploying it.
+Segmentra changes firewall rules on real hosts, clusters and gateways, and is a **work in progress** that has been tested mainly in lab environments (see [Testing status](docs/testing-status.md)). **You use it entirely at your own risk and responsibility.** Test it on non-critical systems first, keep out-of-band access, keep backups, and review every policy before deploying it.
 
 Nothing in this README, the documentation or the user interface changes the terms of the [LICENSE](LICENSE), sections 7 (Disclaimer of Warranty) and 8 (Limitation of Liability).
