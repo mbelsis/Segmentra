@@ -88,8 +88,9 @@ function parseLogLine(line: string): ParsedLogEntry | null {
   const prefixIdx = line.indexOf('FW-AUDIT');
   if (prefixIdx < 0) return null;
 
-  // Extract timestamp (format varies by system)
-  const timestampMatch = line.match(/^(\w+\s+\d+\s+\d+:\d+:\d+)|(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/);
+  // Extract timestamp (format varies by system). Keep the zone offset of RFC 3339 stamps
+  // (rsyslog high-precision, journalctl short-iso) so the UI shows the correct local time.
+  const timestampMatch = line.match(/^(\w+\s+\d+\s+\d+:\d+:\d+)|(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)/);
   const timestamp = timestampMatch ? timestampMatch[0] : new Date().toISOString();
 
   // Prefix: "FW-AUDIT: ALLOW: established: " or "FW-AUDIT: DENY my comment: "

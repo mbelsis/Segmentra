@@ -26,6 +26,12 @@ Run `npm run test:integration:compliance` against a running Segmentra API (same 
 
 Run `npm run test:integration:policy-code` against a running Segmentra API (same settings as the other integration tests; no Docker needed). It creates its own users, tags, hosts and policy sets (approved versions cannot be deleted, so it archives its versions and leaves those records behind: run it against a development stack). It checks, through the real API and the `scripts/segmentra-policy.mjs` CLI: that a dry run writes nothing, creating a policy set from a document, idempotency for YAML text, JSON and the `{content}` form, export determinism and the export-import round trip (including FORWARD destinations, log modes and interface scopes), the diff on changes and reordering detection, that an imported version is a DRAFT that needs approval and cannot be approved by the user who imported it, that all validation problems of a document are reported together with their paths, that a different scope is not applied unless asked, permissions (viewer and approver cannot import) and ambiguous names, and the CLI's `plan` / `apply` output and exit codes. See [Policy as Code](../docs/policy-as-code.md).
 
+## OT Gateway Checks
+
+Run `npm run test:integration:ot-gateway [-- --keep]`. It needs only Docker: `tests/ot-gateway-lab/docker-compose.yml` starts its own PostgreSQL and API (port 18081) next to a Debian 12 **gateway** with one leg in an IT network (172.31.10.0/24) and one in an OT network (172.31.20.0/24), two Debian **OT devices** behind it (`plc-1`, `rtu-2`, default route through the gateway) and two IT clients (`hmi`, `eng-ws`, routed to the OT network through the gateway). The gateway forwards with iptables; nothing else sits between the clients and the devices, so the FORWARD rules Segmentra deploys are what decides the traffic.
+
+Through the real API and the SSH executor it checks: readiness on the gateway, two assets assigned to it, ARP discovery from the gateway finding both devices, a tag-scoped policy with FORWARD rules (HMI to the PLC on Modbus, SCADA to the RTU on DNP3, an explicit logged DENY of Modbus to the RTU), the deployed `SEGMENTRA-FWD` chain and its single `FORWARD` jump, and then live TCP and ICMP traffic from the clients through the gateway (allowed ports open, other ports and other clients dropped by the per-device default deny, the DENY counter rising, the devices talking to each other on the OT network unfiltered, SSH to the gateway itself still open), protection coverage with service names and cleartext flags, Active Rules for the gateway, drift after a FORWARD rule is deleted by hand and its repair by redeploying, unassigning a device (default deny stays until the next deployment, then only the explicit DENY remains), and a deployment with a one-minute expiry and the REMOVE action that strips the chain and lets all traffic through again. `--keep` leaves the lab running (`SEGMENTRA_API_URL=http://127.0.0.1:18081 npm run dev -- --port 5175` in `apps/web` points the UI at it); the lab is removed otherwise. Not covered: nftables on the gateway, IPv6 devices, and Firewall Learning of forwarded traffic.
+
 ## Docker Swarm Checks
 
 Run `npm run test:integration:swarm` against a running Segmentra API (same settings as the Kubernetes test) with Docker Desktop or Docker. `tests/swarm-lab/lab.sh up` builds the lab in about 40 seconds: three privileged Docker-in-Docker nodes (one manager, two workers) that also run sshd, an overlay network, an nginx service published on 8080, and two client containers; `lab.sh down` removes it. The test creates and removes its own lab (`--reuse` uses a running one, `--keep` leaves it up).
@@ -60,6 +66,10 @@ The test currently verifies:
 - the SSH direct executor can deploy firewall rules using SSH key authentication
 - the deployed `iptables` rules inside the targets match the expected ACL shape
 - live ICMP traffic between target containers is allowed or blocked according to the deployed rules
+- on the Debian target (`target-d`): readiness reports python3, a deployment through the **Ansible executor** (the API runs the playbook with `docker exec` in the `ansible-runner` container; the play recap, the removal of the key material from the bundle, the rules and live TCP/ICMP traffic are checked, and the executor setting is switched back to SSH)
+- a **Firewall Learning** session on the Debian target: log-only rules active, real traffic (ICMP, tcp/8080, tcp/9999) captured through rsyslog, the session restored through the API, the expected flows parsed, the enforced rules back and enforcing
+- the same session with rsyslog's `/etc/rsyslog.d` include disabled, so the lines have to be collected from the kernel log file (the fallback for hosts without a working rsyslog drop-in)
+- a **Policy Impact Analysis** session on the deployed version: logs collected while it runs, stop, analysis (matched flows, flows the default deny would block, no DENY hits), rules restored
 
 ## What It Starts
 
@@ -72,8 +82,10 @@ It starts these temporary services:
 - `target-a`
 - `target-b`
 - `target-c`
+- `target-d`: a Debian 12 target with rsyslog and python3 (`target-debian/`), for the Ansible executor and the learning / impact-analysis sessions. It runs **privileged** so rsyslog can read the kernel log, and the one-shot `nflog-sysctl` service sets `net.netfilter.nf_log_all_netns=1` on the Docker host kernel (without it the kernel does not emit `iptables -j LOG` lines from a container's network namespace)
+- `ansible-runner`: the Ansible runner image from `infra/ansible-runner`, named `segmentra-it-ansible-runner`; the API container mounts the Docker socket for it (as in `docker-compose.yml`)
 
-Each target container is Alpine-based and is configured with:
+Each Alpine target container is configured with:
 
 - `iptables`
 - OpenSSH server

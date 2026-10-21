@@ -1,0 +1,134 @@
+# OT gateway lab: a Debian gateway routing between an IT network and an OT network, two Debian
+# OT devices behind it, two IT clients, and a disposable Segmentra API + database.
+#
+#   it_net 172.31.10.0/24: db .10, api .20, gateway .2, hmi .50, eng .51
+#   ot_net 172.31.20.0/24: gateway .2, plc-1 .11, rtu-2 .12
+#
+# The devices route everything through the gateway (default route), the clients reach the OT
+# network through it, so FORWARD rules on the gateway really filter the traffic.
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: segmentra
+      POSTGRES_PASSWORD: segmentra
+      POSTGRES_DB: segmentra
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U segmentra -d segmentra"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      it_net:
+        ipv4_address: 172.31.10.10
+
+  api:
+    build:
+      context: ../..
+      dockerfile: infra/app/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgres://segmentra:segmentra@db:5432/segmentra
+      JWT_SECRET: ot-gateway-lab-secret-1234567890
+      SEGMENTRA_KEK_B64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      BUNDLES_DIR: /bundles
+      ANSIBLE_RUNNER_CONTAINER: segmentra-unused
+      PORT: 8080
+    ports:
+      - "18081:8080"
+    volumes:
+      - ot_bundles:/bundles
+    networks:
+      it_net:
+        ipv4_address: 172.31.10.20
+
+  # Kernel nf_log lines from a container's network namespace need this sysctl on the Docker host.
+  nflog-sysctl:
+    image: alpine:3.20
+    network_mode: host
+    privileged: true
+    restart: "no"
+    command: sysctl -w net.netfilter.nf_log_all_netns=1
+
+  gateway:
+    build:
+      context: ../docker-ssh-integration/target-debian
+    hostname: ot-gw
+    depends_on:
+      nflog-sysctl:
+        condition: service_completed_successfully
+    environment:
+      TARGET_USER: segmentra
+      TARGET_PASSWORD: segmentra123!
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    sysctls:
+      net.ipv4.ip_forward: 1
+    networks:
+      it_net:
+        ipv4_address: 172.31.10.2
+      ot_net:
+        ipv4_address: 172.31.20.2
+
+  plc-1:
+    build:
+      context: ../docker-ssh-integration/target-debian
+    hostname: plc-1
+    cap_add:
+      - NET_ADMIN
+    entrypoint: ["/bin/sh", "-c", "ip route replace default via 172.31.20.2 && exec /entrypoint.sh"]
+    networks:
+      ot_net:
+        ipv4_address: 172.31.20.11
+
+  rtu-2:
+    build:
+      context: ../docker-ssh-integration/target-debian
+    hostname: rtu-2
+    cap_add:
+      - NET_ADMIN
+    entrypoint: ["/bin/sh", "-c", "ip route replace default via 172.31.20.2 && exec /entrypoint.sh"]
+    networks:
+      ot_net:
+        ipv4_address: 172.31.20.12
+
+  hmi:
+    build:
+      context: ../docker-ssh-integration/target-debian
+    hostname: hmi
+    cap_add:
+      - NET_ADMIN
+    entrypoint: ["/bin/sh", "-c", "ip route replace 172.31.20.0/24 via 172.31.10.2 && exec /entrypoint.sh"]
+    networks:
+      it_net:
+        ipv4_address: 172.31.10.50
+
+  eng:
+    build:
+      context: ../docker-ssh-integration/target-debian
+    hostname: eng-ws
+    cap_add:
+      - NET_ADMIN
+    entrypoint: ["/bin/sh", "-c", "ip route replace 172.31.20.0/24 via 172.31.10.2 && exec /entrypoint.sh"]
+    networks:
+      it_net:
+        ipv4_address: 172.31.10.51
+
+volumes:
+  ot_bundles:
+
+networks:
+  it_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.10.0/24
+  ot_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.20.0/24

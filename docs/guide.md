@@ -279,7 +279,7 @@ Add firewall rules to the version. Each rule specifies:
 | **Source Type** | CIDR, TAG, VLAN, HOST | `TAG` |
 | **Source Value** | IP/CIDR or entity ID | Select "app-server" tag |
 | **Destination Type / Value** | FORWARD rules only: IoT device, CIDR, VLAN, TAG, HOST | an IoT device |
-| **Log Mode** | NONE, LOG, LOG_RATE_LIMITED | `NONE` |
+| **Log Mode** | NONE, LOG, LOG_RATE_LIMITED. LOG writes a kernel log line for every packet the rule decides (prefix `SEGMENTRA: ALLOW|DENY <comment>: `, before the verdict); LOG_RATE_LIMITED caps it at 5 lines/s (burst 10). On nftables and iptables the log rule precedes the verdict rule, so the rate limit never changes the verdict; on firewalld it is the rule's own log element. | `NONE` |
 | **Comment** | Free text | "Allow HTTPS from app tier" |
 
 FORWARD rules filter traffic routed *through* a host, such as an IoT/OT gateway; see [iot.md](iot.md).

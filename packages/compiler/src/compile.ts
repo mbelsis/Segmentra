@@ -596,6 +596,8 @@ function nftForwardRules(input: CompileInput, sets: PreparedSets, prot: Protecte
       const tail = logOnly
         ? [`log prefix "${sanitizeText(`FW-AUDIT: ${r.action} ${commentText || 'forward rule'}`, 120)}: "`, 'accept']
         : [r.action === 'ALLOW' ? 'accept' : 'drop'];
+      const ruleLog = logOnly ? null : nftRuleLogStmt(r, commentText);
+      if (ruleLog) lines.push([srcExpr, dstExpr, nftProtoExpr(r, ports, m.family), ruleLog, comment].filter(Boolean).join(' '));
       lines.push([srcExpr, dstExpr, nftProtoExpr(r, ports, m.family), ...tail, comment].filter(Boolean).join(' '));
     }
   }
@@ -684,6 +686,8 @@ function compileNft(input: CompileInput, logOnly: boolean): string {
         const tail = logOnly
           ? [`log prefix "${sanitizeText(`FW-AUDIT: ${r.action} ${commentText || 'rule'}`, 120)}: "`, 'accept']
           : [action];
+        const ruleLog = logOnly ? null : nftRuleLogStmt(r, commentText);
+        if (ruleLog) (chain === 'input' ? inputRules : outputRules).push([ifExpr, addrExpr, protoExpr, ruleLog, comment].filter(Boolean).join(' '));
         const line = [ifExpr, addrExpr, protoExpr, ...tail, comment].filter(Boolean).join(' ');
         (chain === 'input' ? inputRules : outputRules).push(line);
       };
@@ -747,6 +751,24 @@ function compileNft(input: CompileInput, logOnly: boolean): string {
 // ---------------------------------------------------------------------------
 // iptables / ip6tables
 // ---------------------------------------------------------------------------
+
+/**
+ * Per-rule logging (rule.logMode) on enforced rulesets. The log statement goes into a separate rule
+ * in front of the verdict rule, so a rate limit only limits the logging and never changes the verdict.
+ * Kernel log prefix: "SEGMENTRA: <ALLOW|DENY> <comment>: " (FW-AUDIT is reserved for learning sessions).
+ */
+const RULE_LOG_RATE_NFT = 'limit rate 5/second burst 10 packets';
+const RULE_LOG_RATE_IPT = '-m limit --limit 5/sec --limit-burst 10';
+function nftRuleLogStmt(r: PolicyRule, commentText: string): string | null {
+  if (!r.logMode || r.logMode === 'NONE') return null;
+  const prefix = sanitizeText(`SEGMENTRA: ${r.action} ${commentText || 'rule'}`, 120);
+  return `${r.logMode === 'LOG_RATE_LIMITED' ? `${RULE_LOG_RATE_NFT} ` : ''}log prefix "${prefix}: "`;
+}
+function iptRuleLogTarget(r: PolicyRule, commentText: string): string | null {
+  if (!r.logMode || r.logMode === 'NONE') return null;
+  const body = sanitizeText(`SEGMENTRA: ${r.action} ${commentText || 'rule'}`, 27);
+  return `${r.logMode === 'LOG_RATE_LIMITED' ? `${RULE_LOG_RATE_IPT} ` : ''}-j LOG --log-prefix "${body}: "`;
+}
 
 /** iptables --log-prefix is limited to 29 characters. */
 function iptLogPrefix(label: string): string {
@@ -905,6 +927,8 @@ function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Famil
                 push(`${match} -j LOG --log-prefix ${iptLogPrefix(`${r.action} ${commentText || 'rule'}`)}`);
                 push(`${match} -j RETURN`);
               } else {
+                const ruleLog = iptRuleLogTarget(r, commentText);
+                if (ruleLog) push(`${match} ${ruleLog}`);
                 push(`${match} -j ${action}`);
               }
             }
@@ -978,6 +1002,8 @@ function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Famil
                 push(`${match} -j LOG --log-prefix ${iptLogPrefix(`${r.action} ${commentText || 'fwd rule'}`)}`);
                 push(`${match} -j RETURN`);
               } else {
+                const ruleLog = iptRuleLogTarget(r, commentText);
+                if (ruleLog) push(`${match} ${ruleLog}`);
                 push(`${match} -j ${r.action === 'ALLOW' ? ALLOW : 'DROP'}`);
               }
             }

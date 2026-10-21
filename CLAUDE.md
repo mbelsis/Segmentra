@@ -34,6 +34,7 @@ npm run db:migrate      # Run database migrations (packages/db/scripts/migrate.j
 npm run db:seed         # Seed RBAC roles, system tags and the initial admin user
 npm run db:demo         # Load the sample dataset (packages/db/demo/demo-data.sql; idempotent, defaults to the dev DATABASE_URL, refuses NODE_ENV=production; -- --remove deletes it)
 npm run test:integration:ssh-docker   # Docker-based SSH deployment integration test
+npm run test:integration:ot-gateway   # Docker lab: Debian IoT/OT gateway between an IT and an OT network, FORWARD rules, real traffic (tests/ot-gateway-lab)
 
 # Workspace-specific
 npm run dev -w apps/api           # API dev server (port 8080)
@@ -43,7 +44,7 @@ npm run build -w @segmentra/executor
 npm run build -w apps/api              # also builds shared, compiler and executor
 ```
 
-There is no unit test framework. The automated test is `npm run test:integration:ssh-docker` (see `tests/README.md`): it builds the API image, starts PostgreSQL plus three Alpine SSH targets, deploys real policies via the SSH executor and verifies `iptables` rules and live traffic. Add `-- --keep` to leave the stack running.
+There is no unit test framework. The automated test is `npm run test:integration:ssh-docker` (see `tests/README.md`): it builds the API image, starts PostgreSQL, three Alpine SSH targets, a privileged Debian target (rsyslog, python3) and the Ansible runner, deploys real policies via the SSH and Ansible executors and verifies `iptables` rules, live traffic, drift, Firewall Learning and Policy Impact Analysis sessions (rsyslog and kernel-log fallback). Add `-- --keep` to leave the stack running (API on 18080; `SEGMENTRA_API_URL=http://127.0.0.1:18080 npm run dev -- --port 5174` in `apps/web` points the UI at it).
 
 ### Migrations
 
@@ -111,7 +112,7 @@ Hosts can be Swarm nodes (`hosts.swarm_cluster/swarm_role/swarm_addr/swarm_encry
 - `run-ssh.ts` — Direct SSH rule application
 - `read-rules.ts` — Read current host rules via SSH
 - `check-host-readiness.ts` — Verify host capabilities before deployment
-- `audit-ssh.ts` — Firewall learning: deploy log-only rules, collect/parse traffic logs, restore
+- `audit-ssh.ts` — Firewall learning / policy test sessions: deploy log-only rules, restore, collect logs. Logging goes through an rsyslog drop-in matching `FW-AUDIT`; `seg_reload_rsyslog` tries systemctl/service/rc-service and otherwise restarts `rsyslogd` directly (SIGHUP does not reload rsyslog 8 config), a `logger` self-test records whether the drop-in is active in `<logfile>.offsets` (plus kernel-log file sizes and a journald cursor), and `retrieveAuditLogs` falls back to `journalctl -k` / `kern.log` / `messages` / `syslog` from those markers when it is not
 - `firewall-backup.ts`, `nft-scripts.ts`, `iptables-scripts.ts` — backup/restore and apply scripts scoped to Segmentra's table/chains
 - `remove-policy.ts` — remove Segmentra's rules from a host (policy expiry `REMOVE`)
 - `discover-host.ts` — read-only host facts for inventory discovery

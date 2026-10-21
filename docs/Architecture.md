@@ -1077,6 +1077,7 @@ Firewall Learning is a powerful feature that helps administrators discover the c
 - **iptables**: Configures rsyslog to capture LOG target messages with "FW-AUDIT" prefix
 - Logs are written to `/var/log/segmentra-audit-<hostname>-<timestamp>.log` on remote servers
 - rsyslog configuration is automatically cleaned up during restore
+- rsyslog is reloaded through systemctl / service / rc-service, or restarted directly where there is no service manager; a self-test checks that the drop-in is active, and otherwise the session's FW-AUDIT lines are collected from `journalctl -k` or the kernel log files (`kern.log`, `messages`, `syslog`) from the position recorded at session start
 
 #### Usage
 

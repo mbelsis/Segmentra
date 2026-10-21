@@ -29,12 +29,17 @@ services:
       JWT_SECRET: integration-test-secret-1234567890
       SEGMENTRA_KEK_B64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
       BUNDLES_DIR: /bundles
-      ANSIBLE_RUNNER_CONTAINER: segmentra-unused
+      ANSIBLE_RUNNER_CONTAINER: segmentra-it-ansible-runner
       PORT: 8080
     ports:
       - "18080:8080"
+    # The Docker socket is only needed by the Ansible executor (docker exec into the runner).
+    # Inside the Docker Desktop / Linux VM the socket is owned by root:root, hence group 0.
+    group_add:
+      - "0"
     volumes:
       - integration_bundles:/bundles
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       integration_net:
         ipv4_address: 172.29.0.20
@@ -84,8 +89,47 @@ services:
       integration_net:
         ipv4_address: 172.29.0.33
 
+  # Kernel nf_log messages from a container's network namespace are only emitted when this
+  # sysctl is set on the host kernel (needed by target-d's rsyslog-based log collection).
+  nflog-sysctl:
+    image: alpine:3.20
+    network_mode: host
+    privileged: true
+    restart: "no"
+    command: sysctl -w net.netfilter.nf_log_all_netns=1
+
+  # Debian with rsyslog and python3: Firewall Learning / Policy Impact Analysis sessions and
+  # the Ansible executor. Privileged so rsyslog's imklog can read the kernel log.
+  target-d:
+    build:
+      context: ./target-debian
+    environment:
+      TARGET_USER: segmentra
+      TARGET_PASSWORD: segmentra123!
+    privileged: true
+    depends_on:
+      nflog-sysctl:
+        condition: service_completed_successfully
+    volumes:
+      - ./.runtime/keys:/runtime-keys:ro
+    networks:
+      integration_net:
+        ipv4_address: 172.29.0.34
+
+  ansible-runner:
+    build:
+      context: ../../infra/ansible-runner
+    container_name: segmentra-it-ansible-runner
+    volumes:
+      - integration_bundles:/bundles
+      - integration_ansible_ssh:/runner/ssh
+    networks:
+      integration_net:
+        ipv4_address: 172.29.0.21
+
 volumes:
   integration_bundles:
+  integration_ansible_ssh:
 
 networks:
   integration_net:

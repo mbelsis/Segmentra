@@ -49,8 +49,92 @@ export interface AuditSessionResult {
 const BACKUP_DIR = SEGMENTRA_BACKUP_DIR;
 const RSYSLOG_CONF = '/etc/rsyslog.d/99-segmentra-audit.conf';
 const AUDIT_POLICY_PATH = '/etc/segmentra-audit.policy';
-const RSYSLOG_RESTART =
-  'systemctl restart rsyslog 2>/dev/null || service rsyslog restart 2>/dev/null || pkill -HUP rsyslogd 2>/dev/null || echo "warning: could not restart rsyslog" >&2';
+/**
+ * Shell function that makes rsyslog read its configuration again. Service managers first; without
+ * one (containers, chroots, minimal images) the daemon is restarted directly: rsyslog 8 only reopens
+ * its output files on SIGHUP and keeps running with the old configuration.
+ */
+const RSYSLOG_RELOAD_FN = [
+  'seg_reload_rsyslog() {',
+  '  if command -v systemctl >/dev/null 2>&1 && systemctl restart rsyslog >/dev/null 2>&1; then return 0; fi',
+  '  if command -v service >/dev/null 2>&1 && service rsyslog restart >/dev/null 2>&1; then return 0; fi',
+  '  if command -v rc-service >/dev/null 2>&1 && rc-service rsyslog restart >/dev/null 2>&1; then return 0; fi',
+  '  if pgrep -x rsyslogd >/dev/null 2>&1; then',
+  '    pkill -x rsyslogd 2>/dev/null || true',
+  '    seg_i=0; while pgrep -x rsyslogd >/dev/null 2>&1 && [ "$seg_i" -lt 10 ]; do sleep 1; seg_i=$((seg_i+1)); done',
+  '  fi',
+  '  if ! pgrep -x rsyslogd >/dev/null 2>&1; then rm -f /run/rsyslogd.pid /var/run/rsyslogd.pid; fi',
+  '  if rsyslogd >/dev/null 2>&1; then return 0; fi',
+  '  echo "warning: could not restart rsyslog" >&2',
+  '  return 1',
+  '}'
+].join('\n');
+const RSYSLOG_RESTART = `${RSYSLOG_RELOAD_FN}\nseg_reload_rsyslog || true`;
+
+/**
+ * State file for the fallback log collection (next to the audit log file): where the kernel log
+ * files ended when the session started, a journald cursor, and whether the rsyslog drop-in works.
+ */
+const offsetsPath = (logFilePath: string) => `${logFilePath}.offsets`;
+const KERNEL_LOG_FILES = ['/var/log/kern.log', '/var/log/messages', '/var/log/syslog'];
+
+function recordKernelLogOffsetsSnippet(logFilePath: string, rsyslogState: string): string {
+  const off = shq(offsetsPath(logFilePath));
+  return [
+    `umask 077; : > ${off}`,
+    `echo "since $(date +%s)" >> ${off}`,
+    `echo "rsyslog ${rsyslogState}" >> ${off}`,
+    'if command -v journalctl >/dev/null 2>&1; then',
+    `  seg_cur=$(journalctl -k -q --no-pager -n 0 --show-cursor 2>/dev/null | sed -n 's/^-- cursor: //p'); [ -n "$seg_cur" ] && echo "cursor $seg_cur" >> ${off}`,
+    'fi',
+    `for seg_f in ${KERNEL_LOG_FILES.join(' ')}; do if [ -f "$seg_f" ]; then echo "file $seg_f $(wc -c < "$seg_f")" >> ${off}; fi; done`,
+    'true'
+  ].join('\n');
+}
+
+/**
+ * Hosts without rsyslog, or where the drop-in could not be activated: append this session's
+ * FW-AUDIT lines from journald (kernel stream, by cursor) or from the kernel log files (from the
+ * recorded offsets) to the audit log file, then move the markers so a later collection does not
+ * read the same lines again.
+ */
+function collectKernelLogFallbackSnippet(logFilePath: string): string {
+  const log = shq(logFilePath);
+  const off = shq(offsetsPath(logFilePath));
+  return [
+    `if [ -f ${off} ] && ! grep -q '^rsyslog active' ${off}; then`,
+    `  seg_since=$(sed -n 's/^since //p' ${off}); seg_cur=$(sed -n 's/^cursor //p' ${off})`,
+    '  seg_tmp=$(mktemp) || exit 1',
+    '  seg_new=$(mktemp) || exit 1',
+    `  grep -v '^since \\|^cursor \\|^file ' ${off} > "$seg_new"`,
+    '  echo "since $(date +%s)" >> "$seg_new"',
+    '  if command -v journalctl >/dev/null 2>&1; then',
+    '    if [ -n "$seg_cur" ]; then journalctl -k -q --no-pager -o short-iso --show-cursor --after-cursor="$seg_cur" > "$seg_tmp" 2>/dev/null || true;',
+    '    else journalctl -k -q --no-pager -o short-iso --show-cursor --since="@${seg_since:-0}" > "$seg_tmp" 2>/dev/null || true; fi',
+    '    seg_next=$(sed -n \'s/^-- cursor: //p\' "$seg_tmp" | tail -n 1); [ -n "$seg_next" ] && echo "cursor $seg_next" >> "$seg_new"',
+    '  fi',
+    '  if ! grep -q FW-AUDIT "$seg_tmp" 2>/dev/null; then',
+    '    : > "$seg_tmp"',
+    // The same kernel line is usually in more than one file (kern.log and syslog): use the first file with lines.
+    `    sed -n 's/^file //p' ${off} | while read -r seg_f seg_off; do`,
+    '      [ -f "$seg_f" ] || continue',
+    '      seg_size=$(wc -c < "$seg_f")',
+    '      if [ "$seg_size" -ge "${seg_off:-0}" ]; then tail -c +$((${seg_off:-0}+1)) "$seg_f"; else cat "$seg_f"; fi | grep -F FW-AUDIT >> "$seg_tmp" || true',
+    '      if grep -q "SRC=\\|saddr" "$seg_tmp" 2>/dev/null; then break; fi',
+    '    done',
+    '  fi',
+    `  for seg_f in ${KERNEL_LOG_FILES.join(' ')}; do if [ -f "$seg_f" ]; then echo "file $seg_f $(wc -c < "$seg_f")" >> "$seg_new"; fi; done`,
+    '  seg_n=$(grep -F FW-AUDIT "$seg_tmp" | grep -c "SRC=\\|saddr" || true)',
+    '  if [ "$seg_n" -gt 0 ]; then',
+    `    grep -F FW-AUDIT "$seg_tmp" >> ${log}`,
+    `    echo "collected $seg_n FW-AUDIT lines from the kernel log (rsyslog drop-in inactive)"`,
+    '  fi',
+    `  cat "$seg_new" > ${off}`,
+    '  rm -f "$seg_tmp" "$seg_new"',
+    'fi',
+    'true'
+  ].join('\n');
+}
 
 function collector(host: AuditSshHost) {
   let stdout = '';
@@ -149,13 +233,29 @@ async function configureLogging(host: AuditSshHost, logFilePath: string, opts: S
     // rsyslog drops privileges to "syslog" on Debian/Ubuntu; let it write the file
     `if id syslog >/dev/null 2>&1; then chown syslog ${shq(logFilePath)} || true; fi`,
     'if ! command -v rsyslogd >/dev/null 2>&1; then',
-    '  echo "warning: rsyslogd not found; FW-AUDIT log lines will not be collected into the audit log file" >&2',
+    '  echo "warning: rsyslogd not found; FW-AUDIT lines will be collected from journald or the kernel log file instead" >&2',
+    recordKernelLogOffsetsSnippet(logFilePath, 'missing'),
     '  exit 0',
     'fi',
     `mkdir -p "$(dirname ${shq(RSYSLOG_CONF)})"`,
     `printf '%s\\n' ${shq(line1)} ${shq(line2)} > ${shq(RSYSLOG_CONF)}`,
     `chmod 644 ${shq(RSYSLOG_CONF)}`,
-    RSYSLOG_RESTART
+    RSYSLOG_RESTART,
+    // Self-test through the syslog socket: the drop-in matches on the message text, so a line
+    // logged with `logger` lands in the audit file only when rsyslog has read the new configuration.
+    'seg_mark="segmentra-selftest-$$-$(date +%s)"',
+    'seg_state=inactive',
+    'if command -v logger >/dev/null 2>&1; then',
+    '  logger -t segmentra "FW-AUDIT selftest $seg_mark" 2>/dev/null || true',
+    `  seg_i=0; while [ "$seg_i" -lt 6 ] && ! grep -q "$seg_mark" ${shq(logFilePath)} 2>/dev/null; do sleep 0.5; seg_i=$((seg_i+1)); done`,
+    `  if grep -q "$seg_mark" ${shq(logFilePath)} 2>/dev/null; then seg_state=active; fi`,
+    'fi',
+    'if [ "$seg_state" = active ]; then',
+    `  echo "rsyslog is writing FW-AUDIT lines to ${logFilePath}"`,
+    'else',
+    `  echo "warning: rsyslog did not pick up ${RSYSLOG_CONF}; FW-AUDIT lines will be collected from journald or the kernel log file instead" >&2`,
+    'fi',
+    recordKernelLogOffsetsSnippet(logFilePath, '$seg_state')
   ].join('\n');
   return runSshSudo(host, script, opts);
 }
@@ -289,6 +389,13 @@ export async function retrieveAuditLogs(
 ): Promise<AuditSessionResult> {
   const c = collector(host);
   try {
+    if (!isSafeAbsolutePath(remoteLogPath)) {
+      c.err(`Invalid log file path: ${remoteLogPath}\n`);
+      return c.result(false, 1);
+    }
+    // Hosts without a working rsyslog drop-in: pull this session's lines from journald / the kernel log first.
+    const fallback = await runSshSudo(host, collectKernelLogFallbackSnippet(remoteLogPath), opts);
+    c.add(fallback);
     const scpResult = await scpDownload(host, remoteLogPath, localLogPath, opts);
     c.add(scpResult);
     if (scpResult.exitCode === 0 && fs.existsSync(localLogPath)) {
