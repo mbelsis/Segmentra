@@ -115,12 +115,12 @@ spec:
 | Type | Fields |
 |---|---|
 | `TAG` | `tag`: the tag name |
-| `VLAN` | `vlan`: the VLAN name, or `vlanTag`: its 802.1Q number |
+| `VLAN` | `vlanTag`: its 802.1Q number, and/or `vlan`: the VLAN name. VLAN names are not unique, so the tag number wins when both are given (the name is used only when no VLAN has that tag). An export writes both |
 | `HOST_LIST` | `hosts`: a list of hostnames |
 
-**Interface scope** (`spec.interfaceScope`, and per rule): `ALL_INTERFACES`, `INTERFACE_NAME` with `names: [eth0]`, or `INTERFACE_ROLE` with `roles: [data]`. A rule without `interfaceScope` follows the policy's.
+**Interface scope** (`spec.interfaceScope`, and per rule): `ALL_INTERFACES`, `INTERFACE_NAME` with `names: [eth0]`, or `INTERFACE_ROLE` with `roles: [data]`. A rule without `interfaceScope` follows the policy's. An empty `roles` / `names` list is accepted (Segmentra can store such a scope, and exports it that way) but matches no interface: the import warns, and deployments of the version are refused until it lists something. `usePolicyInterfaceScope: false` without `interfaceScope` marks a rule whose override has no scope of its own (stored that way by older versions; the compiler then uses the policy scope); exports write it so such rules round-trip.
 
-**References** (`source`, `destination`): a string is a CIDR, a comma-separated list of CIDRs or `any`. Otherwise an object: `{ type: CIDR, value: ... }`, or `{ type: TAG | VLAN | HOST, name: ... }` (`IOT_ASSET` is only allowed as a destination). `id: <uuid>` can be used instead of `name` for a reference on the same instance. An export uses names wherever the entity exists.
+**References** (`source`, `destination`): a string is a CIDR, a comma-separated list of CIDRs or `any`. Otherwise an object: `{ type: CIDR, value: ... }`, or `{ type: TAG | VLAN | HOST, name: ... }` (`IOT_ASSET` is only allowed as a destination). A VLAN reference can also carry `vlanTag: <number>`, which is resolved first (exports write it). `id: <uuid>` can be used instead of `name` for a reference on the same instance. An export uses names wherever the entity exists.
 
 **Strict validation.** Unknown keys are errors, so a typo such as `port:` instead of `ports:` is reported instead of silently ignored. All problems of a document are reported together, each with its path (`spec.rules[2].source`): schema errors, unknown or ambiguous names, duplicate `order` values, invalid CIDRs and ports, FORWARD rules without destination, and the same rule semantics the UI enforces. Documents are limited to 1 MB and 5000 rules.
 
@@ -136,7 +136,8 @@ Instead of `protocol` and `ports`, a rule can name a service from the OT/IoT cat
 | The version a new draft would build on (latest deployed or approved, otherwise the latest) already has the same rules and interface scope | `unchanged` |
 | An existing DRAFT already has the same content | `unchanged` (matches that draft); re-running before approval never piles up drafts |
 | Different rules | `new_version`: a DRAFT vN+1 with the document's rules |
-| Different scope | not applied; a warning says so. Applied with `updateScope` (UI checkbox, `--update-scope`, `?updateScope=true`) |
+| Different scope | not applied; a warning says so, `scopeChangeSkipped: true` and `changes` lists it (`scope: TAG web -> TAG db (not applied: needs updateScope)`). Applied with `updateScope` (UI checkbox, `--update-scope`, `?updateScope=true`) |
+| Same rules, but the description (when the document has one) or the scope (with `updateScope`) differs | `updated`: the policy set is changed, no new version; `changes` lists what changed |
 | Several policy sets with the same name | refused (`409 ambiguous_policy_set`); rename them so the name is unique |
 
 The file is the source of truth for the rules: rules not in the document are not in the new version. The sequence of rules (by `order`) is compared, not the numbers, so renumbering alone is not a change; a pure reordering is reported as one. The document does not create tags, VLANs, hosts or IoT assets, and it never deletes a policy set. `metadata.name` is the identity, so renaming it creates a different policy set.
@@ -159,7 +160,7 @@ node scripts/segmentra-policy.mjs plan policies/ --detailed-exitcode
 node scripts/segmentra-policy.mjs apply policies/ [--update-scope]
 ```
 
-Arguments can be files or directories (`*.yaml`, `*.yml`, `*.json`); a YAML file may contain several documents separated by `---`. Exit codes: `0` ok, `1` error or invalid document, `2` plan with pending changes (`--detailed-exitcode`).
+Arguments can be files or directories (`*.yaml`, `*.yml`, `*.json`); a YAML file may contain several documents separated by `---`. Exit codes: `0` ok, `1` error or invalid document, `2` plan with pending changes (`--detailed-exitcode`). Scope and description differences count as changes and are printed as `~ scope: ...` / `~ description: ...` lines; that includes a scope difference that `apply` only makes with `--update-scope`.
 
 ## Git and CI workflow
 
@@ -197,7 +198,7 @@ The Segmentra server must be reachable from the runner (self-hosted runners for 
 | `GET /api/policy-sets/:id/export?format=yaml\|json&version=latest\|N\|<version id>` | viewer+ | Download a document. The default version is the one a new draft would build on. Response headers `X-Segmentra-Version` and `X-Segmentra-Version-Status` say which one it is |
 | `POST /api/policy-sets/import?dryRun=true\|false&updateScope=true\|false` | operator, admin | Body: YAML text (`Content-Type: application/yaml`), the document as JSON, or `{ "content": "<yaml or json text>" }` |
 
-An import returns `{ dryRun, action, policySetId, name, versionId, versionNumber, versionStatus, matchesVersion, diff: { added, removed, reordered, unchanged }, scopeChanged, scopeUpdated, warnings }` (`201` when something was created, `200` for a dry run or no change), or `400` with `{ error, message, problems: [{ path, message }] }`. The export is deterministic (stable key and rule order, no timestamps), so repeated exports do not create noise in Git.
+An import returns `{ dryRun, action, policySetId, name, versionId, versionNumber, versionStatus, matchesVersion, diff: { added, removed, reordered, unchanged }, scopeChanged, scopeUpdated, scopeChangeSkipped, descriptionChanged, changes, warnings }` (`201` when a policy set or version was created, `200` for a dry run, `updated` or no change). `action` is `created`, `new_version`, `updated` or `unchanged`; `changes` lists policy-set level differences (scope, description), applied or not, or `400` with `{ error, message, problems: [{ path, message }] }`. The export is deterministic (stable key and rule order, no timestamps), so repeated exports do not create noise in Git.
 
 ## Tested, and not tested yet
 

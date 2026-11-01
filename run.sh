@@ -6,6 +6,8 @@ cd "$ROOT_DIR"
 
 ACTION=""
 MODE=""
+HARDENED_FLAG=0
+HARDENED_COMPOSE_FILE="docker-compose.yml:docker-compose.hardened.yml"
 
 # Parse arguments
 for arg in "$@"; do
@@ -15,6 +17,7 @@ for arg in "$@"; do
     --status) ACTION="status" ;;
     --development|--dev|-d) MODE="development" ;;
     --production|--prod|-p) MODE="production" ;;
+    --hardened) HARDENED_FLAG=1 ;;
   esac
 done
 
@@ -29,6 +32,9 @@ if [ -z "$ACTION" ] || [ -z "$MODE" ]; then
   echo "Modes:"
   echo "  --development  Local dev (Node.js + Docker DB)"
   echo "  --production   Docker Compose (all containers)"
+  echo "  --hardened     With --production: also use docker-compose.hardened.yml and record it as"
+  echo "                 COMPOSE_FILE in .env (install.sh --production --hardened does the same)."
+  echo "                 Once recorded, every run.sh / docker compose call keeps using it."
   echo ""
   echo "Examples:"
   echo "  ./run.sh --start --development"
@@ -142,6 +148,44 @@ if [ "$MODE" = "development" ]; then
   esac
 
 elif [ "$MODE" = "production" ]; then
+  # Hardened mode (docker-compose.hardened.yml) must be applied to EVERY compose call, or a
+  # plain `docker compose up -d` recreates the containers without it (Docker socket mounted
+  # again, API/DB published, writable filesystems). The source of truth is COMPOSE_FILE in
+  # .env, which docker compose reads by itself.
+  HARDENED=0
+  if [ "$HARDENED_FLAG" = "1" ]; then
+    touch .env
+    chmod 600 .env
+    if grep -q '^COMPOSE_FILE=' .env; then
+      if ! grep -q '^COMPOSE_FILE=.*docker-compose.hardened.yml' .env; then
+        echo "[segmentra] ERROR: .env sets COMPOSE_FILE without docker-compose.hardened.yml; set it to:"
+        echo "            COMPOSE_FILE=$HARDENED_COMPOSE_FILE"
+        exit 1
+      fi
+    else
+      if [ -s .env ] && [ -n "$(tail -c1 .env)" ]; then echo >> .env; fi
+      echo "COMPOSE_FILE=$HARDENED_COMPOSE_FILE" >> .env
+      echo "[segmentra] Recorded hardened mode in .env (COMPOSE_FILE=$HARDENED_COMPOSE_FILE)"
+    fi
+  fi
+  if [ -n "${COMPOSE_FILE:-}" ]; then
+    # An exported COMPOSE_FILE overrides .env for docker compose.
+    case "$COMPOSE_FILE" in *docker-compose.hardened.yml*) HARDENED=1 ;; esac
+  elif [ -f .env ] && grep -q '^COMPOSE_FILE=.*docker-compose.hardened.yml' .env; then
+    HARDENED=1
+  else
+    # Not recorded, but the running API container is hardened (started by hand with
+    # -f docker-compose.hardened.yml): keep it hardened instead of silently undoing it.
+    APP_ID="$(docker compose ps -q segmentra-app 2>/dev/null || true)"
+    if [ -n "$APP_ID" ] && [ "$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$APP_ID" 2>/dev/null)" = "true" ]; then
+      echo "[segmentra] The running stack uses docker-compose.hardened.yml; keeping it for this command."
+      echo "            Run with --hardened once to record it in .env."
+      export COMPOSE_FILE="$HARDENED_COMPOSE_FILE"
+      HARDENED=1
+    fi
+  fi
+  [ "$HARDENED" = "1" ] && echo "[segmentra] Hardened mode (docker-compose.yml + docker-compose.hardened.yml)"
+
   case "$ACTION" in
     start)
       echo "[segmentra] Starting production environment..."
@@ -156,8 +200,13 @@ elif [ "$MODE" = "production" ]; then
       echo
       echo "  Services started (the API runs migrations on startup: docker compose logs -f segmentra-app):"
       echo "    UI:  http://localhost:${WEB_PORT:-80}"
-      echo "    API: http://127.0.0.1:${API_PORT:-8080}"
-      echo "    DB:  127.0.0.1:${DB_PORT:-15432}"
+      if [ "$HARDENED" = "1" ]; then
+        echo "    API: not published (hardened); use the UI's /api proxy"
+        echo "    DB:  not published (hardened)"
+      else
+        echo "    API: http://127.0.0.1:${API_PORT:-8080}"
+        echo "    DB:  127.0.0.1:${DB_PORT:-15432}"
+      fi
       echo
       docker compose ps
       ;;

@@ -3,7 +3,7 @@ import { z } from 'zod';
 
 import { pool } from '../db/pool.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
-import { parseCidr, parsePortSpec } from '../services/ip-utils.js';
+import { cidrContains, cidrsOverlap, parseCidr, parsePortSpec, type PortRange } from '../services/ip-utils.js';
 import { encryptBlob } from '../services/crypto.js';
 import {
   K8sError, MANAGED_BY_LABEL, MANAGED_BY_VALUE, applyNetworkPolicy, canListNetworkPolicies, canonicalJson, deleteNetworkPolicy,
@@ -368,15 +368,190 @@ kubernetesRouter.get('/clusters/:id/network-policies', requireRole('viewer', 'op
   res.json({ networkPolicies: rows });
 });
 
+// ---- NetworkPolicy generation helpers (pure; exported for tests) ---------------------------------
+
+/** DNS-1123 label (namespaces): lower-case alphanumerics and '-', starting and ending alphanumeric, <= 63. */
+export const DNS1123_LABEL = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
+/** DNS-1123 subdomain (object names): dot-separated DNS-1123 labels, <= 253. */
+export const DNS1123_SUBDOMAIN = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
+
+/** Traffic a rule matches: protocol (lower case: tcp/udp/sctp/icmp/any) and port ranges (null = all ports). */
+export type K8sTraffic = { proto: string; ranges: PortRange[] | null };
+
+/** One rule, in rule order, as seen by the NetworkPolicy translation. */
+export type K8sRuleEntry = {
+  action: 'ALLOW' | 'DENY';
+  label: string;
+  traffic: K8sTraffic;
+  /** ipBlock CIDRs the source resolves to. */
+  cidrs: string[];
+  /** ALLOW: label-selector peers (TAG workloads). DENY: the workloads mapped to the TAG source. */
+  selectorPeers: any[];
+  /** ALLOW only: the NetworkPolicy `ports` list (undefined = all ports and protocols). */
+  ports?: Array<{ protocol: string; port?: number; endPort?: number }>;
+};
+
+const PORTLESS = (proto: string) => proto === 'icmp';
+
+function rangesIntersect(a: PortRange[], b: PortRange[]): boolean {
+  return a.some((x) => b.some((y) => x.from <= y.to && y.from <= x.to));
+}
+
+/** True when the union of `outer` covers every port in `inner`. */
+function rangesCover(outer: PortRange[], inner: PortRange[]): boolean {
+  const sorted = [...outer].sort((a, b) => a.from - b.from);
+  return inner.every((r) => {
+    let cursor = r.from;
+    for (const o of sorted) {
+      if (o.from > cursor) break;
+      if (o.to >= cursor) cursor = o.to + 1;
+      if (cursor > r.to) return true;
+    }
+    return cursor > r.to;
+  });
+}
+
+/** True when some packet matches both traffic specs. */
+export function trafficOverlaps(a: K8sTraffic, b: K8sTraffic): boolean {
+  if (a.proto !== 'any' && b.proto !== 'any' && a.proto !== b.proto) return false;
+  if (PORTLESS(a.proto) || PORTLESS(b.proto) || !a.ranges || !b.ranges) return true;
+  return rangesIntersect(a.ranges, b.ranges);
+}
+
+/** True when every packet matched by `inner` is also matched by `outer` (protocol and ports). */
+export function trafficCovers(outer: K8sTraffic, inner: K8sTraffic): boolean {
+  if (outer.proto === 'any' && !outer.ranges) return true;
+  if (inner.proto === 'any') return false; // inner includes protocols outer does not match
+  if (outer.proto !== 'any' && outer.proto !== inner.proto) return false;
+  if (PORTLESS(inner.proto) || !outer.ranges) return true;
+  return rangesCover(outer.ranges, inner.ranges ?? [{ from: 1, to: 65535 }]);
+}
+
+function sameFamily(a: string, b: string): boolean {
+  return parseCidr(a)?.family === parseCidr(b)?.family;
+}
+
+/**
+ * Translate ALLOW/DENY rules (in rule order, first match wins) into NetworkPolicy ingress rules.
+ * NetworkPolicy has no DENY and its allows are an unordered union, so an ALLOW that follows an
+ * overlapping DENY would let the denied traffic through. Traffic is allowed iff some ALLOW matches it
+ * and no DENY before that ALLOW does, so each ALLOW is narrowed by the DENYs before it:
+ *  - the DENY covers the ALLOW's protocol/ports and its CIDR lies strictly inside an ALLOW ipBlock
+ *    -> added to that ipBlock's `except` (same address family only);
+ *  - the DENY covers the ALLOW's protocol/ports and its CIDR contains the ALLOW ipBlock -> that peer is dropped;
+ *  - anything else that overlaps (DENY on a subset of the ALLOW's ports, label-selector peers on either
+ *    side) cannot be expressed and is returned as a conflict; the caller refuses generation then.
+ */
+export function buildIngressRules(entries: K8sRuleEntry[]): { ingress: any[]; warnings: string[]; conflicts: string[] } {
+  const ingress: any[] = [];
+  const warnings: string[] = [];
+  const conflicts: string[] = [];
+  const denies: K8sRuleEntry[] = [];
+  for (const e of entries) {
+    if (e.action === 'DENY') { denies.push(e); continue; }
+    const blocks = e.cidrs.map((cidr) => ({ cidr, except: [] as string[], dropped: null as string | null }));
+    let selectorPeers = e.selectorPeers;
+    for (const d of denies) {
+      if (!trafficOverlaps(d.traffic, e.traffic)) continue;
+      const covers = trafficCovers(d.traffic, e.traffic);
+      if (d.selectorPeers.length > 0 && (blocks.some((bl) => !bl.dropped) || selectorPeers.length > 0)) {
+        conflicts.push(`${d.label} (DENY) precedes ${e.label} (ALLOW) and its TAG source selects Kubernetes workloads by label; NetworkPolicy cannot subtract label-selected pods from an allow`);
+        continue;
+      }
+      for (const bl of blocks) {
+        if (bl.dropped) continue;
+        for (const dc of d.cidrs) {
+          if (!sameFamily(dc, bl.cidr) || !cidrsOverlap(dc, bl.cidr)) continue;
+          if (!covers) {
+            conflicts.push(`${d.label} (DENY ${d.traffic.proto}${d.traffic.ranges ? `/${d.traffic.ranges.map((r) => (r.from === r.to ? r.from : `${r.from}-${r.to}`)).join(',')}` : ''} from ${dc}) precedes ${e.label} (ALLOW from ${bl.cidr}) and covers only part of its protocols/ports; NetworkPolicy cannot express a port-specific exception, split the ALLOW rule so the denied ports are separate`);
+          } else if (cidrContains(dc, bl.cidr)) {
+            bl.dropped = d.label;
+            break;
+          } else {
+            bl.except.push(dc);
+          }
+        }
+      }
+      if (selectorPeers.length > 0 && d.cidrs.length > 0) {
+        const allAddresses = d.cidrs.includes('0.0.0.0/0') && d.cidrs.includes('::/0');
+        if (covers && allAddresses) {
+          warnings.push(`${e.label}: label-selected workloads are already denied by ${d.label}; not emitted`);
+          selectorPeers = [];
+        } else {
+          conflicts.push(`${d.label} (DENY from ${d.cidrs.join(', ')}) precedes ${e.label} (ALLOW), whose TAG source also selects Kubernetes workloads by label; pods with addresses inside the denied range cannot be excluded from a label selector`);
+        }
+      }
+    }
+    const peers: any[] = [];
+    for (const bl of blocks) {
+      if (bl.dropped) {
+        warnings.push(`${e.label}: source ${bl.cidr} is entirely denied by the earlier ${bl.dropped}; not emitted`);
+        continue;
+      }
+      // Drop excepts that are inside another except (redundant).
+      const except = Array.from(new Set(bl.except)).filter((x, i, all) => !all.some((y, j) => j !== i && y !== x && cidrContains(y, x)));
+      peers.push({ ipBlock: except.length ? { cidr: bl.cidr, except } : { cidr: bl.cidr } });
+      if (except.length) warnings.push(`${e.label}: ${except.join(', ')} excluded from ${bl.cidr} (ipBlock.except) because earlier DENY rules match them`);
+    }
+    peers.push(...selectorPeers);
+    if (peers.length === 0) {
+      if (e.cidrs.length + e.selectorPeers.length > 0) warnings.push(`${e.label}: every source is denied by earlier DENY rules; not emitted`);
+      continue;
+    }
+    ingress.push({ ...(e.ports ? { ports: e.ports } : {}), from: peers });
+  }
+  return { ingress, warnings, conflicts };
+}
+
+/**
+ * Normalize a NetworkPolicy spec for drift comparison, applying what the API server does on admission:
+ * empty `ingress`/`egress`/`from`/`to`/`ports`/`except` lists are omitted (omitempty), ports default
+ * to protocol TCP, and empty label selectors inside a peer are dropped.
+ */
+export function normalizeNetworkPolicySpec(spec: any): any {
+  if (!spec || typeof spec !== 'object') return spec ?? null;
+  const out: any = JSON.parse(JSON.stringify(spec));
+  const dropEmpty = (o: any, key: string) => { if (o && Array.isArray(o[key]) && o[key].length === 0) delete o[key]; if (o && o[key] == null) delete o[key]; };
+  const normSelector = (s: any) => {
+    if (!s || typeof s !== 'object') return s;
+    if (s.matchLabels && Object.keys(s.matchLabels).length === 0) delete s.matchLabels;
+    dropEmpty(s, 'matchExpressions');
+    return s;
+  };
+  if (out.podSelector) normSelector(out.podSelector); else out.podSelector = {};
+  for (const dir of ['ingress', 'egress'] as const) {
+    const peerKey = dir === 'ingress' ? 'from' : 'to';
+    if (Array.isArray(out[dir])) {
+      for (const r of out[dir]) {
+        if (Array.isArray(r.ports)) r.ports = r.ports.map((p: any) => ({ ...p, protocol: p?.protocol ?? 'TCP' }));
+        dropEmpty(r, 'ports');
+        if (Array.isArray(r[peerKey])) {
+          for (const peer of r[peerKey]) {
+            if (peer.ipBlock) dropEmpty(peer.ipBlock, 'except');
+            if (peer.podSelector) normSelector(peer.podSelector);
+            if (peer.namespaceSelector) normSelector(peer.namespaceSelector);
+          }
+        }
+        dropEmpty(r, peerKey);
+      }
+    }
+    dropEmpty(out, dir);
+  }
+  return out;
+}
+
 // Deploy policy to cluster
 kubernetesRouter.post('/clusters/:id/deploy-policy', requireRole('operator', 'admin'), async (req, res) => {
   const bodySchema = z.object({
     policyVersionId: z.string().uuid(),
-    namespace: z.string().min(1),
-    policyName: z.string().min(1),
+    namespace: z.string().min(1).max(63).regex(DNS1123_LABEL, 'namespace must be a DNS-1123 label (lower-case letters, digits and "-", starting and ending with a letter or digit, at most 63 characters)'),
+    policyName: z.string().min(1).max(253).regex(DNS1123_SUBDOMAIN, 'policyName must be a DNS-1123 subdomain (lower-case letters, digits, "-" and ".", at most 253 characters)'),
+    // Generate a namespace-wide deny-all ingress policy when no rule can be translated. Without it
+    // generation is refused, so a policy whose rules were all skipped never silently blocks everything.
+    allowDenyAll: z.boolean().default(false),
   });
   const parsed = bodySchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
   const b = parsed.data;
 
   const clusterRes = await pool.query(`SELECT id, cni FROM k8s_clusters WHERE id = $1`, [req.params.id]);
@@ -398,10 +573,13 @@ kubernetesRouter.post('/clusters/:id/deploy-policy', requireRole('operator', 'ad
     [b.policyVersionId]
   );
 
-  // Build NetworkPolicy manifest. NetworkPolicy is allow-only and unordered, so DENY rules and
-  // anything that cannot be expressed exactly are skipped with a warning rather than widened.
-  const ingressRules: any[] = [];
+  // Build the NetworkPolicy manifest. NetworkPolicy is allow-only and its rules are an unordered union,
+  // while Segmentra rules are first-match. DENY rules are therefore not emitted themselves; each one is
+  // subtracted from the later ALLOW rules it overlaps (ipBlock.except, or dropping a fully denied peer),
+  // and generation is refused when that cannot be expressed exactly (see buildIngressRules). Rules with
+  // no NetworkPolicy equivalent (FORWARD, ICMP allows, ...) are skipped with a warning, never widened.
   const warnings: string[] = [];
+  const entries: K8sRuleEntry[] = [];
   const resolve = createSourceResolver({ vlanMode: 'subnet' });
 
   const toIpBlockCidr = (addr: string): string | null => {
@@ -409,9 +587,11 @@ kubernetesRouter.post('/clusters/:id/deploy-policy', requireRole('operator', 'ad
     if (!parsedAddr) return null;
     return addr.includes('/') ? addr : `${addr}/${parsedAddr.family === 4 ? 32 : 128}`;
   };
+  const resolveCidrs = async (rule: any) =>
+    Array.from(new Set((await resolve(rule.source_type, rule.source_value)).map(toIpBlockCidr).filter((c): c is string => !!c)));
 
   const cniIgnoresIpBlockForPods = cni === 'cilium' || cni === 'unknown';
-  const workloadPeers = async (tagId: string, label: string) => {
+  const workloadPeers = async (tagId: string, label: string, quiet = false) => {
     const { rows: wl } = await pool.query(
       `SELECT DISTINCT w.namespace, w.name, w.labels
          FROM k8s_workloads w JOIN k8s_workload_tags wt ON wt.workload_id = w.id
@@ -422,7 +602,7 @@ kubernetesRouter.post('/clusters/:id/deploy-policy', requireRole('operator', 'ad
     for (const w of wl) {
       const labels = w.labels && typeof w.labels === 'object' ? w.labels : {};
       if (Object.keys(labels).length === 0) {
-        warnings.push(`${label}: workload ${w.namespace}/${w.name} has no labels; skipped because an empty podSelector would match every pod in the namespace`);
+        if (!quiet) warnings.push(`${label}: workload ${w.namespace}/${w.name} has no labels; skipped because an empty podSelector would match every pod in the namespace`);
         continue;
       }
       out.push({
@@ -430,7 +610,7 @@ kubernetesRouter.post('/clusters/:id/deploy-policy', requireRole('operator', 'ad
         podSelector: { matchLabels: labels },
       });
     }
-    return out;
+    return { peers: out, total: wl.length };
   };
 
   for (const rule of rules) {
@@ -442,7 +622,19 @@ kubernetesRouter.post('/clusters/:id/deploy-policy', requireRole('operator', 'ad
     }
 
     if (rule.action !== 'ALLOW') {
-      warnings.push(`${label}: DENY rules cannot be expressed in a Kubernetes NetworkPolicy (allow-only); skipped`);
+      if (rule.direction === 'OUT') {
+        warnings.push(`${label}: outbound DENY rules are not translated (egress is not restricted); skipped`);
+        continue;
+      }
+      warnings.push(`${label}: DENY rules have no NetworkPolicy equivalent (allow-only); not emitted, but excluded from later ALLOW rules they overlap`);
+      const denyCidrs = await resolveCidrs(rule);
+      const denyWorkloads = rule.source_type === 'TAG' ? await workloadPeers(rule.source_value, label, true) : { peers: [], total: 0 };
+      const ranges = rule.ports && String(rule.ports).trim() ? parsePortSpec(rule.ports) : null; // invalid ports: treat as all ports (narrows, never widens)
+      entries.push({
+        action: 'DENY', label, cidrs: denyCidrs,
+        selectorPeers: denyWorkloads.total ? [{ workloads: denyWorkloads.total }] : [],
+        traffic: { proto: String(rule.protocol).toLowerCase(), ranges },
+      });
       continue;
     }
     if (rule.protocol === 'icmp') {
@@ -452,12 +644,13 @@ kubernetesRouter.post('/clusters/:id/deploy-policy', requireRole('operator', 'ad
 
     const proto = String(rule.protocol).toUpperCase();
     let ports: Array<{ protocol: string; port?: number; endPort?: number }> | undefined;
+    let ranges: PortRange[] | null = null;
     if (rule.ports && String(rule.ports).trim()) {
       if (!['TCP', 'UDP', 'SCTP'].includes(proto)) {
         warnings.push(`${label}: ports require protocol TCP/UDP/SCTP (got ${rule.protocol}); skipped`);
         continue;
       }
-      const ranges = parsePortSpec(rule.ports);
+      ranges = parsePortSpec(rule.ports);
       if (!ranges) {
         warnings.push(`${label}: invalid port specification "${rule.ports}"; skipped`);
         continue;
@@ -471,11 +664,17 @@ kubernetesRouter.post('/clusters/:id/deploy-policy', requireRole('operator', 'ad
     }
     // protocol 'any' without ports: omit `ports` (= all ports and protocols)
 
-    const addrs = await resolve(rule.source_type, rule.source_value);
-    const cidrs = Array.from(new Set(addrs.map(toIpBlockCidr).filter((c): c is string => !!c)));
+    if (rule.direction === 'OUT' || rule.direction === 'BOTH') {
+      // Segmentra's outbound default is allow, so OUT ALLOW rules don't restrict anything.
+      // Emitting them as NetworkPolicy egress would deny every other outbound connection (DNS too).
+      warnings.push(`${label}: outbound allow is already the default (egress is not restricted); not emitted`);
+    }
+    if (rule.direction !== 'IN' && rule.direction !== 'BOTH') continue;
+
+    const cidrs = await resolveCidrs(rule);
     // TAG sources also select the workloads registered in this cluster and mapped to the tag,
     // by label. Unlike ipBlock, selector peers match in-cluster pods on every CNI.
-    const selectorPeers = rule.source_type === 'TAG' ? await workloadPeers(rule.source_value, label) : [];
+    const selectorPeers = rule.source_type === 'TAG' ? (await workloadPeers(rule.source_value, label)).peers : [];
     if (cidrs.length === 0 && selectorPeers.length === 0) {
       warnings.push(`${label}: ${rule.source_type} source "${rule.source_value}" resolves to no IP addresses${rule.source_type === 'TAG' ? ' or labelled workloads' : ''}; skipped instead of allowing 0.0.0.0/0`);
       continue;
@@ -483,17 +682,26 @@ kubernetesRouter.post('/clusters/:id/deploy-policy', requireRole('operator', 'ad
     if (cidrs.length > 0 && cniIgnoresIpBlockForPods) {
       warnings.push(`${label}: ${cni === 'cilium' ? 'Cilium does not apply ipBlock to cluster-internal pod and node traffic' : 'the cluster CNI is not set, and some CNIs (for example Cilium) do not apply ipBlock to cluster-internal traffic'}, so the ipBlock source(s) ${cidrs.join(', ')} only match clients outside the cluster; map in-cluster workloads to a Segmentra tag and use that TAG as the source (selector peers work on every CNI)`);
     }
-    const peers = [...cidrs.map((cidr) => ({ ipBlock: { cidr } })), ...selectorPeers];
-    const policyRule: any = ports ? { ports } : {};
+    entries.push({ action: 'ALLOW', label, cidrs, selectorPeers, ports, traffic: { proto: String(rule.protocol).toLowerCase(), ranges } });
+  }
 
-    if (rule.direction === 'IN' || rule.direction === 'BOTH') {
-      ingressRules.push({ ...policyRule, from: peers });
-    }
-    if (rule.direction === 'OUT' || rule.direction === 'BOTH') {
-      // Segmentra's outbound default is allow, so OUT ALLOW rules don't restrict anything.
-      // Emitting them as NetworkPolicy egress would deny every other outbound connection (DNS too).
-      warnings.push(`${label}: outbound allow is already the default (egress is not restricted); not emitted`);
-    }
+  const built = buildIngressRules(entries);
+  warnings.push(...built.warnings);
+  if (built.conflicts.length > 0) {
+    return res.status(422).json({
+      error: 'deny_not_expressible',
+      message: `This policy version cannot be translated into a NetworkPolicy without allowing traffic an earlier DENY rule blocks: ${built.conflicts.join('; ')}`,
+      conflicts: built.conflicts,
+      warnings,
+    });
+  }
+  const ingressRules = built.ingress;
+  if (ingressRules.length === 0 && !b.allowDenyAll) {
+    return res.status(422).json({
+      error: 'no_ingress_rules',
+      message: `No rule of this policy version can be translated into a NetworkPolicy ingress rule, so the result would deny all inbound traffic to every pod in namespace ${b.namespace}. Skipped: ${warnings.join('; ') || 'the version has no rules'}. Send allowDenyAll: true to generate the deny-all policy deliberately.`,
+      warnings,
+    });
   }
 
   const manifest = {
@@ -645,7 +853,10 @@ kubernetesRouter.post('/clusters/:id/network-policies/:npId/check', requireRole(
   try {
     const conn = await loadConnection(cluster);
     const live = await getNetworkPolicy(conn, row.namespace, row.policy_name);
-    const state = !live ? 'MISSING' : canonicalJson(live.spec) === canonicalJson(manifest.spec) ? 'IN_SYNC' : 'DRIFTED';
+    // Compared after the API server's defaulting (omitted empty lists, protocol TCP), so a policy that
+    // round-trips unchanged is IN_SYNC.
+    const state = !live ? 'MISSING'
+      : canonicalJson(normalizeNetworkPolicySpec(live.spec)) === canonicalJson(normalizeNetworkPolicySpec(manifest.spec)) ? 'IN_SYNC' : 'DRIFTED';
     await pool.query(`UPDATE k8s_network_policies SET live_state = $2, live_checked_at = now() WHERE id = $1`, [row.id, state]);
     res.json({ ok: true, state, managedBySegmentra: live ? isManagedBySegmentra(live) : null, liveSpec: live?.spec ?? null });
   } catch (e: any) {

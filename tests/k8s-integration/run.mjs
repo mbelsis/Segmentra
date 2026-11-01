@@ -303,8 +303,8 @@ subjects: [{ kind: ServiceAccount, name: ${name}, namespace: kube-system }]
   const wlNoLabels = (await api('POST', `/k8s/clusters/${cluster.id}/workloads`, { token: op, body: { namespace: 'seg-clients', kind: 'Pod', name: 'unlabelled' } })).workload;
   await api('POST', `/k8s/workloads/${wlNoLabels.id}/map-tag`, { token: op, body: { tagId: tagEmpty.id } });
 
-  async function generateAndApply(versionId, namespace, policyName) {
-    const r = await api('POST', `/k8s/clusters/${cluster.id}/deploy-policy`, { token: op, expect: 201, body: { policyVersionId: versionId, namespace, policyName } });
+  async function generateAndApply(versionId, namespace, policyName, extra = {}) {
+    const r = await api('POST', `/k8s/clusters/${cluster.id}/deploy-policy`, { token: op, expect: 201, body: { policyVersionId: versionId, namespace, policyName, ...extra } });
     const dir = mkdtempSync(join(tmpdir(), 'segmentra-k8s-'));
     const file = join(dir, `${policyName}.json`);
     writeFileSync(file, JSON.stringify(r.networkPolicy.manifest, null, 2));
@@ -318,7 +318,32 @@ subjects: [{ kind: ServiceAccount, name: ${name}, namespace: kube-system }]
   console.log('  warnings:\n   - ' + main.warnings.join('\n   - '));
   console.log('  manifest:\n' + JSON.stringify(main.networkPolicy.manifest.spec, null, 2).replace(/^/gm, '    '));
   await generateAndApply(vOpen.id, NS_OPEN, 'segmentra-open');
-  const none = await generateAndApply(vNone.id, NS_NONE, 'segmentra-none');
+  // Every rule of vNone is skipped: generation is refused unless deny-all is asked for explicitly.
+  const noneRefused = await fetch(`${apiBase}/k8s/clusters/${cluster.id}/deploy-policy`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${op}` }, body: JSON.stringify({ policyVersionId: vNone.id, namespace: NS_NONE, policyName: 'segmentra-none' }) });
+  const noneRefusedBody = await noneRefused.json();
+  check('a version whose rules are all skipped is refused (422) without allowDenyAll', noneRefused.status === 422 && noneRefusedBody.error === 'no_ingress_rules' && /resolves to no IP/.test(noneRefusedBody.message ?? ''), `${noneRefused.status} ${noneRefusedBody.error}`);
+  const badName = await fetch(`${apiBase}/k8s/clusters/${cluster.id}/deploy-policy`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${op}` }, body: JSON.stringify({ policyVersionId: vMain.id, namespace: 'Bad_NS', policyName: 'x' }) });
+  check('an invalid namespace (not a DNS-1123 label) is rejected (400)', badName.status === 400);
+  const none = await generateAndApply(vNone.id, NS_NONE, 'segmentra-none', { allowDenyAll: true });
+  check('deny-all (empty ingress) is IN_SYNC after apply (omitted empty ingress is normalised)', (await api('POST', `/k8s/clusters/${cluster.id}/network-policies/${none.networkPolicy.id}/check`, { token: op })).state === 'IN_SYNC');
+
+  // DENY before a broader ALLOW: the denied range becomes ipBlock.except (same family only); a DENY on part of the
+  // ALLOW's ports cannot be expressed and is refused.
+  const vExcept = await approvedVersion('k8s-except', [
+    rule(10, { action: 'DENY', protocol: 'tcp', ports: '5432', sourceType: 'CIDR', sourceValue: `${ips['client-a']}/32`, comment: 'deny-a' }),
+    rule(20, { protocol: 'tcp', ports: '5432', sourceType: 'CIDR', sourceValue: 'any', comment: 'allow-any' }),
+  ]);
+  const ex = await api('POST', `/k8s/clusters/${cluster.id}/deploy-policy`, { token: op, expect: 201, body: { policyVersionId: vExcept.id, namespace: NS, policyName: 'segmentra-except' } });
+  const exFrom = ex.networkPolicy.manifest.spec.ingress[0]?.from ?? [];
+  const v4 = exFrom.find((f) => f.ipBlock?.cidr === '0.0.0.0/0'), v6 = exFrom.find((f) => f.ipBlock?.cidr === '::/0');
+  check('an earlier DENY becomes ipBlock.except of the broader ALLOW (IPv4 only)', v4?.ipBlock.except?.join() === `${ips['client-a']}/32` && v6 && !v6.ipBlock.except, JSON.stringify(exFrom));
+  const vPartial = await approvedVersion('k8s-partial', [
+    rule(10, { action: 'DENY', protocol: 'tcp', ports: '22', sourceType: 'CIDR', sourceValue: `${ips['client-a']}/32`, comment: 'deny-ssh' }),
+    rule(20, { protocol: 'tcp', ports: '1-1024', sourceType: 'CIDR', sourceValue: 'any', comment: 'allow-low' }),
+  ]);
+  const partial = await fetch(`${apiBase}/k8s/clusters/${cluster.id}/deploy-policy`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${op}` }, body: JSON.stringify({ policyVersionId: vPartial.id, namespace: NS, policyName: 'segmentra-partial' }) });
+  const partialBody = await partial.json();
+  check('a DENY on part of a later ALLOW\'s ports is refused (422), never widened', partial.status === 422 && partialBody.error === 'deny_not_expressible' && /deny-ssh/.test(partialBody.message ?? ''), `${partial.status} ${partialBody.error}`);
   results.push({ label: 'warnings: main reports deny/icmp/out/empty-tag', pass: ['deny', 'icmp', 'out', 'tag-empty'].every((k) => main.warnings.some((w) => w.includes(`(${k})`))) });
   const ipBlockWarned = main.warnings.some((w) => w.includes('ipBlock'));
   results.push({ label: `ipBlock/CNI warning is ${cni === 'cilium' ? 'present' : 'absent'} for ${cni}`, pass: cni === 'cilium' ? ipBlockWarned : !ipBlockWarned });
@@ -420,7 +445,7 @@ subjects: [{ kind: ServiceAccount, name: ${name}, namespace: kube-system }]
 
   // A same-named policy that was not created by Segmentra must never be overwritten or deleted by default.
   await run('kubectl', ['--context', ctx, 'apply', '-f', '-'], { input: `apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata: { name: handmade, namespace: ${NS} }\nspec:\n  podSelector: { matchLabels: { app: nothing } }\n  policyTypes: [Ingress]\n` });
-  const hm = await api('POST', `/k8s/clusters/${cluster.id}/deploy-policy`, { token: op, expect: 201, body: { policyVersionId: vNone.id, namespace: NS, policyName: 'handmade' } });
+  const hm = await api('POST', `/k8s/clusters/${cluster.id}/deploy-policy`, { token: op, expect: 201, body: { policyVersionId: vNone.id, namespace: NS, policyName: 'handmade', allowDenyAll: true } });
   const hmApply = await fetch(`${apiBase}/k8s/clusters/${cluster.id}/network-policies/${hm.networkPolicy.id}/apply`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${op}` }, body: '{}' });
   check('refuses to overwrite a policy not created by Segmentra (409)', hmApply.status === 409);
   const hmRemove = await fetch(`${apiBase}/k8s/clusters/${cluster.id}/network-policies/${hm.networkPolicy.id}/remove`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${op}` }, body: '{}' });
@@ -430,17 +455,17 @@ subjects: [{ kind: ServiceAccount, name: ${name}, namespace: kube-system }]
   await kubectl('delete', 'networkpolicy', 'handmade', '-n', NS);
 
   // RBAC: a read-only token can check but cannot apply; the row records the failure.
-  const roRow = (await api('POST', `/k8s/clusters/${roCluster.id}/deploy-policy`, { token: op, expect: 201, body: { policyVersionId: vNone.id, namespace: NS_NONE, policyName: 'ro-test' } })).networkPolicy;
+  const roRow = (await api('POST', `/k8s/clusters/${roCluster.id}/deploy-policy`, { token: op, expect: 201, body: { policyVersionId: vNone.id, namespace: NS_NONE, policyName: 'ro-test', allowDenyAll: true } })).networkPolicy;
   const roApply = await fetch(`${apiBase}/k8s/clusters/${roCluster.id}/network-policies/${roRow.id}/apply`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${op}` }, body: '{}' });
   const roBody = await roApply.json();
   check('read-only service account cannot apply (forbidden is reported)', roApply.status === 502 && /forbidden|403/i.test(roBody.message ?? ''), roBody.message?.slice(0, 80));
   const roList = (await api('GET', `/k8s/clusters/${roCluster.id}/network-policies`, { token: op })).networkPolicies;
   check('failed apply is recorded on the policy (FAILED + error)', roList[0]?.status === 'FAILED' && !!roList[0]?.last_error);
-  const missingNs = await api('POST', `/k8s/clusters/${cluster.id}/deploy-policy`, { token: op, expect: 201, body: { policyVersionId: vNone.id, namespace: 'does-not-exist', policyName: 'x' } });
+  const missingNs = await api('POST', `/k8s/clusters/${cluster.id}/deploy-policy`, { token: op, expect: 201, body: { policyVersionId: vNone.id, namespace: 'does-not-exist', policyName: 'x', allowDenyAll: true } });
   const mnsApply = await fetch(`${apiBase}/k8s/clusters/${cluster.id}/network-policies/${missingNs.networkPolicy.id}/apply`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${op}` }, body: '{}' });
   check('applying into a missing namespace gives a clear 404', mnsApply.status === 404 && /namespace/i.test((await mnsApply.json()).message ?? ''));
   const noCreds = await api('POST', '/k8s/clusters', { token: admin, body: { name: `nocreds-${suffix}`, apiServerUrl: serverUrl } });
-  const ncRow = (await api('POST', `/k8s/clusters/${noCreds.cluster.id}/deploy-policy`, { token: op, expect: 201, body: { policyVersionId: vNone.id, namespace: NS, policyName: 'nc' } })).networkPolicy;
+  const ncRow = (await api('POST', `/k8s/clusters/${noCreds.cluster.id}/deploy-policy`, { token: op, expect: 201, body: { policyVersionId: vNone.id, namespace: NS, policyName: 'nc', allowDenyAll: true } })).networkPolicy;
   const ncApply = await fetch(`${apiBase}/k8s/clusters/${noCreds.cluster.id}/network-policies/${ncRow.id}/apply`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${op}` }, body: '{}' });
   check('cluster without stored credentials cannot be applied to (409)', ncApply.status === 409);
 

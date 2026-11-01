@@ -51,10 +51,11 @@ hostReadinessRouter.post('/hosts/:hostId/check', async (req, res) => {
 
     const result = await checkHostReadiness(sshHostInfo);
 
-    // Update host firewall_backend if auto-detected
-    if (result.backend !== 'unknown' && host.firewall_backend === 'auto') {
+    // Persist the auto-detected backend only for a host that is ready and still set to 'auto' (re-checked in
+    // the UPDATE: an operator may have chosen a backend while the SSH check was running).
+    if (result.ready && result.backend !== 'unknown' && host.firewall_backend === 'auto') {
       await pool.query(
-        `UPDATE hosts SET firewall_backend=$1, updated_at=now() WHERE id=$2`,
+        `UPDATE hosts SET firewall_backend=$1, updated_at=now() WHERE id=$2 AND firewall_backend='auto'`,
         [result.backend, hostId]
       );
     }

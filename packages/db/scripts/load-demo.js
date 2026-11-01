@@ -4,9 +4,13 @@
 //   npm run db:demo -- --remove  remove it again (packages/db/demo/demo-remove.sql)
 //
 // The dataset is idempotent (fixed ids, ON CONFLICT DO NOTHING) and only for evaluating the UI:
-// it contains well-known demo user passwords, so the loader refuses to run when
-// NODE_ENV=production unless SEGMENTRA_DEMO_FORCE=1 is set. Migrations and `npm run db:seed`
-// must have run first (roles, admin user, system tags).
+// it contains well-known demo user passwords. Loading therefore refuses (unless `--force`, or
+// SEGMENTRA_DEMO_FORCE=1, is given) when
+//   - NODE_ENV=production,
+//   - DATABASE_URL points to anything but a local database (localhost / 127.0.0.1 / ::1 / socket),
+//   - or the database already holds users or hosts that are not part of the demo dataset
+//     (anything but the seeded "admin"), i.e. it looks like a real installation.
+// Migrations and `npm run db:seed` must have run first (roles, admin user, system tags).
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,15 +29,41 @@ if (!databaseUrl) {
   console.log(`DATABASE_URL not set; using the local development database ${DEV_DATABASE_URL}`);
 }
 
-if (process.env.NODE_ENV === 'production' && process.env.SEGMENTRA_DEMO_FORCE !== '1') {
+const remove = process.argv.includes('--remove');
+const force = process.argv.includes('--force') || process.env.SEGMENTRA_DEMO_FORCE === '1';
+const FORCE_HINT = 'Pass --force (npm run db:demo -- --force) if this really is a throw-away evaluation instance.';
+
+if (!remove && !force && process.env.NODE_ENV === 'production') {
   console.error(
     'Refusing to load demo data with NODE_ENV=production: the dataset contains demo users with a well-known password.\n' +
-      'Set SEGMENTRA_DEMO_FORCE=1 if this really is a throw-away evaluation instance.'
+      FORCE_HINT
   );
   process.exit(1);
 }
 
-const remove = process.argv.includes('--remove');
+/** True when the connection string targets a database on this machine. */
+function isLocalDatabaseUrl(url) {
+  let host;
+  try {
+    const u = new URL(url);
+    host = decodeURIComponent(u.hostname || '');
+    // postgres:///db?host=/var/run/postgresql (unix socket)
+    if (!host) host = u.searchParams.get('host') || '';
+  } catch {
+    return false;
+  }
+  host = host.replace(/^\[|\]$/g, '').toLowerCase();
+  if (!host || host.startsWith('/')) return true;
+  return host === 'localhost' || host === '::1' || /^127\.\d+\.\d+\.\d+$/.test(host);
+}
+
+if (!remove && !force && !isLocalDatabaseUrl(databaseUrl)) {
+  console.error(
+    'Refusing to load demo data into a non-local database (DATABASE_URL host is not localhost / 127.0.0.1 / ::1): ' +
+      'the dataset contains demo users with a well-known password.\n' + FORCE_HINT
+  );
+  process.exit(1);
+}
 const here = path.dirname(fileURLToPath(import.meta.url));
 const sqlPath = path.resolve(here, '..', 'demo', remove ? 'demo-remove.sql' : 'demo-data.sql');
 const sql = fs.readFileSync(sqlPath, 'utf8');
@@ -46,6 +76,24 @@ try {
   if (seeded.rowCount === 0) {
     console.error('Roles are missing: run "npm run db:migrate" and "npm run db:seed" before loading the demo data.');
     process.exit(1);
+  }
+  if (!remove && !force) {
+    // Demo rows have fixed ids (users aaaaaaaa-0000-4000-8000-*, hosts 11111111-0000-4000-8000-*).
+    const { rows } = await client.query(
+      `SELECT
+         (SELECT COUNT(*)::int FROM users
+           WHERE username <> 'admin' AND id::text NOT LIKE 'aaaaaaaa-0000-4000-8000-%') AS users,
+         (SELECT COUNT(*)::int FROM hosts WHERE id::text NOT LIKE '11111111-0000-4000-8000-%') AS hosts`
+    );
+    const foreign = rows[0];
+    if (foreign.users > 0 || foreign.hosts > 0) {
+      console.error(
+        `Refusing to load demo data: the database already has ${foreign.users} user(s) and ${foreign.hosts} host(s) ` +
+          'that are not part of the demo dataset, so it looks like a real installation.\n' + FORCE_HINT
+      );
+      await client.end();
+      process.exit(1);
+    }
   }
   // The file is a single transaction (BEGIN ... COMMIT); any failure rolls everything back.
   await client.query(sql);

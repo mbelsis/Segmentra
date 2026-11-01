@@ -501,6 +501,17 @@ ipt_merge() {
     }' "$1"
 }
 
+# ipt_blocks_all <saved-file>: the *filter section rejects/drops everything not explicitly allowed
+# in INPUT or FORWARD (catch-all -j REJECT/DROP or a DROP policy), like the stock iptables-services
+# /etc/sysconfig/iptables (-A INPUT -j REJECT, -A FORWARD -j REJECT).
+ipt_blocks_all() {
+  awk '
+    substr($0, 1, 1) == "*" { inf = ($0 == "*filter"); next }
+    inf && /^:(INPUT|FORWARD) (DROP|REJECT)/ { f = 1 }
+    inf && /^-A (INPUT|FORWARD) -j (REJECT|DROP)/ { f = 1 }
+    END { exit !f }' "$1"
+}
+
 ipt_persist() {
   pm=$1
   P_FAMILY=$ipt
@@ -517,12 +528,18 @@ ipt_persist() {
   if [ "$P_DISTRO" = debian ]; then
     if [ ! -e "$IPLUG" ] || ! unit_exists netfilter-persistent.service; then pkg=0; fi
   elif ! unit_exists "$IUNIT"; then pkg=0; fi
+  # The service is not enabled yet and its saved file blocks everything: enabling it would leave only
+  # that file's own allows (stock RHEL file: SSH) plus Segmentra's RETURNs after a reboot. The
+  # admin's choice when the service is already enabled; otherwise neither the file nor the service
+  # is touched.
+  blockall=0
+  if [ "$pm" != unpersist ] && [ "$pkg" = 1 ] && [ -f "$IFILE" ] && ! unit_enabled "$IUNIT" && ipt_blocks_all "$IFILE"; then blockall=1; fi
   havenew=0
   if [ "$rr" != 2 ]; then
     if [ -f "$IFILE" ]; then ipt_merge "$IFILE" > "$tmpd/pnew"; havenew=1
     elif [ "$rr" = 0 ]; then ipt_merge /dev/null > "$tmpd/pnew"; havenew=1; fi
   fi
-  if [ "$pm" != check ] && [ "$havenew" = 1 ] && { [ "$pkg" = 1 ] || [ -f "$IFILE" ]; }; then
+  if [ "$pm" != check ] && [ "$blockall" = 0 ] && [ "$havenew" = 1 ] && { [ "$pkg" = 1 ] || [ -f "$IFILE" ]; }; then
     if ! replace_file "$IFILE" "$tmpd/pnew" 600; then
       pwarn write_failed "could not write $IFILE"; presult not_persisted none error; exit 4
     fi
@@ -540,7 +557,7 @@ ipt_persist() {
   if [ "$P_DISTRO" = debian ] && unit_enabled nftables.service && grep -q '^[[:space:]]*flush[[:space:]][[:space:]]*ruleset' /etc/nftables.conf 2>/dev/null; then
     pnote nftables_flush_conflict "nftables.service is also enabled and /etc/nftables.conf contains flush ruleset; depending on boot order it can remove the restored iptables rules (disable nftables.service or remove flush ruleset)"
   fi
-  if [ -f "$IFILE" ] && awk '
+  if [ "$blockall" = 0 ] && [ -f "$IFILE" ] && awk '
       substr($0, 1, 1) == "*" { inf = ($0 == "*filter"); next }
       inf && /^-A INPUT -j (REJECT|DROP)/ { f = 1 }
       END { exit !f }' "$IFILE"; then
@@ -555,6 +572,9 @@ ipt_persist() {
     fi
   elif firewalld_on; then
     pwarn firewalld_active "firewalld is active or enabled and conflicts with $IUNIT, which Segmentra therefore does not enable: the $ipt rules will not survive a reboot while firewalld manages the firewall (disable firewalld and enable $IUNIT to persist them)"
+  elif [ "$blockall" = 1 ]; then
+    meth=$IMETH
+    pwarn saved_rules_block_all "$IFILE rejects or drops all other INPUT/FORWARD traffic (the stock iptables-services file ends with -j REJECT) and $IUNIT is not enabled: enabling it would leave only that file's own allows and Segmentra's rules open after a reboot, so Segmentra does not enable $IUNIT or change $IFILE and the $ipt rules will not survive a reboot. Save your full ruleset to $IFILE first ($ipt-save > $IFILE), then enable $IUNIT"
   elif [ "$pm" = persist ] && ! enable_unit "$IUNIT"; then
     :
   elif unit_enabled "$IUNIT"; then

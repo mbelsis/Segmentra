@@ -179,7 +179,13 @@ iotExtrasRouter.post('/discover/import', requireRole('operator', 'admin'), async
     const mac = normalizeMac(d.mac);
     if (!mac) { skipped.push({ ip: d.ip, mac: d.mac, reason: 'invalid MAC address' }); continue; }
     if (!net.isIP(d.ip)) { skipped.push({ ip: d.ip, mac, reason: 'invalid IP address' }); continue; }
-    const dup = await pool.query(`SELECT name FROM iot_assets WHERE lower(mac_address) = $1 OR split_part(ip_address, '/', 1) = $2 LIMIT 1`, [mac, d.ip]);
+    // Compare separator-free hex on both sides: manually created assets may hold AA-BB-CC-... or aabb.ccdd.eeff.
+    const dup = await pool.query(
+      `SELECT name FROM iot_assets
+        WHERE regexp_replace(lower(coalesce(mac_address, '')), '[^0-9a-f]', '', 'g') = $1
+           OR split_part(btrim(ip_address), '/', 1) = $2 LIMIT 1`,
+      [mac.replace(/:/g, ''), d.ip]
+    );
     if (dup.rows[0]) { skipped.push({ ip: d.ip, mac, reason: `already registered as "${dup.rows[0].name}"` }); continue; }
     const vendor = vendors.get(ouiPrefix(mac)) ?? null;
     const name = d.name ?? `${(vendor ?? 'device').split(/[\s,]+/)[0].toLowerCase()}-${mac.replace(/:/g, '').slice(-6)}`;

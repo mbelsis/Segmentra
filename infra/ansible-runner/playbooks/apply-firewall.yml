@@ -1,8 +1,21 @@
-- name: Segmentra apply firewall rules
+# Three plays (facts set with set_fact carry over from play to play):
+#   1. prepare (all hosts at once): checks, backups, policy upload, host scripts. Nothing enforced yet.
+#   2. apply with lockout protection, `serial` batches of `forks` hosts: arm the unattended revert ->
+#      apply -> verify a fresh SSH connection -> cancel -> persist. With the default linear strategy every
+#      task runs on ALL hosts of the play before the next task starts, so in one big play the time between
+#      arming and cancelling grows with the fleet (ceil(hosts / forks) rounds per task): on ~50+ hosts the
+#      first hosts' revert fired before their cancel ran and rolled back correct policies. In batches the
+#      window is a handful of tasks for at most `forks` hosts, whatever the fleet size. (strategy: free does
+#      not help: it round-robins over all hosts as well.) A batch whose hosts ALL fail ends the whole
+#      playbook in serial mode, so this play never fails a host on purpose: failures are recorded in
+#      seg_apply_failed_msg and reported by play 3. (Only hosts that become unreachable during the apply
+#      itself fail here; a batch of only such hosts stops the rollout.)
+#   3. report (all hosts): fail every host with a recorded failure.
+- name: Segmentra apply firewall rules (prepare)
   hosts: all
   gather_facts: false
   any_errors_fatal: false
-  vars:
+  vars: &segmentra_vars
     segmentra_backup_dir: "/var/backups/segmentra"
     # Inputs (inventory host vars, or environment as fallback). Play vars must not redefine
     # them (play vars take precedence over inventory vars, and a self-reference recurses):
@@ -30,8 +43,12 @@
   # (xtables-compat expressions), and replaying it would clobber their tables anyway.
 
   tasks:
-    - name: Deploy through the native firewall manager
-      include_tasks: apply-manager.yml
+    - name: Prepare the deployment through the native firewall manager
+      include_tasks: apply-manager-prepare.yml
+      when: (segmentra_backend | default('')) in ['firewalld', 'ufw']
+
+    - name: Native firewall manager hosts continue in the apply play
+      meta: end_host
       when: (segmentra_backend | default('')) in ['firewalld', 'ufw']
 
     # Random suffix: two runs within the same second must never share backup files or revert units.
@@ -212,7 +229,20 @@
           /bin/sh {{ (d ~ '/segmentra-iptables.sh') | quote }} restore ip6tables {{ (d ~ '/ip6tables.' ~ segmentra_ts) | quote }} || rc=$?; fi;
           /bin/sh {{ (d ~ '/segmentra-iptables.sh') | quote }} persist iptables || :;
           if command -v ip6tables-save >/dev/null 2>&1; then /bin/sh {{ (d ~ '/segmentra-iptables.sh') | quote }} persist ip6tables || :; fi;
-          {% endif %}exit $rc
+          {% endif %}echo "$rc" > {{ (seg_revert_marker ~ '.rc') | quote }}; exit $rc
+
+- name: Segmentra apply firewall rules (lockout-protected apply, in batches)
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: false
+  # Batches of `forks` hosts: each host's arm -> apply -> verify -> cancel sequence takes a few task rounds,
+  # independent of the fleet size (see the comment at the top). Override with SEGMENTRA_ANSIBLE_SERIAL.
+  serial: "{{ lookup('env', 'SEGMENTRA_ANSIBLE_SERIAL') | default(ansible_forks | default(5), true) | int }}"
+  vars: *segmentra_vars
+  tasks:
+    - name: Deploy through the native firewall manager
+      include_tasks: apply-manager.yml
+      when: (segmentra_backend | default('')) in ['firewalld', 'ufw']
 
     - name: Schedule the unattended revert before changing the firewall
       become: true
@@ -226,15 +256,26 @@
           echo "pid:$!"
         fi
       register: seg_revert_sched
-      failed_when: seg_revert_sched.rc != 0 or not ((seg_revert_sched.stdout_lines | last | default('')) is match('^(systemd:[A-Za-z0-9-]+|pid:[0-9]+)$'))
+      failed_when: false
+
+    - name: Record that the unattended revert could not be scheduled (nothing was changed)
+      when: (seg_revert_sched.rc | default(1)) != 0 or not ((seg_revert_sched.stdout_lines | default([]) | last | default('')) is match('^(systemd:[A-Za-z0-9-]+|pid:[0-9]+)$'))
+      set_fact:
+        seg_apply_failed_msg: "Could not schedule the unattended revert (lockout protection); deployment aborted, no changes made: {{ seg_revert_sched.stderr | default(seg_revert_sched.msg | default('')) }}"
+
+    - name: Stop here when the unattended revert could not be scheduled
+      when: seg_apply_failed_msg is defined
+      meta: end_host
 
     # Exit 0 = cancelled before it fired; 9 = it fired or is firing (never stopped half-way); else = failed.
     # Stopping the .timer does not stop a .service it already started, so that is checked too.
-    # Status: pending | running | done (fired and finished) | gone (neither scheduled nor fired).
+    # Status: pending | running | done (fired, restore succeeded) | failed (fired, restore failed: non-zero
+    # <marker>.rc, or the transient .service failed / Result != success) | gone (neither scheduled nor fired).
     - name: Define the revert cancel and status scripts
       vars:
         tok: "{{ seg_revert_sched.stdout_lines | last }}"
         m: "{{ seg_revert_marker | quote }}"
+        mrc: "{{ (seg_revert_marker ~ '.rc') | quote }}"
         svc: "{{ (seg_revert_unit ~ '.service') | quote }}"
         tmr: "{{ (seg_revert_unit ~ '.timer') | quote }}"
       set_fact:
@@ -258,13 +299,16 @@
         seg_revert_status_sh: |-
           {% if tok.startswith('systemd:') %}
           case "$(systemctl is-active {{ svc }} 2>/dev/null)" in active|activating|deactivating|reloading|refreshing) echo running; exit 0 ;; esac
-          if [ -e {{ m }} ]; then echo done
+          if [ -e {{ m }} ]; then
+            seg_res=$(systemctl show -p Result {{ svc }} 2>/dev/null | sed -n 's/^Result=//p')
+            seg_rrc=$(cat {{ mrc }} 2>/dev/null)
+            if [ "${seg_rrc:-0}" = 0 ] && [ "$(systemctl is-active {{ svc }} 2>/dev/null)" != failed ] && { [ -z "$seg_res" ] || [ "$seg_res" = success ]; }; then echo done; else echo failed; fi
           elif systemctl is-active --quiet {{ tmr }} 2>/dev/null; then echo pending
           else echo gone; fi
           {% else %}
           pid={{ tok[4:] }}
           if kill -0 "$pid" 2>/dev/null; then if [ -e {{ m }} ]; then echo running; else echo pending; fi
-          elif [ -e {{ m }} ]; then echo done
+          elif [ -e {{ m }} ]; then seg_rrc=$(cat {{ mrc }} 2>/dev/null); if [ "${seg_rrc:-0}" = 0 ]; then echo done; else echo failed; fi
           else echo gone; fi
           {% endif %}
 
@@ -373,6 +417,8 @@
       rescue:
         # The host lock is held for the whole run: never finish while the revert is still armed or
         # running, or a retry right after this run would be rolled back by it.
+        # Rescue tasks never fail the host (ignore_unreachable / failed_when: false): in serial mode a batch
+        # whose hosts all fail would end the playbook. The outcome is recorded below and reported by play 3.
         - name: Wait until the host answers again (the unattended revert restores access when it fires)
           wait_for_connection:
             timeout: "{{ (seg_revert_delay | int) + 120 }}"
@@ -382,6 +428,7 @@
         - name: Cancel the unattended revert before the immediate rollback
           when: (seg_revert_cancel.rc | default(-1)) != 0
           become: true
+          ignore_unreachable: true
           shell: "{{ seg_revert_cancel_sh }}"
           register: seg_rescue_cancel
           failed_when: false
@@ -394,9 +441,10 @@
         - name: Wait for the unattended revert to finish (it restores this run's backup)
           when: not seg_revert_cancelled
           become: true
+          ignore_unreachable: true
           shell: "{{ seg_revert_status_sh }}"
           register: seg_revert_state
-          until: seg_revert_state.stdout | default('') in ['done', 'gone']
+          until: seg_revert_state.stdout | default('') in ['done', 'failed', 'gone']
           retries: "{{ ((seg_revert_delay | int) + 120) // 5 }}"
           delay: 5
           failed_when: false
@@ -409,6 +457,7 @@
         - name: Roll back table inet segmentra from this run's backup
           when: nft_will_apply and seg_revert_cancelled
           become: true
+          ignore_unreachable: true
           script: "files/segmentra-nft.sh restore {{ segmentra_backup_dir }}/nft.ruleset.{{ segmentra_ts }}"
           register: nft_rollback
           failed_when: false
@@ -417,6 +466,7 @@
         - name: Roll back iptables SEGMENTRA chains from this run's backup
           when: iptables_will_apply and seg_revert_cancelled
           become: true
+          ignore_unreachable: true
           script: "files/segmentra-iptables.sh restore iptables {{ segmentra_backup_dir }}/iptables.{{ segmentra_ts }}"
           register: ipt_rollback
           failed_when: false
@@ -425,6 +475,7 @@
         - name: Roll back ip6tables SEGMENTRA chains from this run's backup
           when: iptables_will_apply and (ip6_tools_detect.stdout | default('no')) == 'yes' and seg_revert_cancelled
           become: true
+          ignore_unreachable: true
           script: "files/segmentra-iptables.sh restore ip6tables {{ segmentra_backup_dir }}/ip6tables.{{ segmentra_ts }}"
           register: ip6_rollback
           failed_when: false
@@ -434,6 +485,7 @@
         - name: Re-sync reboot persistence after the rollback (nftables)
           when: nft_will_apply and seg_revert_cancelled
           become: true
+          ignore_unreachable: true
           script: "files/segmentra-nft.sh persist"
           failed_when: false
           changed_when: true
@@ -441,6 +493,7 @@
         - name: Re-sync reboot persistence after the rollback (iptables)
           when: iptables_will_apply and seg_revert_cancelled
           become: true
+          ignore_unreachable: true
           script: "files/segmentra-iptables.sh persist iptables"
           failed_when: false
           changed_when: true
@@ -448,19 +501,35 @@
         - name: Re-sync reboot persistence after the rollback (ip6tables)
           when: iptables_will_apply and (ip6_tools_detect.stdout | default('no')) == 'yes' and seg_revert_cancelled
           become: true
+          ignore_unreachable: true
           script: "files/segmentra-iptables.sh persist ip6tables"
           failed_when: false
           changed_when: true
 
-        - name: Fail after rollback
+        - name: Record the failure (reported by the last play)
           vars:
-            rollback_rcs: "{{ [nft_rollback, ipt_rollback, ip6_rollback] | selectattr('rc', 'defined') | map(attribute='rc') | list }}"
-            rollback_ok: "{{ rollback_rcs | reject('equalto', 0) | list | length == 0 }}"
+            rollback_results: "{{ [nft_rollback, ipt_rollback, ip6_rollback] | rejectattr('skipped', 'defined') | list }}"
+            rollback_rcs: "{{ rollback_results | selectattr('rc', 'defined') | map(attribute='rc') | list }}"
+            rollback_unreachable: "{{ rollback_results | selectattr('unreachable', 'defined') | selectattr('unreachable') | list | length > 0 }}"
+            rollback_ok: "{{ not rollback_unreachable and (rollback_rcs | reject('equalto', 0) | list | length == 0) }}"
             revert_state: "{{ seg_revert_state.stdout | default('unknown', true) }}"
-          fail:
-            msg: >-
+          set_fact:
+            seg_apply_failed_msg: >-
               {% if seg_revert_cancelled %}Firewall apply or verification failed; rollback {{ 'succeeded (previous Segmentra state restored)' if rollback_ok
+              else 'FAILED (host unreachable) - check the host manually' if rollback_unreachable
               else 'FAILED (exit codes ' ~ (rollback_rcs | join(', ')) ~ ') - check the host manually' }}{% else %}Firewall apply or verification
               failed; the unattended revert {{ 'fired and finished (previous Segmentra state restored)' if revert_state == 'done'
+              else 'FAILED (it fired, but restoring the backup of this run did not succeed); host state unknown - check the host manually before deploying again' if revert_state == 'failed'
               else 'is no longer scheduled and did not fire - check the host manually' if revert_state == 'gone'
               else 'did not settle (state: ' ~ revert_state ~ ') - check the host before deploying again' }}{% endif %}
+
+- name: Segmentra apply firewall rules (report)
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: false
+  vars: *segmentra_vars
+  tasks:
+    - name: Fail after rollback
+      when: seg_apply_failed_msg is defined
+      fail:
+        msg: "{{ seg_apply_failed_msg }}"

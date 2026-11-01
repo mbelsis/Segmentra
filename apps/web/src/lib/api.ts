@@ -304,17 +304,23 @@ export const api = {
   approveDeployment: (deploymentId: string) => request<{ deployment: any }>(`/deployments/${deploymentId}/approve`, { method: 'POST' }),
   deploymentHosts: (deploymentId: string) => request<{ hosts: any[] }>(`/deployments/${deploymentId}/hosts`),
 
-  audit: (params?: { actor?: string; action?: string; entityType?: string; from?: string; to?: string }) => {
+  // Paged: pass `before` = the previous response's nextCursor to get the next (older) page; nextCursor is null
+  // on the last page. `limit` 1..5000 (server default 500).
+  audit: (params?: { actor?: string; action?: string; entityType?: string; from?: string; to?: string; limit?: number; before?: string }) => {
     const query = new URLSearchParams();
+    if (params?.limit) query.append('limit', String(params.limit));
+    if (params?.before) query.append('before', params.before);
     if (params?.actor) query.append('actor', params.actor);
     if (params?.action) query.append('action', params.action);
     if (params?.entityType) query.append('entityType', params.entityType);
     if (params?.from) query.append('from', params.from);
     if (params?.to) query.append('to', params.to);
     const queryString = query.toString();
-    return request<{ events: any[] }>(`/audit${queryString ? `?${queryString}` : ''}`);
+    return request<{ events: any[]; nextCursor: string | null; limit: number }>(`/audit${queryString ? `?${queryString}` : ''}`);
   },
 
+  // ldapSettings: { ..., use_ldaps, start_tls, has_ca_cert }. putLdapSettings accepts startTls (boolean) and
+  // caCert (PEM string; omitted / '' = keep the stored one, null = remove it).
   ldapSettings: () => request<{ ldapSettings: any }>('/admin/ldap-settings'),
   putLdapSettings: (b: any) => request<{ ldapSettings: any }>('/admin/ldap-settings', { method: 'PUT', body: JSON.stringify(b) }),
   addGroupMap: (b: any) => request<{ map: any }>('/admin/ad-group-role-map', { method: 'POST', body: JSON.stringify(b) }),

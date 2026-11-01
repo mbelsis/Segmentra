@@ -1,6 +1,15 @@
+import net from 'node:net';
+
 import { pool } from '../db/pool.js';
+import {
+  directionSchema,
+  protocolSchema,
+  ruleCommentSchema,
+  sourceTypeSchema,
+  validateRuleSemantics,
+} from '../lib/rule-validation.js';
 import { cidrContains } from './ip-utils.js';
-import type { CommunicationFlow } from './log-parser.js';
+import { COMPILER_PROTOCOLS, type CommunicationFlow } from './log-parser.js';
 import { createDraftVersion, insertRule, loadVersionRules, lockPolicySetAndGetBase } from './policy-version-clone.js';
 
 // Well-known service ports for confidence scoring
@@ -22,6 +31,8 @@ interface RecommendedRule {
   comment: string;
   confidence: number;
   flowCount: number;
+  /** Informational only (never used as the rule source): inventory context of the observed address. */
+  context?: string;
 }
 
 // Helper: check if IP matches a CIDR range (IPv4 and IPv6)
@@ -29,53 +40,101 @@ function ipMatchesCidr(ip: string, cidr: string): boolean {
   return cidrContains(cidr, ip.split('/')[0]);
 }
 
-async function resolveIpToEntity(ip: string): Promise<{ type: string; value: string; label: string } | null> {
-  // Check if IP belongs to a host with tags
+type ResolvedSource = { type: 'HOST' | 'CIDR'; value: string; label: string; context?: string; inInventory: boolean };
+
+/**
+ * The narrowest source that matches exactly the observed address, as the compiler resolves it:
+ *  - HOST only when the address IS that host's mgmt_ip (a HOST source compiles to the mgmt_ip, nothing else)
+ *  - otherwise the address itself as a /32 (IPv4) or /128 (IPv6) CIDR.
+ * Never widened to a TAG or VLAN automatically: those compile to the mgmt_ip of every member host,
+ * which may be far broader than what was observed and may not even contain the observed address
+ * (an interface address or a VLAN-subnet device without inventory entry). Inventory context
+ * (interface owner, tags, VLAN) only goes into the comment/context.
+ */
+export async function resolveIpToEntity(rawIp: string): Promise<ResolvedSource | null> {
+  const ip = String(rawIp ?? '').trim();
+  if (!net.isIP(ip)) return null;
+  const hostCidr = `${ip}/${ip.includes(':') ? 128 : 32}`;
+
   const { rows: hosts } = await pool.query(
-    `SELECT h.id, h.hostname, h.mgmt_ip FROM hosts h WHERE h.mgmt_ip = $1 AND h.enabled = true`,
+    `SELECT h.id, h.hostname FROM hosts h WHERE h.mgmt_ip = $1::inet AND h.enabled = true ORDER BY h.hostname, h.id LIMIT 1`,
     [ip]
   );
   if (hosts[0]) {
-    // Try to resolve to a tag
-    const { rows: tags } = await pool.query(
-      `SELECT t.id, t.name FROM tags t JOIN host_tags ht ON ht.tag_id = t.id WHERE ht.host_id = $1 ORDER BY t.name ASC LIMIT 1`,
-      [hosts[0].id]
-    );
-    if (tags[0]) {
-      return { type: 'TAG', value: tags[0].id, label: `TAG:${tags[0].name}` };
-    }
-    return { type: 'HOST', value: hosts[0].id, label: `HOST:${hosts[0].hostname}` };
+    const tags = await hostTagNames(hosts[0].id);
+    return {
+      type: 'HOST',
+      value: hosts[0].id,
+      label: `HOST:${hosts[0].hostname}`,
+      context: tags.length ? `host ${hosts[0].hostname}, tags ${tags.join(', ')}` : `host ${hosts[0].hostname}`,
+      inInventory: true,
+    };
   }
 
-  // Check host interfaces
+  const context: string[] = [];
   const { rows: ifaces } = await pool.query(
-    `SELECT hi.host_id, h.hostname FROM host_interfaces hi
+    `SELECT hi.host_id, h.hostname, hi.name FROM host_interfaces hi
      JOIN hosts h ON h.id = hi.host_id
-     WHERE hi.ip_address = $1 AND h.enabled = true LIMIT 1`,
+     WHERE host(hi.ip_address) = $1 AND h.enabled = true ORDER BY h.hostname LIMIT 1`,
     [ip]
   );
   if (ifaces[0]) {
-    const { rows: tags } = await pool.query(
-      `SELECT t.id, t.name FROM tags t JOIN host_tags ht ON ht.tag_id = t.id WHERE ht.host_id = $1 ORDER BY t.name ASC LIMIT 1`,
-      [ifaces[0].host_id]
-    );
-    if (tags[0]) {
-      return { type: 'TAG', value: tags[0].id, label: `TAG:${tags[0].name}` };
-    }
+    const tags = await hostTagNames(ifaces[0].host_id);
+    context.push(`interface ${ifaces[0].name} of ${ifaces[0].hostname}${tags.length ? ` (tags ${tags.join(', ')})` : ''}`);
   }
-
-  // Check VLANs by subnet
   const { rows: vlans } = await pool.query(`SELECT id, name, subnet FROM vlans WHERE subnet IS NOT NULL ORDER BY vlan_tag ASC, id ASC`);
-  for (const vlan of vlans) {
-    if (vlan.subnet && ipMatchesCidr(ip, vlan.subnet)) {
-      return { type: 'VLAN', value: vlan.id, label: `VLAN:${vlan.name}` };
-    }
-  }
+  const vlan = vlans.find((v: any) => v.subnet && ipMatchesCidr(ip, String(v.subnet)));
+  if (vlan) context.push(`in VLAN ${vlan.name}`);
 
-  // Fallback to CIDR
-  // One observed address: /32 for IPv4, /128 for IPv6 (a "/32" on an IPv6 address would allow a whole /32 network).
-  const hostCidr = `${ip}/${ip.includes(':') ? 128 : 32}`;
-  return { type: 'CIDR', value: hostCidr, label: `CIDR:${hostCidr}` };
+  return {
+    type: 'CIDR',
+    value: hostCidr,
+    label: `CIDR:${hostCidr}`,
+    context: context.length ? context.join(', ') : undefined,
+    inInventory: !!ifaces[0],
+  };
+}
+
+async function hostTagNames(hostId: string): Promise<string[]> {
+  const { rows } = await pool.query(
+    `SELECT t.name FROM tags t JOIN host_tags ht ON ht.tag_id = t.id WHERE ht.host_id = $1 ORDER BY t.name ASC LIMIT 5`,
+    [hostId]
+  );
+  return rows.map((r: any) => String(r.name));
+}
+
+/** Keep generated comments within the rule-comment rules (no quotes/backslashes/$/backticks, ≤255 chars). */
+function safeComment(text: string): string {
+  return text.replace(/["\\\r\n`$']/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 255);
+}
+
+/**
+ * The same checks the policy-rules route applies to a rule before it is stored (lib/rule-validation),
+ * so a recommendation can never put a rule into a policy version that the API itself would refuse.
+ */
+export function recommendedRuleProblems(rule: Partial<RecommendedRule>): string[] {
+  const problems: string[] = [];
+  if (!directionSchema.safeParse(rule.direction).success || (rule.direction !== 'IN' && rule.direction !== 'OUT')) {
+    problems.push(`invalid direction '${rule.direction}'`);
+  }
+  if (rule.action !== 'ALLOW') problems.push(`invalid action '${rule.action}'`);
+  if (!protocolSchema.safeParse(rule.protocol).success) problems.push(`protocol '${rule.protocol}' cannot be expressed in a policy rule`);
+  if (!sourceTypeSchema.safeParse(rule.sourceType).success) problems.push(`invalid source type '${rule.sourceType}'`);
+  if (rule.comment !== undefined && rule.comment !== null && !ruleCommentSchema.safeParse(rule.comment).success) {
+    problems.push('comment contains characters that are not allowed');
+  }
+  problems.push(
+    ...validateRuleSemantics({
+      protocol: rule.protocol,
+      ports: rule.ports ?? null,
+      sourceType: rule.sourceType,
+      sourceValue: rule.sourceValue,
+      direction: rule.direction,
+      destinationType: null,
+      destinationValue: null,
+    })
+  );
+  return problems;
 }
 
 function calculateConfidence(flow: CommunicationFlow, isKnownPort: boolean, bothInInventory: boolean): number {
@@ -133,8 +192,10 @@ export async function generateRecommendations(
 
   // Ignore reply traffic accepted by the baseline established/related rule — it is not a
   // service the host needs a rule for — as well as loopback/forwarded packets.
+  // Protocols a policy rule cannot express (IGMP, GRE, ESP, ...) are skipped: a recommendation for
+  // them could never be compiled.
   const flows: CommunicationFlow[] = (session.log_data.flows as CommunicationFlow[]).filter(
-    (f) => !f.established && (f.direction === 'IN' || f.direction === 'OUT')
+    (f) => !f.established && (f.direction === 'IN' || f.direction === 'OUT') && COMPILER_PROTOCOLS.has(String(f.protocol))
   );
   if (flows.length === 0) {
     throw new RecommendationError('no_flow_data', 'Only established/related reply traffic was observed; nothing to recommend');
@@ -156,7 +217,9 @@ export async function generateRecommendations(
   // Group flows by destination port for consolidation
   const portGroups = new Map<string, CommunicationFlow[]>();
   for (const flow of flows) {
-    const key = `${flow.direction}:${flow.protocol}:${flow.destinationPort ?? '*'}`;
+    // Ports only exist for tcp/udp; an icmp flow never carries one into a rule.
+    const hasPorts = flow.protocol === 'tcp' || flow.protocol === 'udp';
+    const key = `${flow.direction}:${flow.protocol}:${hasPorts ? flow.destinationPort ?? '*' : '*'}`;
     if (!portGroups.has(key)) portGroups.set(key, []);
     portGroups.get(key)!.push(flow);
   }
@@ -167,7 +230,7 @@ export async function generateRecommendations(
     const isKnownPort = port !== null && KNOWN_SERVICE_PORTS[port] !== undefined;
 
     // Resolve source IPs to entities
-    const sourceEntities = new Map<string, { entity: any; flows: CommunicationFlow[] }>();
+    const sourceEntities = new Map<string, { entity: ResolvedSource; flows: CommunicationFlow[] }>();
     for (const flow of groupFlows) {
       const sourceIp = direction === 'IN' ? flow.sourceIp : flow.destinationIp;
       const entity = await resolveIpToEntity(sourceIp);
@@ -185,7 +248,7 @@ export async function generateRecommendations(
       const totalFlowCount = entityFlows.reduce((sum, f) => sum + f.count, 0);
 
       // Check both endpoints in inventory
-      const bothInInventory = entity.type !== 'CIDR';
+      const bothInInventory = entity.inInventory;
 
       const confidence = calculateConfidence(
         entityFlows[0],
@@ -205,17 +268,23 @@ export async function generateRecommendations(
       if (isDuplicate) continue;
 
       const serviceName = port && KNOWN_SERVICE_PORTS[port] ? ` (${KNOWN_SERVICE_PORTS[port]})` : '';
-      recommendedRules.push({
+      const candidate: RecommendedRule = {
         direction: direction as 'IN' | 'OUT',
         action: 'ALLOW',
         protocol,
         ports: port ? String(port) : null,
         sourceType: entity.type,
         sourceValue: entity.value,
-        comment: `Auto-recommended: ${entity.label} → ${protocol}/${port ?? 'any'}${serviceName} (${totalFlowCount} flows observed)`,
+        comment: safeComment(
+          `Auto-recommended: ${entity.label} → ${protocol}/${port ?? 'any'}${serviceName} (${totalFlowCount} flows observed)` +
+            (entity.context ? ` [${entity.context}]` : '')
+        ),
         confidence,
         flowCount: totalFlowCount,
-      });
+        ...(entity.context ? { context: entity.context } : {}),
+      };
+      if (recommendedRuleProblems(candidate).length > 0) continue;
+      recommendedRules.push(candidate);
     }
   }
 
@@ -316,7 +385,14 @@ export async function applyRecommendation(
   recommendationId: string,
   userId: string | null,
   policySetId?: string
-): Promise<{ versionId: string; policySetId: string; rulesCreated: number; rulesCarriedOver: number; skippedExisting: number }> {
+): Promise<{
+  versionId: string;
+  policySetId: string;
+  rulesCreated: number;
+  rulesCarriedOver: number;
+  skippedExisting: number;
+  skippedInvalid: Array<{ index: number; problems: string[] }>;
+}> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -331,8 +407,24 @@ export async function applyRecommendation(
       throw new RecommendationError('not_accepted', 'Recommendation must be accepted before applying', 409);
     }
 
-    const rules: RecommendedRule[] =
+    const storedRules: RecommendedRule[] =
       (typeof rec.recommended_rules === 'string' ? JSON.parse(rec.recommended_rules) : rec.recommended_rules) ?? [];
+    // Recommendations stored by older versions may contain rules the API would refuse (IGMP, ports on
+    // icmp, ...). Those are never applied; they are reported back instead.
+    const skippedInvalid: Array<{ index: number; problems: string[] }> = [];
+    const rules = storedRules.filter((r, index) => {
+      const problems = recommendedRuleProblems(r);
+      if (problems.length) skippedInvalid.push({ index, problems });
+      return problems.length === 0;
+    });
+    if (rules.length === 0) {
+      throw new RecommendationError(
+        'invalid_recommendation',
+        storedRules.length === 0
+          ? 'Recommendation contains no rules'
+          : `None of the recommended rules is valid: ${skippedInvalid.map((s) => `rule ${s.index + 1}: ${s.problems.join(', ')}`).join('; ')}`
+      );
+    }
 
     let targetPolicySetId = policySetId ?? (await findTargetPolicySet(client, rec.host_id));
 
@@ -405,6 +497,7 @@ export async function applyRecommendation(
         baseVersionId: base?.id ?? null,
         rulesCreated: toAppend.length,
         rulesCarriedOver: existingRules.length,
+        skippedInvalid: skippedInvalid.length,
       })]
     );
 
@@ -415,6 +508,7 @@ export async function applyRecommendation(
       rulesCreated: toAppend.length,
       rulesCarriedOver: existingRules.length,
       skippedExisting: rules.length - toAppend.length,
+      skippedInvalid,
     };
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});

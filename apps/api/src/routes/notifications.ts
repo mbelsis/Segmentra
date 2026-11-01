@@ -157,7 +157,12 @@ const ruleSchema = z.object({
     'EXCESSIVE_RULES_DETECTED', 'AUDIT_RESTORE_FAILED',
   ]),
   enabled: z.boolean().default(true),
-  filter: z.record(z.any()).optional(),
+  // Field-equality filter on the event payload (see notificationFilterMatches in services/notifications.ts):
+  // { "field": value | [value, ...] }, all keys must match.
+  filter: z
+    .record(z.union([z.string(), z.number(), z.boolean(), z.array(z.union([z.string(), z.number(), z.boolean()])).min(1)]))
+    .optional()
+    .nullable(),
 });
 
 notificationsRouter.post('/channels/:id/rules', requireRole('admin'), async (req, res) => {
@@ -165,12 +170,34 @@ notificationsRouter.post('/channels/:id/rules', requireRole('admin'), async (req
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body', details: parsed.error.issues });
   const b = parsed.data;
 
-  const { rows } = await pool.query(
-    `INSERT INTO notification_rules (channel_id, event_type, enabled, filter)
-     VALUES ($1, $2, $3, $4) RETURNING *`,
-    [req.params.id, b.eventType, b.enabled, b.filter ? JSON.stringify(b.filter) : null]
+  const filterJson = b.filter && Object.keys(b.filter).length > 0 ? JSON.stringify(b.filter) : null;
+
+  const channel = await pool.query(`SELECT 1 FROM notification_channels WHERE id::text = $1`, [req.params.id]);
+  if (!channel.rows[0]) return res.status(404).json({ error: 'not_found' });
+
+  // Same channel + event type + filter would only send the same message twice.
+  const dup = await pool.query(
+    `SELECT id FROM notification_rules
+     WHERE channel_id = $1 AND event_type = $2 AND md5(coalesce(filter::text, '')) = md5(coalesce($3::jsonb::text, ''))`,
+    [req.params.id, b.eventType, filterJson]
   );
-  res.status(201).json({ rule: rows[0] });
+  if (dup.rows[0]) {
+    return res.status(409).json({ error: 'duplicate_rule', message: 'This channel already has a rule for this event type and filter.' });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO notification_rules (channel_id, event_type, enabled, filter)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [req.params.id, b.eventType, b.enabled, filterJson]
+    );
+    res.status(201).json({ rule: rows[0] });
+  } catch (e: any) {
+    if (e?.code === '23505') {
+      return res.status(409).json({ error: 'duplicate_rule', message: 'This channel already has a rule for this event type and filter.' });
+    }
+    throw e;
+  }
 });
 
 // Delete notification rule

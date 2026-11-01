@@ -53,9 +53,16 @@ services:
     volumes: !override
       - segmentra_bundles:/bundles
       - segmentra_ssh_known_hosts:/home/node/.ssh
+    environment:
+      # The SSH_ASKPASS helper (passphrase-protected keys) must be executable, and Docker
+      # mounts tmpfs noexec by default: it gets its own small exec tmpfs, /tmp stays noexec.
+      SEGMENTRA_ASKPASS_DIR: /run/segmentra-askpass
     tmpfs:
       # Temporary SSH key files (0600) and compiled policy files live here while in use.
+      # noexec (Docker's tmpfs default) - nothing in /tmp is ever executed.
       - /tmp:size=64m,mode=1777
+      # Only the askpass helper script (no secret inside); private to the "node" user.
+      - /run/segmentra-askpass:size=1m,mode=0700,uid=1000,gid=1000,exec
     pids_limit: 256
     mem_limit: 1g
 

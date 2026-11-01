@@ -92,7 +92,10 @@ services:
       context: .
       dockerfile: ./infra/web/Dockerfile
     ports:
-      - "${WEB_PORT:-80}:80"
+      # Plain HTTP: logins and JWTs cross the network unencrypted. Terminate TLS in front of
+      # it (docs/installation.md, "TLS / reverse proxy"); with a proxy on this host set
+      # WEB_BIND=127.0.0.1 so only the proxy can reach nginx.
+      - "${WEB_BIND:-0.0.0.0}:${WEB_PORT:-80}:80"
     depends_on:
       - segmentra-app
     restart: unless-stopped

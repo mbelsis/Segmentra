@@ -35,98 +35,86 @@ troubleshootRouter.get('/policies/by-ip', async (req, res) => {
     return res.status(400).json({ error: 'ip_required', message: 'IP address query parameter is required' });
   }
 
-  // Find rules with CIDR source_type that match the IP
-  const cidrRules = await pool.query(
+  // Set-based (three queries, however many rules exist):
+  //  1. the deployment currently active on every enabled host (latest successful one, not removed by expiry),
+  //  2. the hosts / tags / VLANs the IP belongs to (TAG and VLAN only count ENABLED hosts, like the
+  //     deployment compiler and services/source-resolver.ts; HOST is the host's mgmt_ip),
+  //  3. the CIDR/HOST/TAG/VLAN-sourced rules of relevant versions: not ARCHIVED, or still active on a host.
+  const currentRes = await pool.query(
+    `SELECT * FROM (
+       SELECT DISTINCT ON (dh.host_id)
+              d.id, d.status, d.created_at, d.started_at, d.finished_at, d.policy_version_id,
+              dh.host_id, h.hostname, h.mgmt_ip, dh.status AS host_status, dh.expiry_status
+         FROM deployment_hosts dh
+         JOIN deployments d ON d.id = dh.deployment_id
+         JOIN hosts h ON h.id = dh.host_id
+        WHERE dh.status = 'SUCCEEDED' AND h.enabled = true
+        ORDER BY dh.host_id, COALESCE(dh.finished_at, d.finished_at, d.created_at) DESC
+     ) cur
+     WHERE cur.expiry_status IS DISTINCT FROM 'REMOVED'
+     ORDER BY cur.hostname`
+  );
+  const currentByVersion = new Map<string, any[]>();
+  for (const d of currentRes.rows) {
+    const key = String(d.policy_version_id);
+    if (!currentByVersion.has(key)) currentByVersion.set(key, []);
+    currentByVersion.get(key)!.push(d);
+  }
+
+  const ipOnly = ip.split('/')[0];
+  const ipHostsRes = isValidIp(ipOnly)
+    ? await pool.query(
+        `SELECT h.id, h.enabled, h.vlan_id,
+                COALESCE(array_agg(ht.tag_id::text) FILTER (WHERE ht.tag_id IS NOT NULL), '{}') AS tag_ids
+           FROM hosts h
+           LEFT JOIN host_tags ht ON ht.host_id = h.id
+          WHERE h.mgmt_ip IS NOT NULL AND host(h.mgmt_ip) = host($1::inet)
+          GROUP BY h.id`,
+        [ipOnly]
+      )
+    : { rows: [] as any[] };
+  const ipHostIds = new Set<string>();
+  const ipTagIds = new Set<string>();
+  const ipVlanIds = new Set<string>();
+  for (const h of ipHostsRes.rows) {
+    ipHostIds.add(String(h.id));
+    if (h.enabled !== true) continue;
+    for (const t of h.tag_ids as string[]) ipTagIds.add(String(t));
+    if (h.vlan_id) ipVlanIds.add(String(h.vlan_id));
+  }
+
+  const rulesRes = await pool.query(
     `SELECT pr.*, pv.id as version_id, pv.version_number, pv.status as version_status,
             ps.id as policy_set_id, ps.name as policy_set_name
      FROM policy_rules pr
      JOIN policy_versions pv ON pv.id = pr.policy_version_id
      JOIN policy_sets ps ON ps.id = pv.policy_set_id
-     WHERE pr.source_type = 'CIDR'`,
-    []
+     WHERE pr.source_type IN ('CIDR', 'TAG', 'VLAN', 'HOST')
+       AND (pv.status <> 'ARCHIVED' OR pv.id = ANY($1::uuid[]))
+     ORDER BY ps.name, pv.version_number DESC, pr.order_index, pr.id`,
+    [[...currentByVersion.keys()]]
   );
 
-  const matchingRules: any[] = [];
-  for (const rule of cidrRules.rows) {
-    if (ipMatchesCidr(ip, rule.source_value)) {
-      matchingRules.push(rule);
+  const matchingRules = rulesRes.rows.filter((rule: any) => {
+    const value = String(rule.source_value ?? '');
+    switch (rule.source_type) {
+      case 'CIDR':
+        return ipMatchesCidr(ip, value);
+      case 'HOST':
+        return ipHostIds.has(value);
+      case 'TAG':
+        return ipTagIds.has(value);
+      case 'VLAN':
+        return ipVlanIds.has(value);
+      default:
+        return false;
     }
-  }
+  });
 
-  // Find rules with TAG/VLAN/HOST source types and resolve them
-  const tagVlanHostRules = await pool.query(
-    `SELECT pr.*, pv.id as version_id, pv.version_number, pv.status as version_status,
-            ps.id as policy_set_id, ps.name as policy_set_name
-     FROM policy_rules pr
-     JOIN policy_versions pv ON pv.id = pr.policy_version_id
-     JOIN policy_sets ps ON ps.id = pv.policy_set_id
-     WHERE pr.source_type IN ('TAG', 'VLAN', 'HOST')`,
-    []
-  );
-
-  for (const rule of tagVlanHostRules.rows) {
-    let matches = false;
-    
-    if (rule.source_type === 'HOST') {
-      const hostRes = await pool.query(`SELECT mgmt_ip FROM hosts WHERE id=$1`, [rule.source_value]);
-      if (hostRes.rows[0]?.mgmt_ip) {
-        const hostIp = String(hostRes.rows[0].mgmt_ip).split('/')[0]; // Remove CIDR if present
-        if (hostIp === ip) matches = true;
-      }
-    } else if (rule.source_type === 'TAG') {
-      const hostsRes = await pool.query(
-        `SELECT DISTINCT h.mgmt_ip
-         FROM hosts h
-         JOIN host_tags ht ON ht.host_id = h.id
-         WHERE ht.tag_id = $1 AND h.mgmt_ip IS NOT NULL`,
-        [rule.source_value]
-      );
-      for (const host of hostsRes.rows) {
-        const hostIp = String(host.mgmt_ip).split('/')[0];
-        if (hostIp === ip) {
-          matches = true;
-          break;
-        }
-      }
-    } else if (rule.source_type === 'VLAN') {
-      const hostsRes = await pool.query(
-        `SELECT mgmt_ip FROM hosts WHERE vlan_id = $1 AND mgmt_ip IS NOT NULL`,
-        [rule.source_value]
-      );
-      for (const host of hostsRes.rows) {
-        const hostIp = String(host.mgmt_ip).split('/')[0];
-        if (hostIp === ip) {
-          matches = true;
-          break;
-        }
-      }
-    }
-    
-    if (matches) {
-      matchingRules.push(rule);
-    }
-  }
-
-  // For each matching rule, find which hosts have this policy deployed
-  const results = await Promise.all(matchingRules.map(async (rule) => {
-    // Hosts where this version is the one currently active: each host's latest successful
-    // deployment (a deploy replaces the host's whole Segmentra ruleset), not removed by expiry.
-    const deploymentsRes = await pool.query(
-      `SELECT * FROM (
-         SELECT DISTINCT ON (dh.host_id)
-                d.id, d.status, d.created_at, d.started_at, d.finished_at, d.policy_version_id,
-                dh.host_id, h.hostname, h.mgmt_ip, dh.status AS host_status, dh.expiry_status
-           FROM deployment_hosts dh
-           JOIN deployments d ON d.id = dh.deployment_id
-           JOIN hosts h ON h.id = dh.host_id
-          WHERE dh.status = 'SUCCEEDED' AND h.enabled = true
-            AND dh.host_id IN (SELECT dh2.host_id FROM deployment_hosts dh2 JOIN deployments d2 ON d2.id = dh2.deployment_id WHERE d2.policy_version_id = $1)
-          ORDER BY dh.host_id, COALESCE(dh.finished_at, d.finished_at, d.created_at) DESC
-       ) cur
-       WHERE cur.policy_version_id = $1 AND cur.expiry_status IS DISTINCT FROM 'REMOVED'
-       ORDER BY cur.hostname`,
-      [rule.version_id]
-    );
+  // For each matching rule: the hosts where its version is the one currently active (a deploy replaces the
+  // host's whole Segmentra ruleset).
+  const results = matchingRules.map((rule: any) => {
+    const deploymentsRes = { rows: currentByVersion.get(String(rule.version_id)) ?? [] };
 
     return {
       rule: {
@@ -158,7 +146,7 @@ troubleshootRouter.get('/policies/by-ip', async (req, res) => {
         deployedAt: d.created_at
       }))
     };
-  }));
+  });
 
   res.json({ ip, results });
 });

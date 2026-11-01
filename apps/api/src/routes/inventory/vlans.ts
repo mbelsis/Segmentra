@@ -22,8 +22,9 @@ const vlanSchema = z.object({
   subnet: z
     .string()
     .trim()
+    .nullable()
     .optional()
-    .refine((v) => v === undefined || v === '' || (v.includes('/') && isValidCidr(v)), { message: 'subnet must be a CIDR like 10.0.10.0/24' })
+    .refine((v) => v === undefined || v === null || v === '' || (v.includes('/') && isValidCidr(v)), { message: 'subnet must be a CIDR like 10.0.10.0/24' })
 });
 
 // Write operations require operator/admin
@@ -51,7 +52,7 @@ vlansRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
      SET vlan_tag = COALESCE($2, vlan_tag),
          name = COALESCE($3, name),
          description = COALESCE($4, description),
-         subnet = COALESCE($5, subnet)
+         subnet = CASE WHEN $6::boolean THEN $5::text ELSE subnet END
      WHERE id=$1
      RETURNING *`,
     [
@@ -59,7 +60,9 @@ vlansRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
       parsed.data.vlanTag ?? null,
       parsed.data.name ?? null,
       parsed.data.description ?? null,
-      parsed.data.subnet || null
+      parsed.data.subnet || null,
+      // undefined = keep the subnet; null or '' clears it (COALESCE alone could never clear it)
+      parsed.data.subnet !== undefined
     ]
   );
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });

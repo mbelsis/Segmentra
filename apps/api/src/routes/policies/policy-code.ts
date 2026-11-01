@@ -72,7 +72,9 @@ policyCodeRouter.post('/import', requireRole('operator', 'admin'), textBody, asy
     const result = await applyPolicy(client, policy, { userId: req.auth!.userId ?? null, updateScope, source: `policy-as-code (${req.auth!.username})` });
     // A dry run runs exactly the code path of a real import and rolls it back.
     await client.query(dryRun ? 'ROLLBACK' : 'COMMIT');
-    res.status(dryRun || result.action === 'unchanged' ? 200 : result.action === 'created' ? 201 : 201).json({ dryRun, ...result });
+    // 201 when something was created (policy set or DRAFT version), 200 otherwise (unchanged, or only the
+    // policy set's scope/description updated). `changes` lists policy-set level differences either way.
+    res.status(!dryRun && (result.action === 'created' || result.action === 'new_version') ? 201 : 200).json({ dryRun, ...result });
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
     if (e instanceof ImportError) return res.status(e.status).json({ error: e.code, message: e.message });

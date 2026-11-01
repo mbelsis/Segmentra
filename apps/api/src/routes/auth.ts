@@ -4,7 +4,7 @@ import { z } from 'zod';
 
 import { sessionClaims, signJwt } from '../services/jwt.js';
 import { requireAuth } from '../middleware/auth.js';
-import { ldapLogin } from '../services/ldap.js';
+import { canonicalLdapUsername, ldapLogin } from '../services/ldap.js';
 import { verifyPassword, hashPassword, burnPasswordCheck } from '../services/password.js';
 import { pool } from '../db/pool.js';
 
@@ -127,64 +127,120 @@ authRouter.post('/login', async (req, res) => {
     return fail();
   }
 
+  // Directory usernames are case-insensitive: the account is stored under the canonical (lower-cased)
+  // name and found case-insensitively, so "JDoe" and "jdoe" never become two Segmentra users.
+  const canonicalUsername = canonicalLdapUsername(username);
+  const directorySubject = String(ldap.directorySubject);
+
   // Map AD groups -> Segmentra roles. DNs are case-insensitive and may differ in spacing
   // around ',' / '=' (e.g. "CN=Admins, OU=Groups" vs "cn=admins,ou=groups"), so normalize both sides.
-    const { rows: roleRows } = await pool.query(
-      `SELECT DISTINCT r.name
-       FROM ad_group_role_map m
-       JOIN roles r ON r.id = m.role_id
-       WHERE lower(regexp_replace(trim(m.ad_group_dn), '\\s*([,=])\\s*', '\\1', 'g')) IN (
-         SELECT lower(regexp_replace(trim(g), '\\s*([,=])\\s*', '\\1', 'g')) FROM unnest($1::text[]) AS g
-       )`,
-      [ldap.groups]
+  const { rows: roleRows } = await pool.query(
+    `SELECT DISTINCT r.name
+     FROM ad_group_role_map m
+     JOIN roles r ON r.id = m.role_id
+     WHERE lower(regexp_replace(trim(m.ad_group_dn), '\\s*([,=])\\s*', '\\1', 'g')) IN (
+       SELECT lower(regexp_replace(trim(g), '\\s*([,=])\\s*', '\\1', 'g')) FROM unnest($1::text[]) AS g
+     )`,
+    [ldap.groups]
+  );
+  const roles = roleRows.map((r) => r.name);
+
+  const client = await pool.connect();
+  let userRow: { id: string; username: string; display_name: string | null; email: string | null; token_version: number } | null = null;
+  let outcome: 'ok' | 'no_roles' | 'local_collision' = 'ok';
+  try {
+    await client.query('BEGIN');
+    // Existing account: by case-insensitive username (a local account first, so it is never shadowed; then the exact canonical name, then
+    // the most recently used), else by directory subject (same directory user under another login name).
+    const existingRes = await client.query(
+      `SELECT id, username, password_hash
+       FROM users
+       WHERE lower(username) = $1
+       ORDER BY (password_hash IS NOT NULL) DESC, (username = $1) DESC, last_login_at DESC NULLS LAST, created_at
+       LIMIT 1
+       FOR UPDATE`,
+      [canonicalUsername]
     );
-    const roles = roleRows.map((r) => r.name);
-    if (roles.length === 0) {
-      // No mapped roles — generic error
-      return fail();
+    let existing = existingRes.rows[0] as { id: string; username: string; password_hash: string | null } | undefined;
+    if (!existing) {
+      const bySubject = await client.query(
+        `SELECT id, username, password_hash FROM users
+         WHERE directory_subject = $1 AND password_hash IS NULL
+         ORDER BY last_login_at DESC NULLS LAST LIMIT 1 FOR UPDATE`,
+        [directorySubject]
+      );
+      existing = bySubject.rows[0];
     }
 
-    // Upsert user and sync roles atomically
-    const client = await pool.connect();
-    let userRes: { rows: any[] };
-    try {
-      await client.query('BEGIN');
-      userRes = await client.query(
-      `INSERT INTO users (username, display_name, email, directory_subject, last_login_at)
-       VALUES ($1, $2, $3, $4, now())
-       ON CONFLICT (username)
-       DO UPDATE SET display_name=EXCLUDED.display_name,
-                     email=EXCLUDED.email,
-                     directory_subject=EXCLUDED.directory_subject,
-                     last_login_at=now()
-       RETURNING id, username, display_name, email, token_version`,
-        [username, ldap.displayName, ldap.email, String(ldap.directorySubject)]
-      );
+    if (existing?.password_hash) {
+      // A local account with the same name (any case): never let a directory login take it over.
+      outcome = 'local_collision';
+    } else if (roles.length === 0) {
+      // The user no longer maps to any role: revoke what an earlier login granted (roles and live tokens).
+      outcome = 'no_roles';
+      if (existing) {
+        await client.query(`DELETE FROM user_roles WHERE user_id=$1`, [existing.id]);
+        await client.query(`UPDATE users SET token_version = token_version + 1 WHERE id=$1`, [existing.id]);
+      }
+    } else {
+      if (existing) {
+        // Keep the account's name when it was found by subject under a different login name; otherwise
+        // rewrite it to the canonical form. directory_subject is rewritten too (older releases stored a
+        // mangled objectGUID string).
+        const newName = existing.username.toLowerCase() === canonicalUsername ? canonicalUsername : existing.username;
+        const upd = await client.query(
+          `UPDATE users SET username=$2, display_name=$3, email=$4, directory_subject=$5, last_login_at=now()
+           WHERE id=$1
+           RETURNING id, username, display_name, email, token_version`,
+          [existing.id, newName, ldap.displayName, ldap.email, directorySubject]
+        );
+        userRow = upd.rows[0];
+      } else {
+        const ins = await client.query(
+          `INSERT INTO users (username, display_name, email, directory_subject, last_login_at)
+           VALUES ($1, $2, $3, $4, now())
+           RETURNING id, username, display_name, email, token_version`,
+          [canonicalUsername, ldap.displayName, ldap.email, directorySubject]
+        );
+        userRow = ins.rows[0];
+      }
 
       // Sync user_roles
-      await client.query(`DELETE FROM user_roles WHERE user_id=$1`, [userRes.rows[0].id]);
+      await client.query(`DELETE FROM user_roles WHERE user_id=$1`, [userRow!.id]);
       await client.query(
         `INSERT INTO user_roles (user_id, role_id) SELECT $1, id FROM roles WHERE name = ANY($2::text[])`,
-        [userRes.rows[0].id, roles]
+        [userRow!.id, roles]
       );
-      await client.query('COMMIT');
-    } catch (e) {
-      await client.query('ROLLBACK').catch(() => {});
-      throw e;
-    } finally {
-      client.release();
     }
-
-    // A deactivated directory user must not get a token
-    const active = await pool.query(`SELECT is_active FROM users WHERE id=$1`, [userRes.rows[0].id]);
-    if (active.rows[0] && active.rows[0].is_active === false) {
+    await client.query('COMMIT');
+  } catch (e: any) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (e?.code === '23505') {
+      // eslint-disable-next-line no-console
+      console.error('[Auth] LDAP login failed: username collides with an existing account');
       return fail();
     }
+    throw e;
+  } finally {
+    client.release();
+  }
 
-    resetFailedLogins(clientIp);
-    const { token_version: ldapTv, ...ldapUser } = userRes.rows[0];
-    const token = signJwt({ sub: ldapUser.username, roles, uid: ldapUser.id, tv: Number(ldapTv ?? 0) });
-    return res.json({ token, user: ldapUser, roles });
+  if (outcome !== 'ok' || !userRow) {
+    // eslint-disable-next-line no-console
+    console.error(`[Auth] LDAP login refused for "${canonicalUsername}": ${outcome === 'no_roles' ? 'no mapped roles' : 'a local account with this name exists'}`);
+    return fail();
+  }
+
+  // A deactivated directory user must not get a token
+  const active = await pool.query(`SELECT is_active FROM users WHERE id=$1`, [userRow.id]);
+  if (active.rows[0] && active.rows[0].is_active === false) {
+    return fail();
+  }
+
+  resetFailedLogins(clientIp);
+  const { token_version: ldapTv, ...ldapUser } = userRow;
+  const token = signJwt({ sub: ldapUser.username, roles, uid: ldapUser.id, tv: Number(ldapTv ?? 0) });
+  return res.json({ token, user: ldapUser, roles });
 });
 
 /**

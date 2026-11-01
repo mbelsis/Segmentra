@@ -212,12 +212,14 @@ Policies applied outside Segmentra stay `Generated`; Segmentra only tracks what 
 | Direction `IN` or `BOTH` + Action `ALLOW` | `ingress` rule with `from` `ipBlock` peers |
 | Direction `OUT` + Action `ALLOW` (and the outbound half of `BOTH`) | **Not emitted** (outbound is allowed by default; warning) |
 | Direction `FORWARD` | **Skipped** (no NetworkPolicy equivalent; warning) |
-| Action `DENY` | **Skipped** (NetworkPolicy is allow-only; warning) |
+| Action `DENY` (direction `IN` / `BOTH`) | **Not emitted** itself (NetworkPolicy is allow-only; warning), but subtracted from every later `ALLOW` it overlaps, see below |
+| Action `DENY` (direction `OUT`) | **Skipped** (egress is not restricted; warning) |
 | Source Type `CIDR` | `ipBlock.cidr` (single IPs become `/32` or `/128`; a comma-separated list gives one peer each; `any` or `*` becomes `0.0.0.0/0` and `::/0`) |
 | Source Type `HOST` | `ipBlock` for the host's management IP |
 | Source Type `TAG` | `ipBlock` for the management IP of every enabled host with the tag, plus a `namespaceSelector` + `podSelector` peer for every workload of the cluster mapped to the tag |
 | Source Type `VLAN` | `ipBlock` for the VLAN subnet (or member hosts' IPs if the VLAN has no subnet) |
 | A source that resolves to no addresses | **Skipped** (warning), never widened to `0.0.0.0/0` |
+| No rule survives | Generation is refused (`422 no_ingress_rules`, listing why each rule was skipped), because the result would deny all ingress to every pod in the namespace. Send `allowDenyAll: true` to generate that deny-all policy on purpose |
 | Protocol `tcp` / `udp` / `sctp` | `ports[].protocol: TCP / UDP / SCTP` |
 | Ports `80,443` or ranges `8000-8100` | One `ports[]` entry each (ranges use `endPort`) |
 | Protocol `icmp` | **Skipped** (not supported by NetworkPolicy; warning) |
@@ -232,7 +234,13 @@ Kubernetes NetworkPolicy works differently from nftables/iptables:
 - If **any** NetworkPolicy selects a pod for a direction, only traffic matching a rule is allowed in that direction
 - There is **no explicit DENY** rule; you deny by omission
 
-Segmentra's DENY rules are therefore not translated. The presence of a NetworkPolicy with ALLOW ingress rules implicitly denies all other inbound traffic to the selected pods.
+The presence of a NetworkPolicy with ALLOW ingress rules implicitly denies all other inbound traffic to the selected pods. NetworkPolicy rules are also an unordered union, while Segmentra rules are first-match: a `DENY 10.1.0.0/16 tcp/22` before an `ALLOW any tcp/22` must keep blocking 10.1.0.0/16. Segmentra therefore subtracts every inbound DENY from the later ALLOW rules it overlaps:
+
+- The DENY covers the ALLOW's protocol and ports (exactly or more) and its CIDR lies inside an ALLOW `ipBlock`: the CIDR is added to that block's `except` (only to blocks of the same address family).
+- The DENY covers the ALLOW's protocol and ports and its CIDR contains the whole ALLOW `ipBlock`: that peer is dropped (warning); an ALLOW left without peers is not emitted.
+- Anything else that overlaps cannot be expressed and **generation is refused** with `422 deny_not_expressible`, naming the rule pair: a DENY on only part of the ALLOW's ports or protocols (for example `DENY tcp/22` before `ALLOW tcp/1-1024`; split the ALLOW rule), a DENY whose TAG source maps to Kubernetes workloads, or an ALLOW with label-selected workloads after a DENY of a CIDR (pods cannot be excluded from a label selector by address).
+
+A DENY after the ALLOW, or one that does not overlap it, changes nothing.
 
 ---
 
@@ -284,9 +292,9 @@ All endpoints require authentication.
 
 ### Network Policies
 - `GET /api/k8s/clusters/:id/network-policies`: list generated NetworkPolicies (all roles)
-- `POST /api/k8s/clusters/:id/deploy-policy`: generate and store a NetworkPolicy from an APPROVED or DEPLOYED policy version (`409 policy_version_not_approved` otherwise). Body: `{ policyVersionId, namespace, policyName }`. Returns `{ networkPolicy, warnings }`. Despite the name, this only generates and stores the manifest; use `apply` to put it on the cluster (operator, admin)
+- `POST /api/k8s/clusters/:id/deploy-policy`: generate and store a NetworkPolicy from an APPROVED or DEPLOYED policy version (`409 policy_version_not_approved` otherwise). Body: `{ policyVersionId, namespace, policyName, allowDenyAll? }`; `namespace` must be a DNS-1123 label (at most 63 characters) and `policyName` a DNS-1123 subdomain (at most 253), otherwise `400`. Returns `{ networkPolicy, warnings }`; `422 no_ingress_rules` when no rule can be translated (unless `allowDenyAll: true`), `422 deny_not_expressible` when an earlier DENY cannot be subtracted exactly (see [NetworkPolicy Translation Rules](#networkpolicy-translation-rules)). Despite the name, this only generates and stores the manifest; use `apply` to put it on the cluster (operator, admin)
 - `POST /api/k8s/clusters/:id/network-policies/:npId/apply`: create or update the policy on the cluster. Body: `{ dryRun?, overwrite? }`. `409 not_managed_by_segmentra` if a same-named policy without the managed-by label exists (unless `overwrite`), `409 superseded` for an older manifest, `409 version_not_approved` when the source version is no longer approved/deployed, `409 no_credentials`, `404 namespace_not_found`, `502` for Kubernetes errors such as `forbidden` (the row becomes `FAILED` with `last_error`) (operator, admin)
-- `POST /api/k8s/clusters/:id/network-policies/:npId/check`: compare with the live policy; returns `state` `IN_SYNC`, `DRIFTED` or `MISSING` (operator, admin)
+- `POST /api/k8s/clusters/:id/network-policies/:npId/check`: compare with the live policy; returns `state` `IN_SYNC`, `DRIFTED` or `MISSING` (operator, admin). The comparison applies the API server's defaulting first (omitted empty `ingress` / `from` / `ports` / `except` lists, `protocol: TCP` on ports), so a deny-all policy with an empty `ingress` list is `IN_SYNC`
 - `POST /api/k8s/clusters/:id/network-policies/:npId/remove`: delete the policy from the cluster (only if managed-by Segmentra, applied from this record and unchanged since it was read); `409 superseded` / `409 not_applied` / `409 owned_by_other_record`; `alreadyAbsent` when it was gone (operator, admin)
 
 ---

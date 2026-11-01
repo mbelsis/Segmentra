@@ -75,7 +75,7 @@ The period is limited to three years. `audit_events` is rebuilt from the append-
 | Accounts without a login for more than *inactiveUserDays* (default 90) | any |
 | SSH credentials whose secret is older than *credentialMaxAgeDays* (default 365) | any |
 | Enabled IoT/OT assets without a protecting gateway | any |
-| Kubernetes clusters with TLS verification disabled; Kubernetes policies drifted at the last check | any |
+| Kubernetes clusters with TLS verification disabled; Kubernetes policies drifted at the last check (per cluster, namespace and name the `APPLIED` record, which owns the live object, otherwise the newest; a manifest that was only generated later does not hide it) | any |
 | Docker Swarm nodes managed | information |
 | Live drift check | any host differs from its last deployment or cannot be read (only when run) |
 

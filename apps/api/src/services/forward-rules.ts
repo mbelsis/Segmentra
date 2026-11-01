@@ -9,8 +9,9 @@ import { isValidCidr, normalizeDestinationAddress, parseCidr } from './ip-utils.
  * Destination semantics:
  *  - CIDR:      the rule's destination_value (IP/CIDR)
  *  - HOST:      the host's mgmt_ip
- *  - IOT_ASSET: the IoT asset's ip_address (an IP or a CIDR; a CIDR is kept, like the protected
- *               destinations of getProtectedDestinations)
+ *  - IOT_ASSET: the IoT asset's ip_address (an IP or a network CIDR; a network CIDR is kept, a value
+ *               with host bits set such as a legacy 192.168.10.5/24 means that single device, as in
+ *               getProtectedDestinations)
  *  - TAG:       mgmt_ip of every enabled host carrying the tag + ip_address of every enabled
  *               IoT asset carrying the tag
  *  - VLAN:      the VLAN subnet when set, otherwise the enabled hosts and IoT assets in the VLAN
@@ -28,8 +29,9 @@ export function destinationSetName(destinationType: string, destinationValue: st
 /**
  * Valid, de-duplicated addresses in a deterministic order (family, network, prefix), so the compiled
  * set elements and the artifact hash do not depend on the order PostgreSQL returns rows in.
- * CIDRs are kept (an IoT asset stored as 192.168.10.0/24 means the whole network); only a full-length
- * host prefix (/32, /128 as pg returns inet values) is dropped.
+ * Network CIDRs are kept (an IoT asset stored as 192.168.10.0/24 means the whole network); a full-length
+ * host prefix (/32, /128 as pg returns inet values) is dropped and a prefix with host bits set
+ * (legacy 192.168.10.5/24) means the host 192.168.10.5, not the whole /24.
  */
 function cleanIps(values: unknown[]): string[] {
   const out: string[] = [];
@@ -154,7 +156,15 @@ export async function getProtectedDestinations(hostId: string): Promise<string[]
       ORDER BY 1`,
     [hostId]
   );
-  return rows.map((r: any) => String(r.ip));
+  // Same normalization as the IOT_ASSET destination sets: a legacy 192.168.10.5/24 protects 192.168.10.5 only.
+  // Order of the query is kept (artifact hash stability), duplicates removed. An invalid value is passed on
+  // unchanged so the compiler still refuses it instead of the gateway silently losing a protected device.
+  const out: string[] = [];
+  for (const r of rows) {
+    const ip = normalizeDestinationAddress(r.ip) ?? String(r.ip);
+    if (ip && !out.includes(ip)) out.push(ip);
+  }
+  return out;
 }
 
 /** Gateways (host ids) protecting an IP address, i.e. enabled IoT assets with that address. */

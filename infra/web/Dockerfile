@@ -22,5 +22,6 @@ FROM nginx:alpine
 
 COPY --from=builder /app/apps/web/dist /usr/share/nginx/html
 COPY infra/web/nginx.conf /etc/nginx/conf.d/default.conf
+COPY infra/web/security-headers.conf /etc/nginx/segmentra/security-headers.conf
 
 EXPOSE 80

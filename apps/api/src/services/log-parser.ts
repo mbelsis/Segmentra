@@ -36,6 +36,58 @@ export interface CommunicationFlow {
   lastSeen: string;
   /** True when the flow was only seen via the baseline established/related rule */
   established?: boolean;
+  /** Kernel IN= / OUT= interface of the packets (part of the flow key; absent when not logged) */
+  inInterface?: string;
+  outInterface?: string;
+}
+
+/**
+ * IP protocol numbers as the kernel logs them when it has no name (PROTO=2) → names. Only tcp, udp
+ * and icmp (incl. ICMPv6, which the compiler maps per family) can be expressed in a policy rule; see
+ * COMPILER_PROTOCOLS.
+ */
+const PROTOCOL_NUMBERS: Record<string, string> = {
+  '1': 'icmp', '2': 'igmp', '4': 'ipip', '6': 'tcp', '17': 'udp', '41': 'ipv6', '47': 'gre', '50': 'esp',
+  '51': 'ah', '58': 'icmp', '89': 'ospf', '103': 'pim', '112': 'vrrp', '132': 'sctp', '136': 'udplite',
+};
+
+/** Protocols a policy rule (and so a recommendation) can express. */
+export const COMPILER_PROTOCOLS = new Set(['tcp', 'udp', 'icmp']);
+
+/** Normalise a logged protocol: names lower-cased, numbers mapped, icmpv6 → icmp. */
+export function normalizeProtocol(raw: string | undefined | null): string {
+  const p = String(raw ?? '').trim().toLowerCase();
+  if (!p) return 'unknown';
+  if (/^\d+$/.test(p)) return PROTOCOL_NUMBERS[String(Number(p))] ?? `proto-${Number(p)}`;
+  if (p === 'icmpv6' || p === 'ipv6-icmp' || p === 'icmp6') return 'icmp';
+  return p;
+}
+
+const MONTHS: Record<string, number> = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+
+/**
+ * Parse a log timestamp to epoch milliseconds: RFC 3339 / ISO 8601, or the classic syslog
+ * "Mmm dd HH:MM:SS" (no year, local time). For the latter the current year is assumed, or the
+ * previous year when that would put the stamp more than a day into the future (a December line read
+ * in January). Returns null when the text is not a timestamp.
+ */
+export function parseLogTimestamp(ts: string, now: Date = new Date()): number | null {
+  const s = String(ts ?? '').trim();
+  const sys = /^([A-Za-z]{3})\s+(\d{1,2})\s+(\d{1,2}):(\d{2}):(\d{2})$/.exec(s);
+  if (sys) {
+    const month = MONTHS[sys[1].toLowerCase()];
+    if (month === undefined) return null;
+    const build = (year: number) => new Date(year, month, Number(sys[2]), Number(sys[3]), Number(sys[4]), Number(sys[5])).getTime();
+    let t = build(now.getFullYear());
+    if (t > now.getTime() + 24 * 3600 * 1000) t = build(now.getFullYear() - 1);
+    return Number.isFinite(t) ? t : null;
+  }
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s)) {
+    // "+0100" → "+01:00" for Date.parse
+    const t = Date.parse(s.replace(/([+-]\d{2})(\d{2})$/, '$1:$2'));
+    return Number.isFinite(t) ? t : null;
+  }
+  return null;
 }
 
 /**
@@ -109,7 +161,10 @@ function parseLogLine(line: string): ParsedLogEntry | null {
   const ifaceMatch = lastMatch(afterPrefix, /\bIN=(\S*)\s+OUT=(\S*)/);
   const inIf = ifaceMatch ? ifaceMatch[1] : undefined;
   const outIf = ifaceMatch ? ifaceMatch[2] : undefined;
-  const kernel = ifaceMatch ? afterPrefix.slice(ifaceMatch.index) : afterPrefix;
+  // ICMP error messages quote the offending packet's header in brackets
+  // ("... PROTO=ICMP TYPE=3 CODE=3 [SRC=... PROTO=UDP SPT=53 DPT=40000 ...]"): those fields describe the
+  // inner packet, not this one, so they are removed before any field is extracted.
+  const kernel = (ifaceMatch ? afterPrefix.slice(ifaceMatch.index) : afterPrefix).replace(/\[[^\]]*\]/g, ' ');
 
   let direction: FlowDirection;
   if (ifaceMatch) {
@@ -138,22 +193,23 @@ function parseLogLine(line: string): ParsedLogEntry | null {
     if (m) destinationIp = m[1];
   }
 
-  // Extract protocol (kernel PROTO= field first)
+  // Extract protocol (kernel PROTO= field first; numeric values such as PROTO=2 are mapped to names)
   let protocol = 'unknown';
   const protoMatch = kernel.match(/\bPROTO=(\w+)/);
-  const protoRaw = protoMatch ? protoMatch[1].toLowerCase() : '';
-  if (protoRaw === 'tcp' || /\b(meta l4proto|ip protocol)\s+tcp\b/i.test(kernel)) protocol = 'tcp';
-  else if (protoRaw === 'udp' || /\b(meta l4proto|ip protocol)\s+udp\b/i.test(kernel)) protocol = 'udp';
-  else if (protoRaw === 'icmp' || protoRaw === 'icmpv6' || /\bicmp\b/i.test(protoRaw)) protocol = 'icmp';
-  else if (protoRaw) protocol = protoRaw;
+  if (protoMatch) protocol = normalizeProtocol(protoMatch[1]);
+  else if (/\b(meta l4proto|ip protocol)\s+tcp\b/i.test(kernel)) protocol = 'tcp';
+  else if (/\b(meta l4proto|ip protocol)\s+udp\b/i.test(kernel)) protocol = 'udp';
+  else if (/\b(meta l4proto|ip protocol)\s+(icmp|ipv6-icmp|icmpv6)\b/i.test(kernel)) protocol = 'icmp';
 
-  // Extract ports: SPT=12345 DPT=80 or sport 12345 dport 80
+  // Extract ports (SPT=12345 DPT=80 or sport 12345 dport 80) — only tcp/udp have ports a rule can match.
   let sourcePort: number | undefined;
   let destinationPort: number | undefined;
-  const sptMatch = kernel.match(/\b(?:SPT=|sport[=\s]+)(\d+)/i);
-  if (sptMatch) sourcePort = parseInt(sptMatch[1], 10);
-  const dptMatch = kernel.match(/\b(?:DPT=|dport[=\s]+)(\d+)/i);
-  if (dptMatch) destinationPort = parseInt(dptMatch[1], 10);
+  if (protocol === 'tcp' || protocol === 'udp') {
+    const sptMatch = kernel.match(/\b(?:SPT=|sport[=\s]+)(\d+)/i);
+    if (sptMatch) sourcePort = parseInt(sptMatch[1], 10);
+    const dptMatch = kernel.match(/\b(?:DPT=|dport[=\s]+)(\d+)/i);
+    if (dptMatch) destinationPort = parseInt(dptMatch[1], 10);
+  }
 
   // If we couldn't extract IPs, skip this entry
   if (!sourceIp && !destinationIp) {
@@ -186,18 +242,24 @@ function parseLogLine(line: string): ParsedLogEntry | null {
 /**
  * Group parsed log entries into communication flows
  */
-export function groupCommunicationFlows(entries: ParsedLogEntry[]): CommunicationFlow[] {
-  const flowMap = new Map<string, CommunicationFlow>();
+export function groupCommunicationFlows(entries: ParsedLogEntry[], now: Date = new Date()): CommunicationFlow[] {
+  const flowMap = new Map<string, CommunicationFlow & { firstMs: number | null; lastMs: number | null }>();
 
   for (const entry of entries) {
-    // Host firewalls only enforce input/output: drop forwarded and loopback packets.
-    if (entry.direction === 'FORWARD' || entry.loopback) continue;
+    // Loopback packets are never filtered by Segmentra. Forwarded packets are kept (direction FORWARD):
+    // gateways filter them with FORWARD rules, and consumers that only handle IN/OUT skip them.
+    if (entry.loopback) continue;
 
-    // Create a key for this flow
-    const key = `${entry.direction}:${entry.sourceIp}:${entry.destinationIp}:${entry.protocol}:${entry.sourcePort || '*'}:${entry.destinationPort || '*'}`;
+    // Create a key for this flow (the interfaces are part of it: interface-scoped rules depend on them)
+    const key = [
+      entry.direction, entry.sourceIp, entry.destinationIp, entry.protocol,
+      entry.sourcePort || '*', entry.destinationPort || '*', entry.inInterface ?? '', entry.outInterface ?? '',
+    ].join('|');
+    const ms = parseLogTimestamp(entry.timestamp, now);
 
-    if (!flowMap.has(key)) {
-      flowMap.set(key, {
+    let flow = flowMap.get(key);
+    if (!flow) {
+      flow = {
         direction: entry.direction,
         sourceIp: entry.sourceIp,
         destinationIp: entry.destinationIp,
@@ -207,21 +269,32 @@ export function groupCommunicationFlows(entries: ParsedLogEntry[]): Communicatio
         count: 0,
         firstSeen: entry.timestamp,
         lastSeen: entry.timestamp,
-        established: !!entry.established
-      });
+        established: !!entry.established,
+        ...(entry.inInterface ? { inInterface: entry.inInterface } : {}),
+        ...(entry.outInterface ? { outInterface: entry.outInterface } : {}),
+        firstMs: ms,
+        lastMs: ms,
+      };
+      flowMap.set(key, flow);
     }
 
-    const flow = flowMap.get(key)!;
     flow.count++;
     // A flow is "established-only" if every packet came through the established baseline rule.
     if (!entry.established) flow.established = false;
-    if (entry.timestamp < flow.firstSeen) {
+    // Compare as points in time ("Dec  1" is later than "Nov 30"); fall back to text only when unparseable.
+    const earlier = ms !== null && flow.firstMs !== null ? ms < flow.firstMs : entry.timestamp < flow.firstSeen;
+    const later = ms !== null && flow.lastMs !== null ? ms > flow.lastMs : entry.timestamp > flow.lastSeen;
+    if (earlier) {
       flow.firstSeen = entry.timestamp;
+      flow.firstMs = ms;
     }
-    if (entry.timestamp > flow.lastSeen) {
+    if (later) {
       flow.lastSeen = entry.timestamp;
+      flow.lastMs = ms;
     }
   }
 
-  return Array.from(flowMap.values()).sort((a, b) => b.count - a.count);
+  return Array.from(flowMap.values())
+    .map(({ firstMs: _f, lastMs: _l, ...flow }) => flow)
+    .sort((a, b) => b.count - a.count);
 }

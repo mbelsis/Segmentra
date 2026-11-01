@@ -99,15 +99,28 @@ export function isStrictIpOrCidr(value: string | null | undefined): boolean {
 }
 
 /**
- * A stored address (inet text or IoT asset ip_address) as a FORWARD destination: trimmed, a full-length
- * host prefix (/32, /128) dropped, any other prefix kept. Returns null when it is not a valid IP/CIDR.
+ * Canonical form of an IoT asset / host address: trimmed; a full-length prefix (/32, /128) dropped; a prefix
+ * WITH host bits set (192.168.10.5/24, as legacy rows stored before validation and as `ip addr` prints it)
+ * means the single device and becomes the bare host address. Only a true network address
+ * (192.168.10.0/24) stays a CIDR. Returns null when the value is not a strict IP/CIDR.
  */
-export function normalizeDestinationAddress(value: unknown): string | null {
+export function normalizeIotAddress(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   const s = String(value).trim();
   if (!s || !isStrictIpOrCidr(s)) return null;
   const c = parseCidr(s)!;
-  return c.prefix === c.bits ? s.split('/')[0] : s;
+  const ipPart = s.split('/')[0];
+  if (c.prefix === c.bits) return ipPart;
+  const ip = parseCidr(ipPart)!;
+  return ip.network === c.network ? s : ipPart;
+}
+
+/**
+ * A stored address (inet text or IoT asset ip_address) as a FORWARD destination: see normalizeIotAddress
+ * (host prefix dropped, host-bits CIDR = that host, network CIDR kept). Null when not a valid IP/CIDR.
+ */
+export function normalizeDestinationAddress(value: unknown): string | null {
+  return normalizeIotAddress(value);
 }
 
 export const PORT_SPEC_REGEX = /^\d{1,5}(-\d{1,5})?(\s*,\s*\d{1,5}(-\d{1,5})?)*$/;

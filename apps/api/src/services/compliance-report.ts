@@ -178,8 +178,13 @@ export async function collectEvidence(p: ReportParams, now = new Date()) {
 
   // Kubernetes
   const clusters = await q(`SELECT name, cni, (credentials_secret_id IS NOT NULL) AS has_credentials, tls_skip_verify, enabled FROM k8s_clusters ORDER BY name`);
+  // One record per (cluster, namespace, name): the APPLIED one when there is one (it owns the live object,
+  // and its live_state is what k8s_drift reports), otherwise the newest. A manifest that was only
+  // generated after the applied one must not hide it.
   const k8sPolicies = await q(
-    `SELECT DISTINCT ON (cluster_id, namespace, policy_name) status, live_state FROM k8s_network_policies WHERE status <> 'SUPERSEDED' ORDER BY cluster_id, namespace, policy_name, created_at DESC`
+    `SELECT DISTINCT ON (cluster_id, namespace, policy_name) status, live_state FROM k8s_network_policies
+      WHERE status <> 'SUPERSEDED'
+      ORDER BY cluster_id, namespace, policy_name, (status = 'APPLIED') DESC, created_at DESC, id DESC`
   );
   const k8sByStatus: Record<string, number> = {};
   for (const r of k8sPolicies) k8sByStatus[r.status] = (k8sByStatus[r.status] ?? 0) + 1;

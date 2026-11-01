@@ -18,6 +18,7 @@ export interface PolicyDiffRule {
   destinationType?: string;
   destinationValue?: string;
   comment?: string;
+  logMode?: string;
 }
 
 export interface PolicyDiffResult {
@@ -43,11 +44,31 @@ export interface PolicyDiffResult {
   };
 }
 
-function describeScope(type: string | null | undefined, roles: unknown, names: unknown): string {
-  const t = type || 'ALL_INTERFACES';
-  if (t === 'INTERFACE_ROLE') return `INTERFACE_ROLE:${[...((roles as string[]) ?? [])].sort().join(',')}`;
-  if (t === 'INTERFACE_NAME') return `INTERFACE_NAME:${[...((names as string[]) ?? [])].sort().join(',')}`;
-  return t;
+/**
+ * Policy-level interface scope as the compiler sees it (routes/deployments.ts): ALL_INTERFACES and
+ * INTERFACE_NAME as stored, anything else — including NULL — is INTERFACE_ROLE with the stored roles
+ * (none → a scope that matches no interface).
+ */
+export function describeScope(type: string | null | undefined, roles: unknown, names: unknown): string {
+  if (type === 'ALL_INTERFACES') return 'ALL_INTERFACES';
+  if (type === 'INTERFACE_NAME') return `INTERFACE_NAME:${[...((names as string[]) ?? [])].sort().join(',')}`;
+  return `INTERFACE_ROLE:${[...((roles as string[]) ?? [])].sort().join(',')}`;
+}
+
+/**
+ * Per-rule interface scope as the compiler resolves it: null = the rule follows the policy scope
+ * (use_policy_interface_scope, or no valid rule-level scope stored, which falls back to the policy scope).
+ */
+export function describeRuleScope(r: {
+  use_policy_interface_scope?: boolean | null;
+  interface_scope_type?: string | null;
+  interface_scope_roles?: unknown;
+  interface_scope_names?: unknown;
+}): string | null {
+  if (r.use_policy_interface_scope) return null;
+  const t = r.interface_scope_type;
+  if (t !== 'ALL_INTERFACES' && t !== 'INTERFACE_NAME' && t !== 'INTERFACE_ROLE') return null;
+  return describeScope(t, r.interface_scope_roles, r.interface_scope_names);
 }
 
 /** Longest common subsequence over keys; returns the set of kept keys. */
@@ -109,7 +130,7 @@ export async function comparePolicyVersions(params: {
   // Get rules for both versions
   const [currentRulesRes, candidateRulesRes] = await Promise.all([
     pool.query(
-      `SELECT order_index, direction, action, protocol, ports, source_type, source_value, comment,
+      `SELECT order_index, direction, action, protocol, ports, source_type, source_value, comment, log_mode,
               use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names,
               destination_type, destination_value
        FROM policy_rules
@@ -118,7 +139,7 @@ export async function comparePolicyVersions(params: {
       [params.currentVersionId]
     ),
     pool.query(
-      `SELECT order_index, direction, action, protocol, ports, source_type, source_value, comment,
+      `SELECT order_index, direction, action, protocol, ports, source_type, source_value, comment, log_mode,
               use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names,
               destination_type, destination_value
        FROM policy_rules
@@ -139,21 +160,24 @@ export async function comparePolicyVersions(params: {
     destinationType: (r.destination_type as string | null) || null,
     destinationValue: (r.destination_value as string | null) || null,
     comment: r.comment || null,
+    logMode: (r.log_mode as string | null) || 'NONE',
     orderIndex: Number(r.order_index),
     // Per-rule interface scope only matters when the rule overrides the policy scope.
-    interfaceScope:
-      r.use_policy_interface_scope === false
-        ? describeScope(r.interface_scope_type, r.interface_scope_roles, r.interface_scope_names)
-        : null
+    interfaceScope: describeRuleScope(r)
   });
 
   const currentRules = currentRulesRes.rows.map(normalizeRule);
   const candidateRules = candidateRulesRes.rows.map(normalizeRule);
 
   // Content signature (order is compared separately so one insertion doesn't flag every rule)
+  // Every column the compiler turns into firewall config is part of it: a log_mode or comment change
+  // (log statement / rule comment) is a real ruleset change, so it shows up as removed + added.
   const ruleSignature = (r: ReturnType<typeof normalizeRule>) =>
-    `${r.direction}|${r.action}|${r.protocol}|${(r.ports || '*').replace(/\s+/g, '')}|${r.sourceType}|${r.sourceValue}|${r.interfaceScope ?? 'policy'}` +
-    (r.destinationType ? `|dst:${r.destinationType}:${r.destinationValue}` : '');
+    JSON.stringify([
+      r.direction, r.action, r.protocol, (r.ports || '*').replace(/\s+/g, ''), r.sourceType, r.sourceValue,
+      r.interfaceScope ?? 'policy', r.destinationType ?? null, r.destinationType ? r.destinationValue : null,
+      r.logMode, r.comment ?? '',
+    ]);
 
   // Reorder detection: give duplicate signatures an occurrence suffix, then find rules common to
   // both versions whose relative order changed (outside the longest common subsequence).
@@ -264,6 +288,7 @@ export async function comparePolicyVersions(params: {
         destinationType: rule.destinationType || undefined,
         destinationValue: rule.destinationValue || undefined,
         comment: rule.comment || undefined,
+        logMode: rule.logMode,
         interfaceScope: rule.interfaceScope ?? undefined
       };
 
@@ -287,6 +312,7 @@ export async function comparePolicyVersions(params: {
         destinationType: rule.destinationType || undefined,
         destinationValue: rule.destinationValue || undefined,
         comment: rule.comment || undefined,
+        logMode: rule.logMode,
         interfaceScope: rule.interfaceScope ?? undefined
       };
 
@@ -310,6 +336,7 @@ export async function comparePolicyVersions(params: {
       destinationType: rule.destinationType || undefined,
       destinationValue: rule.destinationValue || undefined,
       comment: rule.comment || undefined,
+      logMode: rule.logMode,
       interfaceScope: rule.interfaceScope ?? undefined
     }));
 

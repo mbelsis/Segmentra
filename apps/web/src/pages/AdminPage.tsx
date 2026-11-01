@@ -135,6 +135,10 @@ export function AdminPage() {
   const [bindDn, setBindDn] = useState('');
   const [bindPassword, setBindPassword] = useState('');
   const [useLdaps, setUseLdaps] = useState(true);
+  const [startTls, setStartTls] = useState(false);
+  // PEM CA certificate: blank = keep the stored one; removeCaCert clears it.
+  const [caCert, setCaCert] = useState('');
+  const [removeCaCert, setRemoveCaCert] = useState(false);
   const [ldapEnabled, setLdapEnabled] = useState(false);
   const [userFilter, setUserFilter] = useState('(sAMAccountName={{username}})');
   const [groupFilter, setGroupFilter] = useState('');
@@ -209,6 +213,7 @@ export function AdminPage() {
         setBaseDn(ldapSettings.base_dn || 'DC=example,DC=com');
         setBindDn(ldapSettings.bind_dn || '');
         setUseLdaps(ldapSettings.use_ldaps !== false);
+        setStartTls(ldapSettings.start_tls === true);
         setLdapEnabled(ldapSettings.enabled !== false);
         setUserFilter(ldapSettings.user_filter ?? '');
         setGroupFilter(ldapSettings.group_filter ?? '');
@@ -388,8 +393,11 @@ export function AdminPage() {
         bindDn: bindDn.trim() || undefined,
         userFilter: userFilter.trim() || undefined,
         groupFilter: groupFilter.trim() || undefined,
-        useLdaps: useLdaps
+        useLdaps: useLdaps,
+        startTls: startTls
       };
+      if (removeCaCert) body.caCert = null;
+      else if (caCert.trim() !== '') body.caCert = caCert.trim();
       // Omit bindPassword entirely when blank so the API keeps the existing secret.
       if (bindPassword !== '') body.bindPassword = bindPassword;
       const r = await api.putLdapSettings(body);
@@ -400,6 +408,8 @@ export function AdminPage() {
       }
       setSuccess('LDAP settings saved successfully');
       setBindPassword(''); // Clear password field
+      setCaCert('');
+      setRemoveCaCert(false);
       setTimeout(() => setSuccess(''), 3000);
     } catch (e: any) {
       setError(String(e?.message ?? e));
@@ -870,6 +880,8 @@ export function AdminPage() {
               {ldap.user_filter && <div><strong>User Filter:</strong> <code>{ldap.user_filter}</code></div>}
               {ldap.group_filter && <div><strong>Group Filter:</strong> <code>{ldap.group_filter}</code></div>}
               <div><strong>LDAPS:</strong> {ldap.use_ldaps ? 'Yes' : 'No'}</div>
+              <div><strong>StartTLS:</strong> {ldap.start_tls ? 'Yes' : 'No'}</div>
+              <div><strong>CA certificate:</strong> {ldap.has_ca_cert ? 'Custom CA stored' : 'System trust store'}</div>
               {ldap.created_at && <div><strong>Created:</strong> {new Date(ldap.created_at).toLocaleString()}</div>}
             </div>
           </div>
@@ -958,6 +970,38 @@ export function AdminPage() {
               />
               <span>Use secure LDAP (LDAPS)</span>
             </label>
+          </div>
+          <div className="form-group">
+            <label>StartTLS</label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={startTls}
+                onChange={(e) => setStartTls(e.target.checked)}
+              />
+              <span>Upgrade ldap:// connections with StartTLS</span>
+            </label>
+            {!useLdaps && !startTls && !url.trim().toLowerCase().startsWith('ldaps://') && (
+              <small style={{ color: '#a63d2f' }}>Without LDAPS or StartTLS, passwords are sent to the directory in cleartext.</small>
+            )}
+          </div>
+          <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+            <label>CA Certificate (PEM) {ldap?.has_ca_cert && <span style={{ fontWeight: 'normal', color: '#97846c' }}>(stored — leave blank to keep)</span>}</label>
+            <textarea
+              value={caCert}
+              onChange={(e) => setCaCert(e.target.value)}
+              rows={4}
+              placeholder="-----BEGIN CERTIFICATE-----"
+              style={{ fontFamily: 'monospace', width: '100%' }}
+              disabled={removeCaCert}
+            />
+            <small>CA used to verify the directory's TLS certificate (LDAPS and StartTLS). Empty = system trust store.</small>
+            {ldap?.has_ca_cert && (
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                <input type="checkbox" checked={removeCaCert} onChange={(e) => setRemoveCaCert(e.target.checked)} />
+                <span>Remove the stored CA certificate</span>
+              </label>
+            )}
           </div>
         </div>
         

@@ -102,7 +102,8 @@ adminRouter.post('/bootstrap', async (req, res) => {
 
 adminRouter.get('/ldap-settings', requireAuth, requireRole('admin'), async (_req, res) => {
   const { rows } = await pool.query(
-    `SELECT id, enabled, url, bind_dn, base_dn, user_filter, group_filter, use_ldaps, created_at
+    `SELECT id, enabled, url, bind_dn, base_dn, user_filter, group_filter, use_ldaps, start_tls,
+            (tls_ca_cert_secret_id IS NOT NULL) AS has_ca_cert, created_at
      FROM ldap_settings
      ORDER BY created_at DESC
      LIMIT 1`
@@ -119,7 +120,17 @@ const putLdapSchema = z.object({
   baseDn: z.string().min(1),
   userFilter: z.string().optional(),
   groupFilter: z.string().optional(),
-  useLdaps: z.boolean().default(true)
+  useLdaps: z.boolean().default(true),
+  // StartTLS upgrade for ldap:// URLs (ignored for ldaps://).
+  startTls: z.boolean().default(false),
+  // PEM CA bundle used to verify the directory's certificate. Omitted (or empty string) = keep the
+  // existing one; null = clear it (system trust store).
+  caCert: z
+    .string()
+    .max(256 * 1024)
+    .refine((v) => v === '' || /-----BEGIN CERTIFICATE-----[\s\S]+-----END CERTIFICATE-----/.test(v), 'must be a PEM certificate')
+    .nullable()
+    .optional()
 });
 
 adminRouter.put('/ldap-settings', requireAuth, requireRole('admin'), async (req, res) => {
@@ -143,11 +154,28 @@ adminRouter.put('/ldap-settings', requireAuth, requireRole('admin'), async (req,
     bindPasswordSecretId = secret.id;
   }
 
+  let caSecretId: string | null = null;
+  if (s.caCert === undefined || s.caCert === '') {
+    const latest = await pool.query(
+      `SELECT tls_ca_cert_secret_id FROM ldap_settings ORDER BY created_at DESC LIMIT 1`
+    );
+    caSecretId = latest.rows[0]?.tls_ca_cert_secret_id ?? null;
+  } else if (s.caCert) {
+    const secret = await createSecret({
+      name: `ldap_ca_${new Date().toISOString()}`,
+      type: 'TLS_CA_CERT',
+      plaintext: Buffer.from(s.caCert, 'utf8')
+    });
+    caSecretId = secret.id;
+  }
+
   const { rows } = await pool.query(
     `INSERT INTO ldap_settings
-      (enabled, url, bind_dn, bind_password_secret_id, base_dn, user_filter, group_filter, use_ldaps)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-     RETURNING id, enabled, url, bind_dn, base_dn, user_filter, group_filter, use_ldaps, created_at`,
+      (enabled, url, bind_dn, bind_password_secret_id, base_dn, user_filter, group_filter, use_ldaps,
+       start_tls, tls_ca_cert_secret_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+     RETURNING id, enabled, url, bind_dn, base_dn, user_filter, group_filter, use_ldaps, start_tls,
+               (tls_ca_cert_secret_id IS NOT NULL) AS has_ca_cert, created_at`,
     [
       s.enabled,
       s.url,
@@ -156,9 +184,15 @@ adminRouter.put('/ldap-settings', requireAuth, requireRole('admin'), async (req,
       s.baseDn,
       s.userFilter ?? null,
       s.groupFilter ?? null,
-      s.useLdaps
+      s.useLdaps,
+      s.startTls,
+      caSecretId
     ]
   );
+  if (!s.url.toLowerCase().startsWith('ldaps://') && !s.startTls) {
+    // eslint-disable-next-line no-console
+    console.warn('[LDAP] Settings use ldap:// without StartTLS: user and bind passwords will be sent in cleartext.');
+  }
   res.json({ ldapSettings: rows[0] });
 });
 
@@ -337,7 +371,9 @@ adminRouter.post('/users', requireAuth, requireRole('admin'), async (req, res) =
     await client.query('BEGIN');
 
     // Check username uniqueness
-    const existing = await client.query('SELECT id FROM users WHERE username = $1', [b.username]);
+    // Case-insensitive: directory accounts are stored lower-cased and a unique index on lower(username)
+    // (migration 042) forbids names differing only in case.
+    const existing = await client.query('SELECT id FROM users WHERE lower(username) = lower($1)', [b.username]);
     if (existing.rows.length > 0) {
       await client.query('ROLLBACK');
       return res.status(409).json({ error: 'username_taken', message: `Username "${b.username}" is already in use.` });

@@ -8,7 +8,7 @@ export const flowCollectorsRouter = Router();
 flowCollectorsRouter.use(requireAuth);
 
 // List flow collectors
-flowCollectorsRouter.get('/', requireRole('viewer', 'operator', 'admin'), async (_req, res) => {
+flowCollectorsRouter.get('/', requireRole('viewer', 'operator', 'approver', 'admin'), async (_req, res) => {
   const { rows } = await pool.query(
     `SELECT fc.*,
        (SELECT COUNT(*)::int FROM iot_observed_flows iof WHERE iof.collector_id = fc.id) as flow_count
@@ -18,7 +18,7 @@ flowCollectorsRouter.get('/', requireRole('viewer', 'operator', 'admin'), async 
 });
 
 // Get single collector
-flowCollectorsRouter.get('/:id', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
+flowCollectorsRouter.get('/:id', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const { rows } = await pool.query(`SELECT * FROM flow_collectors WHERE id = $1`, [req.params.id]);
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
 
@@ -111,8 +111,10 @@ flowCollectorsRouter.delete('/:id', requireRole('admin'), async (req, res) => {
 });
 
 // Get flows for collector
-flowCollectorsRouter.get('/:id/flows', requireRole('viewer', 'operator', 'admin'), async (req, res) => {
-  const limit = parseInt(String(req.query.limit ?? '100'), 10);
+flowCollectorsRouter.get('/:id/flows', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
+  // ?limit= is clamped to 1..1000 (default 100); anything non-numeric falls back to the default.
+  const parsedLimit = parseInt(String(req.query.limit ?? '100'), 10);
+  const limit = Number.isFinite(parsedLimit) ? Math.min(1000, Math.max(1, parsedLimit)) : 100;
   const { rows } = await pool.query(
     `SELECT * FROM iot_observed_flows WHERE collector_id = $1 ORDER BY last_seen_at DESC LIMIT $2`,
     [req.params.id, limit]

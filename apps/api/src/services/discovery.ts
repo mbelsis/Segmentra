@@ -411,6 +411,54 @@ async function executeRun(runId: string, profileId: string, trigger: 'manual' | 
   console.log(`[Discovery] ${profileName || profileId} (${trigger}) ${status}: scanned=${counts.addressesScanned} open=${counts.sshOpen} loginOk=${counts.loginOk} imported=${counts.imported} present=${counts.alreadyPresent} loginFailed=${counts.loginFailed}`);
 }
 
+/** Hostname candidates for a discovered host, most readable first. */
+export function* hostnameCandidates(base: string, ip: string): Generator<string> {
+  const lastOctet = ip.split(/[.:]/).pop();
+  const flat = ip.replace(/[.:]/g, '-');
+  yield base;
+  yield `${base}-${lastOctet}`;
+  yield `${base}-${flat}`;
+  for (let i = 2; ; i++) yield `${base}-${flat}-${i}`;
+}
+
+export const HOSTNAME_INSERT_ATTEMPTS = 5;
+
+/**
+ * Insert the host under the first free hostname candidate. The check-then-insert can still lose a race with
+ * a writer that does not take the discovery lock, so a unique violation on the hostname rolls back to a
+ * savepoint and moves to the next candidate (bounded).
+ */
+export async function insertWithFreeHostname(
+  client: { query: (sql: string, params?: any[]) => Promise<{ rows: any[] }> },
+  base: string,
+  ip: string,
+  insert: (hostname: string) => Promise<{ rows: any[] }>
+): Promise<{ id: string; hostname: string }> {
+  const candidates = hostnameCandidates(base, ip);
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < HOSTNAME_INSERT_ATTEMPTS; attempt++) {
+    // Not for...of: breaking out of it would close the generator, and a retry must continue after the taken name.
+    let name = '';
+    while (!name) {
+      const c = candidates.next().value as string;
+      const { rows } = await client.query(`SELECT 1 FROM hosts WHERE hostname = $1`, [c]);
+      if (!rows[0]) name = c;
+    }
+    await client.query('SAVEPOINT segmentra_host_insert');
+    try {
+      const { rows } = await insert(name);
+      await client.query('RELEASE SAVEPOINT segmentra_host_insert');
+      return { id: rows[0].id, hostname: name };
+    } catch (e: any) {
+      await client.query('ROLLBACK TO SAVEPOINT segmentra_host_insert');
+      const hostnameTaken = e?.code === '23505' && /hostname/i.test(`${e?.constraint ?? ''} ${e?.detail ?? ''}`);
+      if (!hostnameTaken) throw e;
+      lastError = e; // taken in the meantime: the generator continues after this name
+    }
+  }
+  throw Object.assign(new Error(`no free hostname for ${ip} after ${HOSTNAME_INSERT_ATTEMPTS} attempts (base "${base}")`), { cause: lastError });
+}
+
 async function importHost(params: {
   ip: string;
   port: number;
@@ -447,25 +495,17 @@ async function importHost(params: {
     }
 
     const base = sanitizeHostname(facts.hostname, ip);
-    const lastOctet = ip.split('.').pop();
-    const candidates = [base, `${base}-${lastOctet}`, `${base}-${ip.replace(/\./g, '-')}`];
-    hostname = '';
-    for (const c of candidates) {
-      const { rows } = await client.query(`SELECT 1 FROM hosts WHERE hostname = $1`, [c]);
-      if (!rows[0]) { hostname = c; break; }
-    }
-    for (let i = 2; !hostname; i++) {
-      const c = `${base}-${ip.replace(/\./g, '-')}-${i}`;
-      const { rows } = await client.query(`SELECT 1 FROM hosts WHERE hostname = $1`, [c]);
-      if (!rows[0]) hostname = c;
-    }
-
-    const { rows: inserted } = await client.query(
+    // Concurrent imports of different addresses that report the same hostname would all see the same free
+    // candidate and race on hosts.hostname UNIQUE. Serialise them on the base name; names created elsewhere
+    // (another base whose suffixed form collides, the inventory API) are handled by retrying on 23505.
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`segmentra-discovery-hostname:${base}`]);
+    const inserted = await insertWithFreeHostname(client, base, ip, (name) => client.query(
       `INSERT INTO hosts (hostname, mgmt_ip, ssh_port, os_family, firewall_backend, enabled)
        VALUES ($1, $2, $3, $4, $5, true) RETURNING id`,
-      [hostname, ip, port, facts.osId, backend]
-    );
-    hostId = inserted[0].id;
+      [name, ip, port, facts.osId, backend]
+    ));
+    hostname = inserted.hostname;
+    hostId = inserted.id;
     await client.query(
       `INSERT INTO host_tags (host_id, tag_id, source) VALUES ($1, $2, 'manual') ON CONFLICT DO NOTHING`,
       [hostId, params.tagId]

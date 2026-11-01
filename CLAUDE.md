@@ -32,7 +32,7 @@ npm run dev             # Start API only (runs/watches apps/api/dist/index.js â€
 npm run lint            # Lint all workspaces (only apps/web has a real ESLint config)
 npm run db:migrate      # Run database migrations (packages/db/scripts/migrate.js -> node-pg-migrate)
 npm run db:seed         # Seed RBAC roles, system tags and the initial admin user
-npm run db:demo         # Load the sample dataset (packages/db/demo/demo-data.sql; idempotent, defaults to the dev DATABASE_URL, refuses NODE_ENV=production; -- --remove deletes it)
+npm run db:demo         # Load the sample dataset (packages/db/demo/demo-data.sql; idempotent, defaults to the dev DATABASE_URL; refuses NODE_ENV=production, a non-localhost DATABASE_URL or a database with non-demo users/hosts unless `-- --force`; -- --remove deletes it)
 npm run test:integration:ssh-docker   # Docker-based SSH deployment integration test
 npm run test:integration:ot-gateway   # Docker lab: Debian IoT/OT gateway between an IT and an OT network, FORWARD rules, real traffic (tests/ot-gateway-lab)
 
@@ -127,7 +127,7 @@ Four roles: `viewer`, `operator`, `approver`, `admin`. Policy versions follow a 
 - API: http://localhost:8080
 - Web UI: http://localhost:5173
 - PostgreSQL: localhost:15432
-- Default credentials: admin/admin123 (created by `npm run db:seed` in development when `SEGMENTRA_ADMIN_PASSWORD` is unset; in production the seed refuses to create the default password)
+- Default credentials: admin/admin123 (created by `npm run db:seed` in development when `SEGMENTRA_ADMIN_PASSWORD` is unset; in production the seed refuses to create the default password). The seed creates the initial admin only when the `users` table is empty (first run), so a deleted/renamed `admin` is not re-created; recover a lost admin with `SEGMENTRA_BOOTSTRAP_TOKEN`
 - Dev JWT secret: generated once into the untracked `.dev-jwt-secret` by `start.sh` / `run.sh` when `JWT_SECRET` is not set
 
 ## Docker Deployment

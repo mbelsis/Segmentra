@@ -21,6 +21,8 @@ function mergeSorted(prev: string[], next: Iterable<string>): string[] {
 export function AuditPage() {
   const [events, setEvents] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState('');
   
   // Filters
@@ -50,28 +52,61 @@ export function AuditPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterActor, filterAction, filterEntityType, filterFrom, filterTo]);
 
+  function currentParams(): any {
+    const params: any = {};
+    if (filterActor) params.actor = filterActor;
+    if (filterAction) params.action = filterAction;
+    if (filterEntityType) params.entityType = filterEntityType;
+    const fromIso = localToIso(filterFrom);
+    const toIso = localToIso(filterTo);
+    if (fromIso) params.from = fromIso;
+    if (toIso) params.to = toIso;
+    return params;
+  }
+
+  function mergeOptions(list: any[]) {
+    setAllActors(prev => mergeSorted(prev, list.map((e: any) => e.actor_username).filter(Boolean)));
+    setAllActions(prev => mergeSorted(prev, list.map((e: any) => e.action).filter(Boolean)));
+    setAllEntityTypes(prev => mergeSorted(prev, list.map((e: any) => e.entity_type).filter(Boolean)));
+  }
+
+  // Next (older) page with the same filters, appended to the list.
+  async function loadMore() {
+    if (!nextCursor) return;
+    const requestId = requestIdRef.current;
+    setLoadingMore(true);
+    try {
+      const res = await api.audit({ ...currentParams(), before: nextCursor });
+      if (requestId !== requestIdRef.current) return; // filters changed meanwhile
+      const list = res.events || [];
+      setEvents(prev => {
+        const seen = new Set(prev.map((e) => e.id));
+        return [...prev, ...list.filter((e: any) => !seen.has(e.id))];
+      });
+      setNextCursor(res.nextCursor ?? null);
+      setError('');
+      mergeOptions(list);
+    } catch (e: any) {
+      if (requestId !== requestIdRef.current) return;
+      setError(String(e?.message ?? e));
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
   async function loadData() {
     const requestId = ++requestIdRef.current;
     setLoading(true);
     try {
-      const params: any = {};
-      if (filterActor) params.actor = filterActor;
-      if (filterAction) params.action = filterAction;
-      if (filterEntityType) params.entityType = filterEntityType;
-      const fromIso = localToIso(filterFrom);
-      const toIso = localToIso(filterTo);
-      if (fromIso) params.from = fromIso;
-      if (toIso) params.to = toIso;
-      
+      const params: any = currentParams();
+
       const res = await api.audit(params);
       if (requestId !== requestIdRef.current) return; // stale response
       const list = res.events || [];
       setEvents(list);
+      setNextCursor(res.nextCursor ?? null);
       setError('');
-      
-      setAllActors(prev => mergeSorted(prev, list.map((e: any) => e.actor_username).filter(Boolean)));
-      setAllActions(prev => mergeSorted(prev, list.map((e: any) => e.action).filter(Boolean)));
-      setAllEntityTypes(prev => mergeSorted(prev, list.map((e: any) => e.entity_type).filter(Boolean)));
+      mergeOptions(list);
     } catch (e: any) {
       if (requestId !== requestIdRef.current) return;
       console.error('Failed to load audit events:', e);
@@ -353,7 +388,7 @@ export function AuditPage() {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
           <h3 style={{ margin: 0 }}>Events</h3>
           <div style={{ color: '#666', fontSize: '0.9em' }}>
-            {loading ? 'Loading...' : `${events.length} event${events.length !== 1 ? 's' : ''}`}
+            {loading ? 'Loading...' : `${events.length} event${events.length !== 1 ? 's' : ''}${nextCursor ? ' (more available)' : ''}`}
           </div>
         </div>
         
@@ -413,6 +448,13 @@ export function AuditPage() {
               )}
             </tbody>
           </table>
+        )}
+        {nextCursor && !loading && (
+          <div style={{ marginTop: 12, textAlign: 'center' }}>
+            <button className="btn-secondary" onClick={() => void loadMore()} disabled={loadingMore}>
+              {loadingMore ? 'Loading...' : 'Load more'}
+            </button>
+          </div>
         )}
       </div>
     </div>

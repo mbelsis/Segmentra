@@ -4,19 +4,35 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-MODE="${1:---development}"
+MODE=""
+HARDENED=0
+HARDENED_COMPOSE_FILE="docker-compose.yml:docker-compose.hardened.yml"
+
+install_usage() {
+  echo "Usage: ./install.sh --development | --production [--hardened]"
+  echo "  --development  Install for local development (Node.js + Docker DB)"
+  echo "  --production   Install for production (all Docker containers)"
+  echo "  --hardened     With --production: use docker-compose.hardened.yml too (no Docker socket,"
+  echo "                 read-only containers, only nginx published; requires the SSH Direct executor)."
+  echo "                 Recorded as COMPOSE_FILE in .env, so every later 'docker compose' command,"
+  echo "                 ./run.sh and scripts/segmentra-backup.sh keep using the hardened override."
+  exit 1
+}
 
 # Normalize flags
-case "$MODE" in
-  --development|--dev|-d) MODE="development" ;;
-  --production|--prod|-p) MODE="production" ;;
-  *)
-    echo "Usage: ./install.sh --development | --production"
-    echo "  --development  Install for local development (Node.js + Docker DB)"
-    echo "  --production   Install for production (all Docker containers)"
-    exit 1
-    ;;
-esac
+for arg in "${@:---development}"; do
+  case "$arg" in
+    --development|--dev|-d) MODE="development" ;;
+    --production|--prod|-p) MODE="production" ;;
+    --hardened) HARDENED=1 ;;
+    *) install_usage ;;
+  esac
+done
+[ -n "$MODE" ] || MODE="development"
+if [ "$HARDENED" = "1" ] && [ "$MODE" != "production" ]; then
+  echo "ERROR: --hardened is only valid with --production."
+  exit 1
+fi
 
 echo "========================================"
 echo " Segmentra Installer ($MODE)"
@@ -125,7 +141,22 @@ elif [ "$MODE" = "production" ]; then
       echo "DOCKER_GID=0" >> .env
     fi
   fi
+  # Hardened mode is recorded as COMPOSE_FILE in .env: docker compose reads it automatically,
+  # so all later compose commands (run.sh, segmentra-backup.sh, manual ones) include the override.
+  if [ "$HARDENED" = "1" ]; then
+    if grep -q '^COMPOSE_FILE=' .env; then
+      if ! grep -q '^COMPOSE_FILE=.*docker-compose.hardened.yml' .env; then
+        echo "  ERROR: .env already sets COMPOSE_FILE without docker-compose.hardened.yml; fix it by hand:"
+        echo "         COMPOSE_FILE=$HARDENED_COMPOSE_FILE"
+        exit 1
+      fi
+    else
+      echo "COMPOSE_FILE=$HARDENED_COMPOSE_FILE" >> .env
+    fi
+  fi
+  if grep -q '^COMPOSE_FILE=.*docker-compose.hardened.yml' .env; then HARDENED=1; fi
   echo "  .env ready (JWT_SECRET, SEGMENTRA_KEK_B64, POSTGRES_PASSWORD, SEGMENTRA_ADMIN_PASSWORD, DOCKER_GID)"
+  [ "$HARDENED" = "1" ] && echo "  Hardened mode: COMPOSE_FILE=$HARDENED_COMPOSE_FILE (in .env)"
 
   # Build all Docker images
   echo "[3/6] Building Docker images..."
@@ -137,8 +168,14 @@ elif [ "$MODE" = "production" ]; then
 
   echo "[5/6] Waiting for the API (migrations run on container start)..."
   API_OK=0
+  # The hardened override does not publish the API; check it through nginx then.
+  if [ "$HARDENED" = "1" ]; then
+    HEALTH_URL="http://127.0.0.1:${WEB_PORT:-80}/api/health"
+  else
+    HEALTH_URL="http://127.0.0.1:${API_PORT:-8080}/api/health"
+  fi
   for i in $(seq 1 60); do
-    if curl -sf "http://127.0.0.1:${API_PORT:-8080}/api/health" >/dev/null 2>&1; then
+    if curl -sf "$HEALTH_URL" >/dev/null 2>&1; then
       API_OK=1
       break
     fi
@@ -157,9 +194,14 @@ elif [ "$MODE" = "production" ]; then
   echo "========================================"
   echo
   echo " Services running:"
-  echo "   UI:  http://localhost:${WEB_PORT:-80}"
-  echo "   API: http://127.0.0.1:${API_PORT:-8080} (localhost only; browsers use the UI's /api proxy)"
-  echo "   DB:  127.0.0.1:${DB_PORT:-15432}"
+  echo "   UI:  http://localhost:${WEB_PORT:-80}  (plain HTTP: put a TLS reverse proxy in front, see docs/installation.md)"
+  if [ "$HARDENED" = "1" ]; then
+    echo "   API: not published (hardened); reached through the UI's /api proxy"
+    echo "   DB:  not published (hardened)"
+  else
+    echo "   API: http://127.0.0.1:${API_PORT:-8080} (localhost only; browsers use the UI's /api proxy)"
+    echo "   DB:  127.0.0.1:${DB_PORT:-15432}"
+  fi
   echo
   echo " Admin login:"
   echo "   Username: admin"
@@ -169,8 +211,13 @@ elif [ "$MODE" = "production" ]; then
     echo "   Password: SEGMENTRA_ADMIN_PASSWORD from .env (used only when the admin user is first created)"
   fi
   echo
-  echo " SECURITY: the API container mounts /var/run/docker.sock (root-equivalent) for the"
-  echo " Ansible executor. If you only use the SSH executor, remove that mount from docker-compose.yml."
+  if [ "$HARDENED" = "1" ]; then
+    echo " HARDENED: no Docker socket and no Ansible runner. Select Admin > Deployment Executor >"
+    echo " SSH Direct before the first deployment."
+  else
+    echo " SECURITY: the API container mounts /var/run/docker.sock (root-equivalent) for the"
+    echo " Ansible executor. If you only use the SSH executor, use ./install.sh --production --hardened."
+  fi
   echo " Back up .env: losing SEGMENTRA_KEK_B64 makes stored SSH/LDAP secrets unrecoverable."
   echo
   echo " Manage services:"

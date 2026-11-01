@@ -43,7 +43,12 @@ const trustProxy = parseTrustProxy(env.TRUST_PROXY);
 if (trustProxy !== undefined) app.set('trust proxy', trustProxy);
 // Same-origin nginx requests work without CORS; cross-origin clients require an allowlist in production.
 app.use(cors(corsOptions(env.NODE_ENV, env.CORS_ORIGIN)));
-app.use(express.json({ limit: '1mb' }));
+// JSON bodies are capped at 1 MB, except a backup import: that route parses its own body (up to
+// BACKUP_IMPORT_BODY_LIMIT, see routes/backup.ts) only AFTER the admin check, so an unauthenticated
+// client can never make the API buffer a large body. nginx's client_max_body_size must allow it.
+const jsonBody = express.json({ limit: '1mb' });
+const BACKUP_IMPORT_PATH = /^\/api\/backup\/import\/?$/i;
+app.use((req, res, next) => (BACKUP_IMPORT_PATH.test(req.path) ? next() : jsonBody(req, res, next)));
 
 app.use('/api/health', healthRouter);
 app.use('/api/auth', authRouter);
@@ -146,7 +151,19 @@ process.on('uncaughtException', (error: Error) => {
   process.exit(1);
 });
 
-app.listen(env.PORT, () => {
+// Deployments left RUNNING by a previous process: fail their unfinished hosts and finalize. This runs
+// BEFORE the server accepts requests, so a new deployment or a status read cannot race the recovery.
+async function recoverBeforeListen(): Promise<void> {
+  try {
+    const { recoverInterruptedDeployments } = await import('./routes/deployments.js');
+    await recoverInterruptedDeployments();
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error('[Deployments] Restart recovery failed:', e);
+  }
+}
+
+void recoverBeforeListen().then(() => app.listen(env.PORT, () => {
   // eslint-disable-next-line no-console
   console.log(`Segmentra API listening on :${env.PORT}`);
 
@@ -170,14 +187,6 @@ app.listen(env.PORT, () => {
     .catch((e) => {
       // eslint-disable-next-line no-console
       console.error('[SIEM] Error starting audit forwarder:', e);
-    });
-
-  // Deployments left RUNNING by a previous process: fail their unfinished hosts and finalize.
-  void import('./routes/deployments.js')
-    .then(({ recoverInterruptedDeployments }) => recoverInterruptedDeployments())
-    .catch((e) => {
-      // eslint-disable-next-line no-console
-      console.error('[Deployments] Restart recovery failed:', e);
     });
 
   // Start periodic timeout check for stale host deployments (every 2 minutes)
@@ -292,5 +301,4 @@ app.listen(env.PORT, () => {
   };
   void runTestSessionExpiry();
   setInterval(runTestSessionExpiry, 60 * 1000); // Check every 1 minute
-});
-
+}));

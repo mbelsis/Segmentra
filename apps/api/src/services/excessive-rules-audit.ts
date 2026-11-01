@@ -1,3 +1,5 @@
+import net from 'node:net';
+
 import { pool } from '../db/pool.js';
 
 // Sensitive ports that should not be open to 0.0.0.0/0
@@ -28,81 +30,70 @@ export async function runExcessiveRulesAudit(): Promise<{
 }> {
   const findings: AuditFinding[] = [];
 
-  // 1. Find rules with source 0.0.0.0/0 on sensitive ports (DEPLOYED policies)
-  const { rows: wideOpenRules } = await pool.query(
+  // 1./2. Inbound ALLOW rules with a CIDR source, classified in code (any, *, 0.0.0.0/0, ::/0, lists
+  // containing them and very short prefixes are "any source"; other short prefixes are "very broad").
+  const { rows: cidrAllowRules } = await pool.query(
     `SELECT pr.*, pv.version_number, pv.status, ps.name as policy_set_name, ps.id as policy_set_id
      FROM policy_rules pr
      JOIN policy_versions pv ON pv.id = pr.policy_version_id
      JOIN policy_sets ps ON ps.id = pv.policy_set_id
      WHERE pr.source_type = 'CIDR'
-       AND pr.source_value = '0.0.0.0/0'
        AND pr.action = 'ALLOW'
        AND pr.direction IN ('IN', 'BOTH')
        AND pv.status IN ('DEPLOYED', 'APPROVED')
-     ORDER BY ps.name, pv.version_number`
+     ORDER BY ps.name, pv.version_number, pr.order_index`
   );
 
-  for (const rule of wideOpenRules) {
-    const ports = parsePorts(rule.ports);
-    const sensitiveMatches = ports.filter(p => SENSITIVE_PORTS.includes(p));
-
-    if (sensitiveMatches.length > 0) {
-      findings.push({
-        severity: 'critical',
-        category: 'Wide Open Sensitive Port',
-        title: `${sensitiveMatches.map(p => `${SENSITIVE_PORT_NAMES[p] || p}/${p}`).join(', ')} open to ANY source`,
-        description: `Rule allows inbound ${rule.protocol.toUpperCase()} on sensitive port(s) from 0.0.0.0/0 (any source). This exposes management/database services to the entire network or internet.`,
-        policySetName: rule.policy_set_name,
-        policyVersionId: rule.policy_version_id,
-        versionNumber: rule.version_number,
-        ruleId: rule.id,
-        details: { ports: sensitiveMatches, protocol: rule.protocol, direction: rule.direction },
-      });
-    } else if (!rule.ports || rule.ports === '' || rule.ports === '*') {
-      findings.push({
-        severity: 'critical',
-        category: 'Wide Open All Ports',
-        title: `ALL ports open to ANY source (0.0.0.0/0)`,
-        description: `Rule allows inbound ${rule.protocol.toUpperCase()} on ALL ports from any source. This is extremely permissive and likely unnecessary.`,
-        policySetName: rule.policy_set_name,
-        policyVersionId: rule.policy_version_id,
-        versionNumber: rule.version_number,
-        ruleId: rule.id,
-        details: { protocol: rule.protocol, direction: rule.direction },
-      });
-    }
-  }
-
-  // 2. Find rules with very broad CIDR sources (/0 to /8)
-  const { rows: broadCidrRules } = await pool.query(
-    `SELECT pr.*, pv.version_number, ps.name as policy_set_name
-     FROM policy_rules pr
-     JOIN policy_versions pv ON pv.id = pr.policy_version_id
-     JOIN policy_sets ps ON ps.id = pv.policy_set_id
-     WHERE pr.source_type = 'CIDR'
-       AND pr.action = 'ALLOW'
-       AND pr.direction IN ('IN', 'BOTH')
-       AND pr.source_value != '0.0.0.0/0'
-       AND pv.status IN ('DEPLOYED', 'APPROVED')`
-  );
-
-  for (const rule of broadCidrRules) {
-    const cidrMatch = rule.source_value.match(/\/(\d+)$/);
-    if (cidrMatch) {
-      const prefix = parseInt(cidrMatch[1]);
-      if (prefix <= 8) {
+  for (const rule of cidrAllowRules) {
+    const breadth = classifySourceBreadth(rule.source_value);
+    const protocol = String(rule.protocol ?? 'any');
+    if (breadth.kind === 'wide') {
+      const sensitiveMatches = sensitivePortsCovered(rule.ports, protocol);
+      const allPorts = !rule.ports || rule.ports === '' || rule.ports === '*';
+      if (sensitiveMatches.length > 0 && !allPorts) {
         findings.push({
-          severity: 'high',
-          category: 'Very Broad Source CIDR',
-          title: `Source ${rule.source_value} (/${prefix}) covers ${Math.pow(2, 32 - prefix).toLocaleString()} IPs`,
-          description: `Rule allows inbound traffic from an extremely broad source range. Consider narrowing to specific subnets.`,
+          severity: 'critical',
+          category: 'Wide Open Sensitive Port',
+          title: `${sensitiveMatches.map(p => `${SENSITIVE_PORT_NAMES[p] || p}/${p}`).join(', ')} open to ANY source`,
+          description: `Rule allows inbound ${protocol.toUpperCase()} on sensitive port(s) from ${breadth.label} (any source). This exposes management/database services to the entire network or internet.`,
           policySetName: rule.policy_set_name,
           policyVersionId: rule.policy_version_id,
           versionNumber: rule.version_number,
           ruleId: rule.id,
-          details: { source: rule.source_value, prefix, ipCount: Math.pow(2, 32 - prefix) },
+          details: { ports: sensitiveMatches, protocol, direction: rule.direction, source: rule.source_value },
+        });
+      } else if (allPorts) {
+        findings.push({
+          severity: 'critical',
+          category: 'Wide Open All Ports',
+          title: `ALL ports open to ANY source (${breadth.label})`,
+          description: `Rule allows inbound ${protocol.toUpperCase()} on ALL ports from any source. This is extremely permissive and likely unnecessary.`,
+          policySetName: rule.policy_set_name,
+          policyVersionId: rule.policy_version_id,
+          versionNumber: rule.version_number,
+          ruleId: rule.id,
+          details: { protocol, direction: rule.direction, source: rule.source_value },
         });
       }
+    } else if (breadth.kind === 'broad') {
+      findings.push({
+        severity: 'high',
+        category: 'Very Broad Source CIDR',
+        title: `Source ${breadth.cidr} (/${breadth.prefix}) covers ${describeAddressCount(breadth.family, breadth.prefix)} IPs`,
+        description: `Rule allows inbound traffic from an extremely broad source range. Consider narrowing to specific subnets.`,
+        policySetName: rule.policy_set_name,
+        policyVersionId: rule.policy_version_id,
+        versionNumber: rule.version_number,
+        ruleId: rule.id,
+        details: {
+          source: rule.source_value,
+          cidr: breadth.cidr,
+          prefix: breadth.prefix,
+          family: breadth.family,
+          // Exact count as a string: 2^(128-prefix) does not fit a JS number for IPv6.
+          ipCount: (1n << BigInt((breadth.family === 4 ? 32 : 128) - breadth.prefix)).toString(),
+        },
+      });
     }
   }
 
@@ -132,27 +123,30 @@ export async function runExcessiveRulesAudit(): Promise<{
     });
   }
 
-  // 4. Find ALL_INTERFACES scope with broad sources
+  // 4. Find ALL_INTERFACES scope with wide-open sources
   const { rows: allIfaceRules } = await pool.query(
     `SELECT pv.id as version_id, pv.version_number, pv.interface_scope_type, ps.name as policy_set_name,
-       (SELECT COUNT(*)::int FROM policy_rules pr WHERE pr.policy_version_id = pv.id AND pr.source_type = 'CIDR' AND pr.source_value = '0.0.0.0/0' AND pr.action = 'ALLOW') as wide_open_count
+       COALESCE(array_agg(pr.source_value) FILTER (WHERE pr.id IS NOT NULL), '{}') AS cidr_sources
      FROM policy_versions pv
      JOIN policy_sets ps ON ps.id = pv.policy_set_id
+     LEFT JOIN policy_rules pr ON pr.policy_version_id = pv.id AND pr.source_type = 'CIDR' AND pr.action = 'ALLOW'
      WHERE pv.interface_scope_type = 'ALL_INTERFACES'
-       AND pv.status IN ('DEPLOYED', 'APPROVED')`
+       AND pv.status IN ('DEPLOYED', 'APPROVED')
+     GROUP BY pv.id, pv.version_number, pv.interface_scope_type, ps.name`
   );
 
   for (const v of allIfaceRules) {
-    if (v.wide_open_count > 0) {
+    const wideOpenCount = (v.cidr_sources as string[]).filter((src) => classifySourceBreadth(src).kind === 'wide').length;
+    if (wideOpenCount > 0) {
       findings.push({
         severity: 'high',
         category: 'ALL_INTERFACES + Broad Source',
-        title: `Policy applies to ALL interfaces with ${v.wide_open_count} wide-open rule(s)`,
+        title: `Policy applies to ALL interfaces with ${wideOpenCount} wide-open rule(s)`,
         description: `Policy version uses ALL_INTERFACES scope and contains rules allowing traffic from any source. This means management, data, and backup interfaces are all exposed.`,
         policySetName: v.policy_set_name,
         policyVersionId: v.version_id,
         versionNumber: v.version_number,
-        details: { wideOpenRuleCount: v.wide_open_count },
+        details: { wideOpenRuleCount: wideOpenCount },
       });
     }
   }
@@ -256,19 +250,68 @@ export async function runExcessiveRulesAudit(): Promise<{
   return { findings, summary };
 }
 
-function parsePorts(portsStr: string | null): number[] {
-  if (!portsStr || portsStr === '' || portsStr === '*') return [];
-  const ports: number[] = [];
-  for (const part of portsStr.split(',')) {
-    const range = part.trim().split('-');
-    if (range.length === 2) {
-      const start = parseInt(range[0]);
-      const end = parseInt(range[1]);
-      for (let p = start; p <= end && p <= start + 100; p++) ports.push(p);
-    } else {
-      const p = parseInt(range[0]);
-      if (!isNaN(p)) ports.push(p);
+/** IPv4 prefixes shorter than this (and IPv6 shorter than WIDE_V6_PREFIX) count as "any source". */
+const WIDE_V4_PREFIX = 8;
+const WIDE_V6_PREFIX = 16;
+/** Prefixes up to these lengths are reported as very broad. */
+const BROAD_V4_PREFIX = 8;
+const BROAD_V6_PREFIX = 32;
+
+export type SourceBreadth =
+  | { kind: 'wide'; label: string }
+  | { kind: 'broad'; cidr: string; prefix: number; family: 4 | 6 }
+  | { kind: 'narrow' };
+
+/**
+ * Classify a CIDR-type rule source (single value or comma-separated list, as the compiler accepts it):
+ *  - wide: "any" / "*", any /0 (0.0.0.0/0, ::/0), or a very short prefix (IPv4 < /8, IPv6 < /16) in the list
+ *  - broad: otherwise, an entry with a prefix up to BROAD_V4_PREFIX (IPv4) / BROAD_V6_PREFIX (IPv6); the broadest is reported
+ *  - narrow otherwise
+ */
+export function classifySourceBreadth(value: unknown): SourceBreadth {
+  const v = String(value ?? '').trim();
+  if (/^(any|\*)$/i.test(v)) return { kind: 'wide', label: v };
+  let broadest: { cidr: string; prefix: number; family: 4 | 6; ratio: number } | null = null;
+  for (const raw of v.split(',')) {
+    const part = raw.trim();
+    if (!part) continue;
+    if (/^(any|\*)$/i.test(part)) return { kind: 'wide', label: part };
+    const [addr, prefixText] = part.split('/');
+    const family = net.isIP(addr) as 0 | 4 | 6;
+    if (!family) continue;
+    const bits = family === 4 ? 32 : 128;
+    const prefix = prefixText === undefined ? bits : Number(prefixText);
+    if (!Number.isInteger(prefix) || prefix < 0 || prefix > bits) continue;
+    if (prefix === 0 || (family === 4 ? prefix < WIDE_V4_PREFIX : prefix < WIDE_V6_PREFIX)) return { kind: 'wide', label: part };
+    if (family === 4 ? prefix <= BROAD_V4_PREFIX : prefix <= BROAD_V6_PREFIX) {
+      const ratio = prefix / bits;
+      if (!broadest || ratio < broadest.ratio) broadest = { cidr: part, prefix, family, ratio };
     }
   }
-  return ports;
+  return broadest ? { kind: 'broad', cidr: broadest.cidr, prefix: broadest.prefix, family: broadest.family } : { kind: 'narrow' };
+}
+
+/** Human-readable address count of a prefix: exact for IPv4, as a power of two for IPv6. */
+export function describeAddressCount(family: 4 | 6, prefix: number): string {
+  const hostBits = (family === 4 ? 32 : 128) - prefix;
+  if (hostBits <= 40) return (2 ** hostBits).toLocaleString('en-US');
+  return `2^${hostBits}`;
+}
+
+/**
+ * Sensitive ports a rule's port spec covers, by range containment (start <= p <= end), so a range
+ * like 1-65535 or 20-30000 is checked in full. No port spec = all ports (every sensitive port), unless
+ * the protocol has no ports (icmp).
+ */
+export function sensitivePortsCovered(portsStr: string | null | undefined, protocol = 'tcp'): number[] {
+  if (protocol === 'icmp') return [];
+  const spec = String(portsStr ?? '').trim();
+  if (spec === '' || spec === '*') return [...SENSITIVE_PORTS];
+  const ranges: Array<[number, number]> = [];
+  for (const part of spec.split(',')) {
+    const [a, b] = part.trim().split('-').map((x) => parseInt(x, 10));
+    if (!Number.isFinite(a)) continue;
+    ranges.push([a, Number.isFinite(b) ? b : a]);
+  }
+  return SENSITIVE_PORTS.filter((p) => ranges.some(([lo, hi]) => lo <= p && p <= hi));
 }

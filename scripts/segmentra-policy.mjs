@@ -50,11 +50,14 @@ function splitDocuments(text, file) {
 
 function show(file, r) {
   const where = `${file}${r.name ? ` (${r.name})` : ''}`;
-  const verb = { created: 'create', new_version: 'new DRAFT version', unchanged: 'no change' }[r.action] ?? r.action;
+  const pendingScope = r.action === 'unchanged' && (r.changes ?? []).length > 0;
+  const verb = pendingScope ? 'policy set differs (rules unchanged)'
+    : ({ created: 'create', new_version: 'new DRAFT version', updated: 'update policy set (rules unchanged)', unchanged: 'no change' }[r.action] ?? r.action);
   console.log(`${r.dryRun ? 'plan ' : 'apply'}: ${where}: ${verb}${r.versionNumber ? ` v${r.versionNumber}${r.versionStatus ? ` (${r.versionStatus})` : ''}` : ''}`);
   for (const a of r.diff?.added ?? []) console.log(`    + ${a}`);
   for (const d of r.diff?.removed ?? []) console.log(`    - ${d}`);
   if (r.diff?.reordered) console.log('    ~ rules reordered');
+  for (const c of r.changes ?? []) console.log(`    ~ ${c}`);
   for (const w of r.warnings ?? []) console.log(`    ! ${w}`);
 }
 
@@ -109,7 +112,8 @@ async function run() {
         continue;
       }
       show(label, body);
-      if (body.action !== 'unchanged') changes += 1;
+      // Scope/description differences count too (also a scope change that needs --update-scope).
+      if (body.action !== 'unchanged' || (body.changes ?? []).length > 0) changes += 1;
     }
   }
   if (errors) process.exit(1);

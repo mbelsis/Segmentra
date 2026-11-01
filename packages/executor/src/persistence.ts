@@ -36,7 +36,8 @@ export const PERSISTENCE_BLOCKING_CODES = [
   'no_nftables_service',
   'firewalld_active',
   'iptables_persistent_missing',
-  'iptables_services_missing'
+  'iptables_services_missing',
+  'saved_rules_block_all'
 ];
 
 /** True when the host can persist rules with its distribution's service (readiness view). */

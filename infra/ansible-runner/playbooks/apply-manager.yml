@@ -1,45 +1,24 @@
-- name: Ensure native-manager backup directory exists
-  become: true
-  file:
-    path: "{{ segmentra_backup_dir }}"
-    state: directory
-    mode: "0700"
-
-- name: Install one-shot native-manager helper
-  become: true
-  copy:
-    src: "{{ segmentra_manager_script }}"
-    dest: "{{ segmentra_backup_dir }}/segmentra-manager.py"
-    mode: "0700"
-
-- name: Generate native-manager deployment identifier
-  set_fact:
-    manager_run: "{{ lookup('pipe', 'date +%s') }}-{{ 100000000 | random }}"
-
-- name: Define native-manager rollback paths
-  set_fact:
-    manager_backup: "{{ segmentra_backup_dir }}/{{ segmentra_backend }}.{{ manager_run }}.json"
-    manager_marker: "{{ segmentra_backup_dir }}/manager-revert.{{ manager_run }}"
-    manager_unit: "segmentra-manager-revert-{{ manager_run }}"
-
-- name: Back up native permanent configuration and validate reload safety
-  become: true
-  command:
-    argv: [python3, "{{ segmentra_backup_dir }}/segmentra-manager.py", "{{ segmentra_backend }}", backup, "{{ manager_backup }}"]
-
-- name: Copy native-manager policy to host
-  become: true
-  copy:
-    src: "{{ seg_policy_file }}"
-    dest: /etc/segmentra.policy
-    mode: "0600"
-
+# Native firewall manager (firewalld / ufw), part 2 (lockout-protected apply play of apply-firewall.yml,
+# run in `serial` batches so the 180 s rollback window does not depend on the fleet size). Never fails the
+# host here: failures are recorded in seg_apply_failed_msg and reported by the last play (in serial mode a
+# batch whose hosts all fail would end the whole playbook). Part 1: apply-manager-prepare.yml.
 - name: Schedule unattended rollback before changing the native firewall
   become: true
   shell: >-
     systemd-run --quiet --unit={{ manager_unit | quote }} --on-active=180
     --timer-property=AccuracySec=1s /bin/sh -c
     {{ ('touch ' ~ manager_marker ~ '; python3 ' ~ segmentra_backup_dir ~ '/segmentra-manager.py ' ~ segmentra_backend ~ ' restore ' ~ manager_backup) | quote }}
+  register: manager_sched
+  failed_when: false
+
+- name: Record that the native-manager rollback could not be scheduled (nothing was changed)
+  when: manager_sched.rc | default(1) != 0
+  set_fact:
+    seg_apply_failed_msg: "Could not schedule the unattended rollback (lockout protection); deployment aborted, no changes made: {{ manager_sched.stderr | default(manager_sched.msg | default('')) }}"
+
+- name: Stop here when the native-manager rollback could not be scheduled
+  when: manager_sched.rc | default(1) != 0
+  meta: end_host
 
 - name: Apply and verify native firewall policy
   block:
@@ -73,6 +52,7 @@
   rescue:
     - name: Restore the previous permanent policy and native runtime
       become: true
+      ignore_unreachable: true
       command:
         argv: [python3, "{{ segmentra_backup_dir }}/segmentra-manager.py", "{{ segmentra_backend }}", restore, "{{ manager_backup }}"]
       register: manager_restore
@@ -80,14 +60,15 @@
 
     - name: Stop pending rollback after a successful immediate restore
       become: true
+      ignore_unreachable: true
       command:
         argv: [systemctl, stop, "{{ manager_unit }}.timer"]
-      when: manager_restore.rc == 0
+      when: manager_restore.rc | default(-1) == 0
       failed_when: false
 
-    - name: Report native-manager deployment failure
-      fail:
-        msg: "Native firewall apply or persistence verification failed; restore exit code {{ manager_restore.rc }}. The unattended rollback remains scheduled if restore failed."
+    - name: Record native-manager deployment failure (reported by the last play)
+      set_fact:
+        seg_apply_failed_msg: "Native firewall apply or persistence verification failed; restore {{ ('exit code ' ~ manager_restore.rc) if manager_restore.rc is defined else 'not run (host unreachable)' }}. The unattended rollback remains scheduled if restore failed."
 
 - name: Finish this host after native-manager deployment
   meta: end_host

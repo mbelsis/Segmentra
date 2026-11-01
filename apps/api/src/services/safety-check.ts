@@ -1,4 +1,6 @@
-import { compileHostPolicy, firewallBackend, type PolicyRule } from '@segmentra/compiler';
+import net from 'node:net';
+
+import { compileHostPolicy, firewallBackend, type InterfaceScope, type PolicyRule } from '@segmentra/compiler';
 import { pool } from '../db/pool.js';
 import {
   cidrContains,
@@ -27,6 +29,37 @@ export interface SafetyCheckResult {
     ports?: string;
     comment?: string;
   }>;
+}
+
+/**
+ * Sources the compiler's management-SSH baseline accepts on the SSH port, per address family —
+ * an exact mirror of prepareMgmt() in packages/compiler/src/compile.ts:
+ *  - every management CIDR (of either family);
+ *  - SSH from ANY IPv4 source when no management CIDR is configured at all, or when the host's
+ *    mgmt_ip is IPv4 and no IPv4 management CIDR exists (fallbackV4);
+ *  - SSH from ANY IPv6 source likewise (fallbackV6), e.g. an IPv6 mgmt_ip with a v4-only management VLAN.
+ */
+export function managementSshSources(
+  mgmtSshCidrs: string[],
+  mgmtIp: string | null | undefined
+): { sources: string[]; v4: string[]; v6: string[]; fallbackV4: boolean; fallbackV6: boolean } {
+  const valid = mgmtSshCidrs.map((c) => String(c).trim()).filter((c) => isValidCidr(c));
+  const v4 = valid.filter((c) => net.isIP(c.split('/')[0]) === 4);
+  const v6 = valid.filter((c) => net.isIP(c.split('/')[0]) === 6);
+  const ip = mgmtIp ? String(mgmtIp).replace(/\/\d+$/, '').trim() : '';
+  const family = ip ? net.isIP(ip) : 0;
+  const none = valid.length === 0;
+  const fallbackV4 = none || (family === 4 && v4.length === 0);
+  const fallbackV6 = none || (family === 6 && v6.length === 0);
+  const sources = [...v4, ...v6, ...(fallbackV4 ? ['0.0.0.0/0'] : []), ...(fallbackV6 ? ['::/0'] : [])];
+  return { sources, v4, v6, fallbackV4, fallbackV6 };
+}
+
+function scopeOf(type: string | null | undefined, roles: unknown, names: unknown): InterfaceScope | undefined {
+  if (type === 'ALL_INTERFACES') return { type: 'ALL_INTERFACES' };
+  if (type === 'INTERFACE_NAME') return { type: 'INTERFACE_NAME', names: (names ?? []) as string[] };
+  if (type === 'INTERFACE_ROLE') return { type: 'INTERFACE_ROLE', roles: (roles ?? []) as string[] };
+  return undefined;
 }
 
 /**
@@ -92,6 +125,7 @@ export async function checkDeploymentSafety(params: {
   // Get rules, in evaluation order
   const rulesRes = await pool.query(
     `SELECT order_index, direction, action, protocol, ports, source_type, source_value, comment,
+            use_policy_interface_scope, interface_scope_type, interface_scope_roles, interface_scope_names,
             destination_type, destination_value
      FROM policy_rules
      WHERE policy_version_id=$1
@@ -124,6 +158,8 @@ export async function checkDeploymentSafety(params: {
       sourceValue: r.source_value,
       comment: r.comment,
       addrs,
+      usePolicyInterfaceScope: Boolean(r.use_policy_interface_scope),
+      interfaceScope: scopeOf(r.interface_scope_type, r.interface_scope_roles, r.interface_scope_names),
     });
   }
   await addDestinationSets(forwardRows, sets);
@@ -170,7 +206,9 @@ export async function checkDeploymentSafety(params: {
           sourceValue: r.sourceValue,
           logMode: 'NONE' as const,
           comment: r.comment,
-          usePolicyInterfaceScope: true,
+          // Same interface-scope resolution as the deployment compile (routes/deployments.ts).
+          usePolicyInterfaceScope: r.usePolicyInterfaceScope,
+          interfaceScope: r.interfaceScope,
           remote: r.sourceType === 'CIDR' ? { kind: 'CIDR' as const } : { kind: 'SET' as const, setName: setNameFor(r.sourceType, r.sourceValue) },
         })) as PolicyRule[]).concat(forwardRows.map((r: any) => ({
           orderIndex: Number(r.order_index),
@@ -182,7 +220,8 @@ export async function checkDeploymentSafety(params: {
           sourceValue: r.source_value,
           logMode: 'NONE' as const,
           comment: r.comment,
-          usePolicyInterfaceScope: true,
+          usePolicyInterfaceScope: Boolean(r.use_policy_interface_scope),
+          interfaceScope: scopeOf(r.interface_scope_type, r.interface_scope_roles, r.interface_scope_names),
           remote: r.source_type === 'CIDR' ? { kind: 'CIDR' as const } : { kind: 'SET' as const, setName: setNameFor(r.source_type, r.source_value) },
           ...compilerDestination(r),
         }))),
@@ -198,6 +237,15 @@ export async function checkDeploymentSafety(params: {
       continue;
     }
 
+    // Exactly the sources the compiled management-SSH baseline accepts for this host.
+    const mgmt = managementSshSources(mgmtSshCidrs, host.mgmt_ip ? String(host.mgmt_ip) : null);
+    if (mgmtSshCidrs.length > 0 && (mgmt.fallbackV4 || mgmt.fallbackV6)) {
+      result.warnings.push(
+        `Host ${host.hostname}: its management IP is IPv${mgmt.fallbackV6 ? 6 : 4} but the management VLAN has no ` +
+          `IPv${mgmt.fallbackV6 ? 6 : 4} subnet, so the compiler allows SSH over IPv${mgmt.fallbackV6 ? 6 : 4} from any source`
+      );
+    }
+
     // 2) Inbound SSH. The compiler emits the management baseline (accept tcp/<sshPort> from the
     //    management CIDRs, or from anywhere when none are configured) BEFORE policy rules, so
     //    inbound DENY rules cannot cut management SSH. Report DENYs that target it anyway, since
@@ -205,7 +253,7 @@ export async function checkDeploymentSafety(params: {
     for (const r of evalRules) {
       if (r.action !== 'DENY' || r.direction === 'OUT') continue;
       if (!protoCoversTcp(r.protocol) || !portSpecIncludes(r.ports, sshPort)) continue;
-      const hitsMgmt = mgmtSshCidrs.length === 0 || mgmtSshCidrs.some((m) => r.addrs.some((a) => cidrsOverlap(a, m)));
+      const hitsMgmt = mgmt.sources.some((m) => r.addrs.some((a) => cidrsOverlap(a, m)));
       if (hitsMgmt) {
         result.warnings.push(
           `Host ${host.hostname}: rule #${r.orderIndex} denies inbound SSH (tcp/${sshPort}) from ${describe(r)}; ` +
@@ -216,8 +264,9 @@ export async function checkDeploymentSafety(params: {
 
     // 3) Outbound replies. The output chain has NO established/related exception, so an OUT
     //    (or BOTH) DENY toward the management subnet drops the SSH server's reply packets
-    //    (tcp sport <sshPort> → client ephemeral port) and locks operators out.
-    const replyTargets = mgmtSshCidrs.length > 0 ? mgmtSshCidrs : ['0.0.0.0/0', '::/0'];
+    //    (tcp sport <sshPort> → client ephemeral port) and locks operators out. The reply targets are
+    //    every source the baseline accepts SSH from, per family (incl. the "any IPv4/IPv6" fallbacks).
+    const replyTargets = mgmt.sources;
     let hostPreserved = true;
     for (const target of replyTargets) {
       const verdict = evaluateOutboundReplies(evalRules, target);
@@ -243,7 +292,7 @@ export async function checkDeploymentSafety(params: {
     // 4) The caller's own IP (proper CIDR containment, first match wins).
     if (userIp && isValidIp(userIp)) {
       const inbound = firstMatch(evalRules, (r) => r.direction !== 'OUT' && r.addrs.some((a) => cidrContains(a, userIp)));
-      const userInMgmt = mgmtSshCidrs.some((m) => cidrContains(m, userIp)) || mgmtSshCidrs.length === 0;
+      const userInMgmt = mgmt.sources.some((m) => cidrContains(m, userIp));
       if (inbound && inbound.action === 'DENY') {
         result.warnings.push(
           `Host ${host.hostname}: your IP (${userIp}) is denied inbound by rule #${inbound.orderIndex}` +
@@ -278,6 +327,8 @@ type EvalRule = {
   sourceValue: string;
   comment: string | null;
   addrs: string[];
+  usePolicyInterfaceScope: boolean;
+  interfaceScope?: InterfaceScope;
 };
 
 const EPHEMERAL_FROM = 1024;

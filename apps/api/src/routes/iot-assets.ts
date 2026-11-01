@@ -3,7 +3,9 @@ import { z } from 'zod';
 
 import { pool } from '../db/pool.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
-import { isStrictIpOrCidr, parseCidr } from '../services/ip-utils.js';
+import { countRuleReferences } from '../lib/rule-references.js';
+import { normalizeMac } from '../services/iot-discovery.js';
+import { isStrictIpOrCidr, normalizeIotAddress } from '../services/ip-utils.js';
 
 export const iotAssetsRouter = Router();
 iotAssetsRouter.use(requireAuth);
@@ -72,18 +74,23 @@ iotAssetsRouter.get('/:id', requireRole('viewer', 'operator', 'approver', 'admin
 /**
  * IoT asset address: an IPv4/IPv6 address or a network CIDR (it becomes a FORWARD destination and a
  * protected destination of its gateways, so it must compile). Empty string = no address, as before.
- * A CIDR with host bits set (192.168.10.5/24) is refused: it would silently cover the whole network.
+ * Stored normalized (normalizeIotAddress): a CIDR with host bits set (192.168.10.5/24, as `ip addr`
+ * prints it and as legacy rows hold it) means that single device and is stored as 192.168.10.5; only a
+ * network address (192.168.10.0/24) is kept as a CIDR. Accepting it (instead of refusing) keeps a PUT that
+ * resends a legacy row's address working.
  */
-const iotIpAddress = z
+export const iotIpAddress = z
   .string()
   .trim()
   .refine((v) => v === '' || isStrictIpOrCidr(v), { message: 'must be an IP address or CIDR (e.g. 192.168.10.5 or 192.168.10.0/24)' })
-  .refine((v) => {
-    if (v === '' || !v.includes('/')) return true;
-    const c = parseCidr(v)!;
-    const ip = parseCidr(v.split('/')[0])!;
-    return c.network === ip.network;
-  }, { message: 'CIDR has host bits set; use the device IP or the network address' });
+  .transform((v) => (v === '' ? '' : normalizeIotAddress(v)!));
+
+/** MAC address: stored as lowercase colon form (aa:bb:cc:dd:ee:ff) whatever separator was typed; '' = none. */
+export const iotMacAddress = z
+  .string()
+  .trim()
+  .refine((v) => v === '' || normalizeMac(v) !== null, { message: 'must be a MAC address (e.g. aa:bb:cc:dd:ee:ff)' })
+  .transform((v) => (v === '' ? '' : normalizeMac(v)!));
 
 const iotAssetSchema = z.object({
   name: z.string().min(1),
@@ -92,7 +99,7 @@ const iotAssetSchema = z.object({
   vendor: z.string().optional(),
   model: z.string().optional(),
   firmwareVersion: z.string().optional(),
-  macAddress: z.string().optional(),
+  macAddress: iotMacAddress.optional(),
   ipAddress: iotIpAddress.optional(),
   vlanId: z.string().uuid().optional().nullable(),
   zone: z.string().optional(),
@@ -185,6 +192,15 @@ iotAssetsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) =
 
 // Delete IoT asset
 iotAssetsRouter.delete('/:id', requireRole('operator', 'admin'), async (req, res) => {
+  // Rules store the asset id without a foreign key: deleting it would silently empty their destination set.
+  const refs = await countRuleReferences('IOT_ASSET', req.params.id);
+  if (refs.total > 0) {
+    return res.status(409).json({
+      error: 'iot_asset_in_use',
+      message: `IoT asset is used as a source or destination by ${refs.policyRules} policy rule(s) and ${refs.templateRules} template rule(s). Change those rules first.`,
+      usage: refs
+    });
+  }
   const { rowCount } = await pool.query(`DELETE FROM iot_assets WHERE id = $1`, [req.params.id]);
   if (!rowCount) return res.status(404).json({ error: 'not_found' });
 

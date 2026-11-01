@@ -104,7 +104,7 @@ recommendationsRouter.post('/:id/reject', requireRole('operator', 'admin'), asyn
 
   const { rows } = await pool.query(
     `UPDATE policy_recommendations SET status = 'REJECTED', reviewed_by = $2, reviewed_at = now()
-     WHERE id = $1 AND status = 'PENDING' RETURNING *`,
+     WHERE id = $1 AND status IN ('PENDING', 'ACCEPTED') RETURNING *`,
     [req.params.id, userId]
   );
   if (!rows[0]) return res.status(404).json({ error: 'not_found_or_not_pending' });

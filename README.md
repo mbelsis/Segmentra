@@ -536,7 +536,7 @@ npm run db:demo                 # local dev; set DATABASE_URL for another databa
 npm run db:demo -- --remove     # delete the demo data again
 ```
 
-The loader refuses to run with `NODE_ENV=production` unless `SEGMENTRA_DEMO_FORCE=1`. In the Docker (production) install there is no Node.js on the host; load the file straight into the database container instead:
+The dataset contains demo users with a well-known password, so the loader refuses to load it with `NODE_ENV=production`, into a database that is not on localhost (`DATABASE_URL` host other than `localhost` / `127.0.0.1` / `::1` / a Unix socket), or into a database that already has users or hosts not from the demo dataset, unless you pass `--force` (`npm run db:demo -- --force`; `SEGMENTRA_DEMO_FORCE=1` still works). In the Docker (production) install there is no Node.js on the host; load the file straight into the database container instead:
 
 ```bash
 docker compose exec -T segmentra-db psql -U segmentra -d segmentra < packages/db/demo/demo-data.sql
@@ -632,7 +632,7 @@ For detailed technical documentation, see [Architecture.md](docs/Architecture.md
 | `SEGMENTRA_ASKPASS_DIR` | No | OS temp dir | Directory for the `SSH_ASKPASS` helper script used for passphrase-protected keys (the script contains no secret) |
 | `SEGMENTRA_SKIP_MIGRATIONS` | No | `0` | API Docker image only: `1` skips the migrations and seed the entrypoint runs on start |
 
-docker-compose additionally reads `POSTGRES_PASSWORD` (or legacy `DB_PASSWORD`), `DB_USER`, `DB_NAME`, `DB_PORT`, `API_PORT`, `API_BIND`, `WEB_PORT` and `DOCKER_GID` (group owning `/var/run/docker.sock`). The local launchers (`start.sh`, `run.sh`) also accept `SEGMENTRA_DATABASE_URL` (custom database URL), and `start.sh` accepts `SEGMENTRA_RESET_DB=1` (wipes the Docker volumes first, data loss).
+docker-compose additionally reads `POSTGRES_PASSWORD` (or legacy `DB_PASSWORD`), `DB_USER`, `DB_NAME`, `DB_PORT`, `API_PORT`, `API_BIND`, `WEB_PORT`, `WEB_BIND`, `COMPOSE_FILE` (hardened mode) and `DOCKER_GID` (group owning `/var/run/docker.sock`). The local launchers (`start.sh`, `run.sh`) also accept `SEGMENTRA_DATABASE_URL` (custom database URL), and `start.sh` accepts `SEGMENTRA_RESET_DB=1` (wipes the Docker volumes first, data loss).
 
 ---
 

@@ -1,3 +1,5 @@
+import type { ConnectionOptions } from 'node:tls';
+
 import { Client } from 'ldapts';
 
 import { pool } from '../db/pool.js';
@@ -7,6 +9,8 @@ type LdapSettingsRow = {
   enabled: boolean;
   url: string | null;
   use_ldaps: boolean;
+  start_tls: boolean | null;
+  tls_ca_cert_secret_id: string | null;
   bind_dn: string | null;
   bind_password_secret_id: string | null;
   base_dn: string | null;
@@ -28,9 +32,43 @@ function interpolate(template: string, vars: Record<string, string>): string {
   return template.replace(/\{\{(\w+)\}\}/g, (_, k) => escapeLdapFilter(vars[k] ?? ''));
 }
 
+/**
+ * Canonical text form of an Active Directory objectGUID (16 raw bytes, the first three groups
+ * little-endian), e.g. "3f2504e0-4f89-11d3-9a0c-0305e82c3301". Any other length is returned as hex.
+ */
+export function formatObjectGuid(value: unknown): string | null {
+  const buf = Array.isArray(value) ? value[0] : value;
+  if (!Buffer.isBuffer(buf) || buf.length === 0) return null;
+  if (buf.length !== 16) return buf.toString('hex');
+  const h = (i: number) => buf[i].toString(16).padStart(2, '0');
+  const seq = (idx: number[]) => idx.map(h).join('');
+  return [
+    seq([3, 2, 1, 0]),
+    seq([5, 4]),
+    seq([7, 6]),
+    seq([8, 9]),
+    seq([10, 11, 12, 13, 14, 15])
+  ].join('-');
+}
+
+/**
+ * Directory usernames are case-insensitive (AD sAMAccountName, most uid schemas): Segmentra stores LDAP
+ * users under the lower-cased, trimmed login name so "JDoe" and "jdoe" are one account.
+ */
+export function canonicalLdapUsername(username: string): string {
+  return username.trim().toLowerCase();
+}
+
+function firstString(v: unknown): string | null {
+  if (Array.isArray(v)) v = v[0];
+  if (Buffer.isBuffer(v)) v = v.toString('utf8');
+  return typeof v === 'string' && v.length > 0 ? v : null;
+}
+
 export async function ldapLogin(params: { username: string; password: string }) {
   const settingsRes = await pool.query<LdapSettingsRow>(
-    `SELECT enabled, url, use_ldaps, bind_dn, bind_password_secret_id, base_dn, user_filter, group_filter
+    `SELECT enabled, url, use_ldaps, start_tls, tls_ca_cert_secret_id, bind_dn, bind_password_secret_id,
+            base_dn, user_filter, group_filter
      FROM ldap_settings
      ORDER BY created_at DESC
      LIMIT 1`
@@ -40,13 +78,28 @@ export async function ldapLogin(params: { username: string; password: string }) 
     throw new Error('ldap_not_configured');
   }
 
+  const isLdaps = s.url.toLowerCase().startsWith('ldaps://');
   // Enforce LDAPS-only if use_ldaps is set
-  if (s.use_ldaps && !s.url.toLowerCase().startsWith('ldaps://')) {
+  if (s.use_ldaps && !isLdaps) {
     throw new Error('ldaps_required');
   }
 
-  const client = new Client({ url: s.url });
+  const tlsOptions: ConnectionOptions = { minVersion: 'TLSv1.2' };
+  if (s.tls_ca_cert_secret_id) {
+    tlsOptions.ca = (await readSecretPlaintext(s.tls_ca_cert_secret_id)).toString('utf8');
+  }
+
+  if (!isLdaps && !s.start_tls) {
+    // eslint-disable-next-line no-console
+    console.warn('[LDAP] Connection is neither LDAPS nor StartTLS: bind passwords are sent in cleartext.');
+  }
+
+  const client = new Client({ url: s.url, tlsOptions: isLdaps ? tlsOptions : undefined });
   try {
+    if (!isLdaps && s.start_tls) {
+      await client.startTLS(tlsOptions);
+    }
+
     if (s.bind_dn) {
       const bindPw = s.bind_password_secret_id
         ? (await readSecretPlaintext(s.bind_password_secret_id)).toString('utf8')
@@ -61,10 +114,17 @@ export async function ldapLogin(params: { username: string; password: string }) 
     const searchRes = await client.search(s.base_dn, {
       scope: 'sub',
       filter,
-      attributes: ['dn', 'cn', 'displayName', 'mail', 'memberOf', 'objectGUID']
+      attributes: ['dn', 'cn', 'displayName', 'mail', 'memberOf', 'objectGUID', 'entryUUID'],
+      // objectGUID is binary: without this ldapts decodes it as UTF-8 and mangles it.
+      explicitBufferAttributes: ['objectGUID']
     });
-    const entry = searchRes.searchEntries[0] as any;
-    if (!entry?.dn) throw new Error('invalid_credentials');
+    const entries = searchRes.searchEntries.filter((e: any) => e?.dn);
+    if (entries.length === 0) throw new Error('invalid_credentials');
+    if (entries.length > 1) {
+      // An ambiguous filter must never pick "the first" match: that could log a user in as someone else.
+      throw new Error(`ldap_ambiguous_user: the user filter matched ${entries.length} entries`);
+    }
+    const entry = entries[0] as any;
 
     // verify password by binding as the user
     await client.bind(entry.dn, params.password);
@@ -87,16 +147,13 @@ export async function ldapLogin(params: { username: string; password: string }) 
     }
 
     return {
-      directorySubject: entry.objectGUID ?? entry.dn,
+      directorySubject: formatObjectGuid(entry.objectGUID) ?? firstString(entry.entryUUID) ?? (entry.dn as string),
       dn: entry.dn as string,
-      displayName: (entry.displayName ?? entry.cn ?? params.username) as string,
-      email: (entry.mail ?? null) as string | null,
+      displayName: (firstString(entry.displayName) ?? firstString(entry.cn) ?? params.username) as string,
+      email: firstString(entry.mail),
       groups
     };
   } finally {
     await client.unbind().catch(() => undefined);
   }
 }
-
-
-

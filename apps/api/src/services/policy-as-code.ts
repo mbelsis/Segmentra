@@ -40,6 +40,7 @@ const refObject = z
     type: z.enum(['CIDR', 'TAG', 'VLAN', 'HOST', 'IOT_ASSET']),
     value: z.string().trim().min(1).optional(), // CIDR
     name: z.string().trim().min(1).optional(), // TAG / VLAN / HOST / IOT_ASSET by name
+    vlanTag: z.number().int().optional(), // VLAN by 802.1Q tag number (preferred over name: names are not unique)
     id: z.string().uuid().optional(), // same-instance reference by id
   })
   .strict();
@@ -67,6 +68,9 @@ const ruleDocSchema = z
     log: z.enum(['NONE', 'LOG', 'LOG_RATE_LIMITED']).default('NONE'),
     comment: ruleCommentSchema.nullable().optional(),
     interfaceScope: interfaceScopeSchema.nullable().optional(),
+    // false without interfaceScope: the rule is marked as not using the policy's interface scope but names
+    // no scope of its own (the compiler then still uses the policy scope). Exported so such rules round-trip.
+    usePolicyInterfaceScope: z.boolean().optional(),
   })
   .strict();
 
@@ -119,6 +123,7 @@ type Refs = {
   vlanByName: Map<string, string[]>;
   vlanByTag: Map<number, string[]>;
   vlanName: Map<string, string>;
+  vlanTagOf: Map<string, number>;
   hostByName: Map<string, string[]>;
   hostName: Map<string, string>;
   assetByName: Map<string, string[]>;
@@ -133,12 +138,12 @@ function addTo(map: Map<any, string[]>, key: any, id: string) {
 
 async function loadRefs(db: Pick<PoolClient, 'query'> = pool): Promise<Refs> {
   const refs: Refs = {
-    tagByName: new Map(), tagName: new Map(), vlanByName: new Map(), vlanByTag: new Map(), vlanName: new Map(),
+    tagByName: new Map(), tagName: new Map(), vlanByName: new Map(), vlanByTag: new Map(), vlanName: new Map(), vlanTagOf: new Map(),
     hostByName: new Map(), hostName: new Map(), assetByName: new Map(), assetName: new Map(),
   };
   for (const r of (await db.query(`SELECT id, name FROM tags`)).rows) { addTo(refs.tagByName, r.name, r.id); refs.tagName.set(r.id, r.name); }
   for (const r of (await db.query(`SELECT id, name, vlan_tag FROM vlans`)).rows) {
-    addTo(refs.vlanByName, r.name, r.id); addTo(refs.vlanByTag, Number(r.vlan_tag), r.id); refs.vlanName.set(r.id, r.name);
+    addTo(refs.vlanByName, r.name, r.id); addTo(refs.vlanByTag, Number(r.vlan_tag), r.id); refs.vlanName.set(r.id, r.name); refs.vlanTagOf.set(r.id, Number(r.vlan_tag));
   }
   for (const r of (await db.query(`SELECT id, hostname FROM hosts`)).rows) { addTo(refs.hostByName, r.hostname, r.id); refs.hostName.set(r.id, r.hostname); }
   for (const r of (await db.query(`SELECT id, name FROM iot_assets`)).rows) { addTo(refs.assetByName, r.name, r.id); refs.assetName.set(r.id, r.name); }
@@ -201,9 +206,27 @@ function resolveRef(
     if (!idMap[spec.type].has(spec.id)) { problems.push({ path, message: `${label[spec.type]} with id ${spec.id} does not exist` }); return null; }
     return { type: spec.type, value: spec.id };
   }
+  if (spec.vlanTag !== undefined) {
+    if (spec.type !== 'VLAN') { problems.push({ path: `${path}.vlanTag`, message: 'vlanTag is only valid for VLAN references' }); return null; }
+    const id = resolveVlanTag(`${path}.vlanTag`, spec.vlanTag, spec.name, refs, problems);
+    return id ? { type: 'VLAN', value: id } : null;
+  }
   if (!spec.name) { problems.push({ path, message: `a ${spec.type} reference needs "name" (or "id")` }); return null; }
   const id = resolveOne(path, label[spec.type], spec.name, nameMap[spec.type], problems);
   return id ? { type: spec.type, value: id } : null;
+}
+
+/**
+ * Resolve a VLAN by its 802.1Q tag number (VLAN names are not unique, tag numbers are). When no VLAN has the tag,
+ * fall back to the name if one is given, so a document still applies where the VLAN was renumbered.
+ */
+function resolveVlanTag(path: string, tag: number, name: string | undefined, refs: Refs, problems: Problem[]): string | null {
+  const ids = refs.vlanByTag.get(tag) ?? [];
+  if (ids.length === 1) return ids[0];
+  if (ids.length > 1) { problems.push({ path, message: `VLAN tag ${tag} is ambiguous (${ids.length} matches); use id` }); return null; }
+  if (name !== undefined) return resolveOne(path.replace(/\.vlanTag$/, '.vlan'), 'VLAN', name, refs.vlanByName, problems);
+  problems.push({ path, message: `no VLAN with tag ${tag}` });
+  return null;
 }
 
 function normalizeInterfaceScope(s: z.infer<typeof interfaceScopeSchema> | null | undefined, path: string, problems: Problem[]) {
@@ -211,11 +234,14 @@ function normalizeInterfaceScope(s: z.infer<typeof interfaceScopeSchema> | null 
     if (s && (s.names?.length || s.roles?.length)) problems.push({ path, message: 'ALL_INTERFACES takes no names or roles' });
     return { type: 'ALL_INTERFACES', roles: null as string[] | null, names: null as string[] | null };
   }
+  // An empty (or missing) list is accepted: Segmentra itself stores such scopes (a version created with
+  // INTERFACE_ROLE and no roles), exports them that way, and the compiler refuses to compile them because they
+  // match no interface. Rejecting them here would make such an export impossible to re-import.
   if (s.type === 'INTERFACE_NAME') {
-    if (!s.names?.length) problems.push({ path, message: 'INTERFACE_NAME needs "names"' });
+    if (s.roles?.length) problems.push({ path, message: 'INTERFACE_NAME takes "names", not "roles"' });
     return { type: s.type, roles: null, names: s.names ?? [] };
   }
-  if (!s.roles?.length) problems.push({ path, message: 'INTERFACE_ROLE needs "roles"' });
+  if (s.names?.length) problems.push({ path, message: 'INTERFACE_ROLE takes "roles", not "names"' });
   return { type: s.type, roles: s.roles ?? [], names: null };
 }
 
@@ -241,12 +267,10 @@ export async function normalizeDocument(raw: unknown, db: Pick<PoolClient, 'quer
     if (!sc.tag) problems.push({ path: 'spec.scope.tag', message: 'TAG scope needs "tag"' });
     else scope.tagId = resolveOne('spec.scope.tag', 'tag', sc.tag, refs.tagByName, problems);
   } else if (sc.type === 'VLAN') {
-    if (sc.vlan !== undefined) scope.vlanId = resolveOne('spec.scope.vlan', 'VLAN', sc.vlan, refs.vlanByName, problems);
-    else if (sc.vlanTag !== undefined) {
-      const ids = refs.vlanByTag.get(sc.vlanTag) ?? [];
-      if (ids.length === 1) scope.vlanId = ids[0];
-      else problems.push({ path: 'spec.scope.vlanTag', message: ids.length ? `VLAN tag ${sc.vlanTag} is ambiguous` : `no VLAN with tag ${sc.vlanTag}` });
-    } else problems.push({ path: 'spec.scope', message: 'VLAN scope needs "vlan" (name) or "vlanTag"' });
+    // The tag number identifies a VLAN (names are not unique), so it wins when both are given.
+    if (sc.vlanTag !== undefined) scope.vlanId = resolveVlanTag('spec.scope.vlanTag', sc.vlanTag, sc.vlan, refs, problems);
+    else if (sc.vlan !== undefined) scope.vlanId = resolveOne('spec.scope.vlan', 'VLAN', sc.vlan, refs.vlanByName, problems);
+    else problems.push({ path: 'spec.scope', message: 'VLAN scope needs "vlanTag" or "vlan" (name)' });
   } else {
     if (!sc.hosts?.length) problems.push({ path: 'spec.scope.hosts', message: 'HOST_LIST scope needs "hosts" (hostnames)' });
     for (const [i, h] of (sc.hosts ?? []).entries()) {
@@ -296,6 +320,10 @@ export async function normalizeDocument(raw: unknown, db: Pick<PoolClient, 'quer
       problems.push({ path: `${p}.destination`, message: `only FORWARD rules have a destination (direction is ${r.direction})` });
     }
     const scoped = r.interfaceScope ? normalizeInterfaceScope(r.interfaceScope, `${p}.interfaceScope`, problems) : null;
+    if (r.interfaceScope && r.usePolicyInterfaceScope === true) {
+      problems.push({ path: `${p}.usePolicyInterfaceScope`, message: 'a rule with its own interfaceScope cannot also use the policy interface scope' });
+    }
+    const usePolicyScope = !scoped && r.usePolicyInterfaceScope !== false;
 
     for (const [vi, variant] of variants.entries()) {
       const orderIndex = baseOrder + vi;
@@ -315,7 +343,7 @@ export async function normalizeDocument(raw: unknown, db: Pick<PoolClient, 'quer
         source_type: source?.type ?? 'CIDR', source_value: source?.value ?? '',
         destination_type: destination?.type ?? null, destination_value: destination?.value ?? null,
         log_mode: r.log, comment: r.comment ? r.comment.trim() : null,
-        use_policy_interface_scope: !scoped,
+        use_policy_interface_scope: usePolicyScope,
         interface_scope_type: scoped?.type ?? null, interface_scope_roles: scoped?.roles ?? null, interface_scope_names: scoped?.names ?? null,
       });
     }
@@ -384,7 +412,12 @@ export function diffRules(current: RuleLike[], desired: RuleLike[], refs: Refs):
 // ---- apply ------------------------------------------------------------------------------------------
 
 export type ApplyResult = {
-  action: 'created' | 'new_version' | 'unchanged';
+  /**
+   * created: new policy set. new_version: a DRAFT version was added. updated: the rules match an existing
+   * version, but the policy set's description or scope (with updateScope) was changed. unchanged: nothing
+   * changed (a scope difference without updateScope is still reported in `changes` / `scopeChangeSkipped`).
+   */
+  action: 'created' | 'new_version' | 'updated' | 'unchanged';
   policySetId: string | null;
   name: string;
   versionId: string | null;
@@ -395,8 +428,38 @@ export type ApplyResult = {
   diff: RuleDiff;
   scopeChanged: boolean;
   scopeUpdated: boolean;
+  /** The scope differs from the document's but was left alone because updateScope was not given. */
+  scopeChangeSkipped: boolean;
+  descriptionChanged: boolean;
+  /** Policy-set level differences between the document and Segmentra (scope, description), applied or not. */
+  changes: string[];
   warnings: string[];
 };
+
+function describeScope(sc: NormalizedScope, refs: Refs): string {
+  if (sc.type === 'TAG') return `TAG ${sc.tagId ? refs.tagName.get(sc.tagId) ?? sc.tagId : '(none)'}`;
+  if (sc.type === 'VLAN') {
+    if (!sc.vlanId) return 'VLAN (none)';
+    const tag = refs.vlanTagOf.get(sc.vlanId);
+    return `VLAN ${refs.vlanName.get(sc.vlanId) ?? sc.vlanId}${tag !== undefined ? ` (tag ${tag})` : ''}`;
+  }
+  return `HOST_LIST ${sc.hostIds.map((h) => refs.hostName.get(h) ?? h).sort().join(', ') || '(none)'}`;
+}
+
+function interfaceScopeWarnings(policy: NormalizedPolicy): string[] {
+  const out: string[] = [];
+  const empty = (t: string | null, roles: string[] | null, names: string[] | null) =>
+    (t === 'INTERFACE_ROLE' && !roles?.length) || (t === 'INTERFACE_NAME' && !names?.length);
+  if (empty(policy.interfaceScope.type, policy.interfaceScope.roles, policy.interfaceScope.names)) {
+    out.push(`The policy interface scope ${policy.interfaceScope.type} lists no ${policy.interfaceScope.type === 'INTERFACE_ROLE' ? 'roles' : 'names'}; it matches no interface, and deployments of this version will be refused until it does.`);
+  }
+  for (const r of policy.rules) {
+    if (!r.use_policy_interface_scope && empty(r.interface_scope_type, r.interface_scope_roles, r.interface_scope_names)) {
+      out.push(`Rule order ${r.orderIndex}: interface scope ${r.interface_scope_type} lists nothing; it matches no interface, and deployments will be refused until it does.`);
+    }
+  }
+  return out;
+}
 
 async function readScope(client: PoolClient, set: any): Promise<NormalizedScope> {
   const hosts = set.scope_type === 'HOST_LIST'
@@ -425,7 +488,7 @@ export async function applyPolicy(
 ): Promise<ApplyResult> {
   const refs = await loadRefs(client);
   const summary = policy.changeSummary ?? `Imported from ${opts.source}`;
-  const warnings: string[] = [];
+  const warnings: string[] = interfaceScopeWarnings(policy);
 
   const existing = (await client.query(`SELECT * FROM policy_sets WHERE name = $1 ORDER BY created_at`, [policy.name])).rows;
   if (existing.length > 1) throw new ImportError(409, 'ambiguous_policy_set', `${existing.length} policy sets are named "${policy.name}"; rename them so the name is unique`);
@@ -455,7 +518,8 @@ export async function applyPolicy(
     await audit('POLICY_IMPORT', ps.id, { name: policy.name, action: 'created', versionId, rules: policy.rules.length, source: opts.source });
     return {
       action: 'created', policySetId: ps.id, name: policy.name, versionId, versionNumber: 1, versionStatus: 'DRAFT', matchesVersion: null,
-      diff: diffRules([], policy.rules, refs), scopeChanged: false, scopeUpdated: false, warnings,
+      diff: diffRules([], policy.rules, refs), scopeChanged: false, scopeUpdated: false, scopeChangeSkipped: false,
+      descriptionChanged: false, changes: [], warnings,
     };
   }
 
@@ -467,13 +531,31 @@ export async function applyPolicy(
   const currentScope = await readScope(client, set);
   const scopeChanged = !sameScope(currentScope, policy.scope);
   let scopeUpdated = false;
+  const changes: string[] = [];
   if (scopeChanged) {
-    if (opts.updateScope) { await writeScope(client, set.id, policy.scope); scopeUpdated = true; }
-    else warnings.push('The scope in the document differs from the policy set\'s current scope and was NOT changed (it decides which hosts a deployment targets). Apply with updateScope to change it.');
+    const what = `scope: ${describeScope(currentScope, refs)} -> ${describeScope(policy.scope, refs)}`;
+    if (opts.updateScope) { await writeScope(client, set.id, policy.scope); scopeUpdated = true; changes.push(what); }
+    else {
+      changes.push(`${what} (not applied: needs updateScope)`);
+      warnings.push('The scope in the document differs from the policy set\'s current scope and was NOT changed (it decides which hosts a deployment targets). Apply with updateScope to change it.');
+    }
   }
-  if ((policy.description ?? null) !== (set.description ?? null) && policy.description !== null) {
+  const scopeChangeSkipped = scopeChanged && !scopeUpdated;
+  // A document without a description leaves the stored one alone.
+  const descriptionChanged = policy.description !== null && (policy.description ?? null) !== (set.description ?? null);
+  if (descriptionChanged) {
     await client.query(`UPDATE policy_sets SET description = $2 WHERE id = $1`, [set.id, policy.description]);
+    changes.push(`description: ${JSON.stringify(set.description ?? '')} -> ${JSON.stringify(policy.description)}`);
   }
+  const setLevel = { scopeChanged, scopeUpdated, scopeChangeSkipped, descriptionChanged, changes, warnings };
+  // Rules match an existing version: report "updated" when the policy set itself was changed.
+  const matched = async (v: { id: string; version_number: number; status: string }) => {
+    const action = scopeUpdated || descriptionChanged ? 'updated' as const : 'unchanged' as const;
+    if (action === 'updated') {
+      await audit('POLICY_IMPORT', set.id, { name: policy.name, action, scopeUpdated, descriptionChanged, source: opts.source });
+    }
+    return { action, policySetId: set.id, name: policy.name, versionId: v.id, versionNumber: v.version_number, versionStatus: v.status, matchesVersion: v.version_number, diff, ...setLevel };
+  };
 
   const base = locked.base;
   const baseRules = base ? await loadVersionRules(client, base.id) : [];
@@ -482,18 +564,14 @@ export async function applyPolicy(
     rules.length === policy.rules.length && rules.map(ruleKey).join('|') === policy.rules.map(ruleKey).join('|') && versionScopeKey(v) === desiredScopeKey;
 
   const diff = diffRules(baseRules, policy.rules, refs);
-  if (base && sameContent(baseRules, base)) {
-    return { action: 'unchanged', policySetId: set.id, name: policy.name, versionId: base.id, versionNumber: base.version_number, versionStatus: base.status, matchesVersion: base.version_number, diff, scopeChanged, scopeUpdated, warnings };
-  }
+  if (base && sameContent(baseRules, base)) return matched(base);
   // Re-running the same document before the draft is approved must not create another draft.
   const drafts = (await client.query(
     `SELECT id, version_number, status, interface_scope_type, interface_scope_roles, interface_scope_names FROM policy_versions
       WHERE policy_set_id = $1 AND status = 'DRAFT' ORDER BY version_number DESC`, [set.id]
   )).rows;
   for (const d of drafts) {
-    if (sameContent(await loadVersionRules(client, d.id), d)) {
-      return { action: 'unchanged', policySetId: set.id, name: policy.name, versionId: d.id, versionNumber: d.version_number, versionStatus: d.status, matchesVersion: d.version_number, diff, scopeChanged, scopeUpdated, warnings };
-    }
+    if (sameContent(await loadVersionRules(client, d.id), d)) return matched(d);
   }
 
   const versionId = await createDraftVersion(client, {
@@ -503,9 +581,9 @@ export async function applyPolicy(
   await addRules(versionId);
   await audit('POLICY_IMPORT', set.id, {
     name: policy.name, action: 'new_version', versionId, versionNumber: locked.nextVersionNumber,
-    added: diff.added.length, removed: diff.removed.length, source: opts.source, scopeUpdated,
+    added: diff.added.length, removed: diff.removed.length, source: opts.source, scopeUpdated, descriptionChanged,
   });
-  return { action: 'new_version', policySetId: set.id, name: policy.name, versionId, versionNumber: locked.nextVersionNumber, versionStatus: 'DRAFT', matchesVersion: null, diff, scopeChanged, scopeUpdated, warnings };
+  return { action: 'new_version', policySetId: set.id, name: policy.name, versionId, versionNumber: locked.nextVersionNumber, versionStatus: 'DRAFT', matchesVersion: null, diff, ...setLevel };
 }
 
 export class ImportError extends Error {
@@ -539,7 +617,10 @@ function nameOrId(type: string, value: string, refs: Refs): any {
   if (type === 'CIDR') return type === 'CIDR' && /^[^,]+$/.test(value) ? value : { type: 'CIDR', value };
   const maps: Record<string, Map<string, string>> = { TAG: refs.tagName, VLAN: refs.vlanName, HOST: refs.hostName, IOT_ASSET: refs.assetName };
   const name = maps[type]?.get(value);
-  return name ? { type, name } : { type, id: value };
+  if (!name) return { type, id: value };
+  // VLAN names are not unique; the tag number identifies the VLAN on import, the name is kept for readers.
+  if (type === 'VLAN' && refs.vlanTagOf.has(value)) return { type, name, vlanTag: refs.vlanTagOf.get(value) };
+  return { type, name };
 }
 
 export async function buildExportDocument(policySetId: string, version: { id: string; version_number: number; interface_scope_type: string; interface_scope_roles: string[] | null; interface_scope_names: string[] | null; change_summary: string | null }) {
@@ -549,7 +630,10 @@ export async function buildExportDocument(policySetId: string, version: { id: st
 
   const scope: any = { type: set.scope_type };
   if (set.scope_type === 'TAG') scope.tag = refs.tagName.get(set.scope_tag_id) ?? set.scope_tag_id;
-  if (set.scope_type === 'VLAN') scope.vlan = refs.vlanName.get(set.scope_vlan_id) ?? set.scope_vlan_id;
+  if (set.scope_type === 'VLAN') {
+    scope.vlan = refs.vlanName.get(set.scope_vlan_id) ?? set.scope_vlan_id;
+    if (refs.vlanTagOf.has(set.scope_vlan_id)) scope.vlanTag = refs.vlanTagOf.get(set.scope_vlan_id);
+  }
   if (set.scope_type === 'HOST_LIST') {
     const hosts = (await pool.query(`SELECT host_id FROM policy_set_hosts WHERE policy_set_id = $1`, [policySetId])).rows;
     scope.hosts = hosts.map((h: any) => refs.hostName.get(h.host_id) ?? h.host_id).sort();
@@ -575,7 +659,11 @@ export async function buildExportDocument(policySetId: string, version: { id: st
         ...((r.direction ?? 'IN') === 'FORWARD' && r.destination_type ? { destination: nameOrId(r.destination_type, r.destination_value, refs) } : {}),
         ...(r.log_mode && r.log_mode !== 'NONE' ? { log: r.log_mode } : {}),
         ...(r.comment ? { comment: r.comment } : {}),
-        ...(r.use_policy_interface_scope === false && r.interface_scope_type ? { interfaceScope: iface(r.interface_scope_type, r.interface_scope_roles, r.interface_scope_names) } : {}),
+        ...(r.use_policy_interface_scope === false
+          ? r.interface_scope_type
+            ? { interfaceScope: iface(r.interface_scope_type, r.interface_scope_roles, r.interface_scope_names) }
+            : { usePolicyInterfaceScope: false } // overridden without a scope of its own: keep it so the rule round-trips
+          : {}),
       })),
     },
   };

@@ -36,7 +36,7 @@ export function KubernetesPage() {
   const [allTags, setAllTags] = useState<any[]>([]);
   const [showGenerate, setShowGenerate] = useState(false);
   const [deployableVersions, setDeployableVersions] = useState<Array<{ id: string; label: string }>>([]);
-  const [genForm, setGenForm] = useState({ policyVersionId: '', namespace: 'default', policyName: '' });
+  const [genForm, setGenForm] = useState({ policyVersionId: '', namespace: 'default', policyName: '', allowDenyAll: false });
   const [genWarnings, setGenWarnings] = useState<string[]>([]);
   const [generating, setGenerating] = useState(false);
 
@@ -65,7 +65,8 @@ export function KubernetesPage() {
       const res: any = await api.k8s.deployPolicy(selectedCluster.id, {
         policyVersionId: genForm.policyVersionId,
         namespace: genForm.namespace.trim(),
-        policyName: genForm.policyName.trim()
+        policyName: genForm.policyName.trim(),
+        ...(genForm.allowDenyAll ? { allowDenyAll: true } : {})
       });
       setGenWarnings(res.warnings || []);
       if (!res.warnings?.length) setShowGenerate(false);
@@ -532,6 +533,10 @@ export function KubernetesPage() {
                         <input value={genForm.policyName} onChange={e => setGenForm(f => ({ ...f, policyName: e.target.value }))} placeholder="e.g., web-access" />
                       </div>
                     </div>
+                    <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: '0.9em', marginBottom: 12 }}>
+                      <input type="checkbox" checked={genForm.allowDenyAll} onChange={e => setGenForm(f => ({ ...f, allowDenyAll: e.target.checked }))} />
+                      Allow a deny-all policy (generate even if no inbound rule can be expressed; blocks all ingress to the namespace)
+                    </label>
                     {genWarnings.length > 0 && (
                       <div role="note" style={{ background: '#fff8e6', border: '1px solid #f0d58c', color: '#6b5310', padding: '8px 12px', borderRadius: 6, fontSize: '0.88em', marginBottom: 12 }}>
                         <strong>Generated with warnings</strong> (rules NetworkPolicy can't express were skipped):

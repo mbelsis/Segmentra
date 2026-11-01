@@ -183,19 +183,49 @@ function iptablesApplyScript(): string {
 }
 
 /**
- * Root script (run on the host) bounding `script` with the host's own `timeout`, so a command
+ * Root script (run on the host) bounding `script` with a host-side deadline, so a command
  * whose SSH session timed out locally does not keep changing the firewall on the host while the
- * rollback runs. Hosts whose `timeout` lacks the coreutils / busybox >= 1.30 syntax (probed with
- * `timeout 1 true`) run the script unbounded. Exit 124 = the remote timeout fired.
+ * rollback runs. The whole process group is stopped (TERM, then KILL 5 s later): with `setsid`
+ * (util-linux, busybox) the script runs as its own process-group leader under a shell watchdog,
+ * because busybox `timeout` only signals its direct child (the nested host-script shell would keep
+ * running) and exits 143 instead of 124. Without `setsid`, the host's `timeout` is used (coreutils
+ * kills the group; busybox >= 1.30 syntax probed with `timeout 1 true`) and 124 / 137 / 143 all mean
+ * "timed out"; hosts with neither run the script unbounded. Exit 124 = the remote timeout fired.
  */
 export function remoteTimeoutWrap(script: string, seconds: number): string {
   const secs = Math.max(5, Math.floor(seconds));
   return [
-    'if command -v timeout >/dev/null 2>&1 && timeout 1 true >/dev/null 2>&1; then',
-    `  timeout ${secs} /bin/sh -c ${shq(script)}`,
+    // `$!` of an async list is never a process-group leader (no job control), so setsid(1) does not
+    // fork: seg_pid IS the new group leader and `wait` gets the script's own exit status.
+    'if command -v setsid >/dev/null 2>&1; then',
+    // Signal a process group: dash needs `kill -s SIG -- -PGID`, busybox ash rejects the `--`.
+    '  seg_gkill() { kill -s "$1" -- "-$2" 2>/dev/null || kill -s "$1" "-$2" 2>/dev/null; }',
+    '  seg_flag=$(mktemp 2>/dev/null) || seg_flag=',
+    `  setsid /bin/sh -c ${shq(script)} &`,
+    '  seg_pid=$!',
+    '  (',
+    '    seg_i=0',
+    `    while [ "$seg_i" -lt ${secs} ]; do sleep 1; kill -0 "$seg_pid" 2>/dev/null || exit 0; seg_i=$((seg_i + 1)); done`,
+    '    if [ -n "$seg_flag" ]; then echo fired > "$seg_flag"; fi',
+    '    seg_gkill TERM "$seg_pid" || kill -s TERM "$seg_pid" 2>/dev/null',
+    '    for seg_j in 1 2 3 4 5; do sleep 1; seg_gkill 0 "$seg_pid" || exit 0; done',
+    '    seg_gkill KILL "$seg_pid"',
+    '  ) </dev/null >/dev/null 2>&1 &',
+    '  seg_wd=$!',
+    // The watchdog ends within 1 s of the script (or, once fired, when the group is gone / KILLed).
+    '  wait "$seg_pid"; seg_rc=$?',
+    '  wait "$seg_wd"',
+    '  if [ -n "$seg_flag" ]; then if [ -s "$seg_flag" ]; then seg_rc=124; fi; rm -f "$seg_flag"',
+    '  else case "$seg_rc" in 137|143) seg_rc=124 ;; esac; fi',
+    'elif command -v timeout >/dev/null 2>&1 && timeout 1 true >/dev/null 2>&1; then',
+    // -k: KILL 5 s after the TERM when the busybox / coreutils build supports it.
+    `  if timeout -k 1 1 true >/dev/null 2>&1; then timeout -k 5 ${secs} /bin/sh -c ${shq(script)}; seg_rc=$?`,
+    `  else timeout ${secs} /bin/sh -c ${shq(script)}; seg_rc=$?; fi`,
+    '  case "$seg_rc" in 124|137|143) seg_rc=124 ;; esac',
     'else',
-    `  /bin/sh -c ${shq(script)}`,
-    'fi'
+    `  /bin/sh -c ${shq(script)}; seg_rc=$?`,
+    'fi',
+    '(exit "$seg_rc")'
   ].join('\n');
 }
 
@@ -233,19 +263,37 @@ export function revertCancelScript(token: string, marker: string): string {
   ].join('\n');
 }
 
-export type RevertState = 'pending' | 'running' | 'done' | 'gone' | 'unknown';
+export type RevertState = 'pending' | 'running' | 'done' | 'failed' | 'gone' | 'unknown';
+
+/**
+ * Body of the scheduled revert: touches `marker` (so a late cancel can tell it fired), runs
+ * `restoreScript` and records its exit status in `<marker>.rc` (read by revertStatusScript to tell
+ * a successful revert from a failed one, on the systemd and the nohup path alike).
+ */
+export function revertFiringScript(marker: string, restoreScript: string): string {
+  return `touch ${shq(marker)}; ( ${restoreScript}
+); seg_rrc=$?; echo "$seg_rrc" > ${shq(`${marker}.rc`)}; exit "$seg_rrc"`;
+}
 
 /**
  * Root script printing the state of the scheduled revert: pending (not fired yet), running
- * (firing now), done (fired and finished), gone (neither scheduled nor fired: cancelled, or
- * lost in a reboot).
+ * (firing now), done (fired and the restore succeeded), failed (fired, but the restore failed:
+ * non-zero `<marker>.rc`, or the transient .service ended failed / with Result != success, e.g.
+ * killed - host state unknown; a marker without `<marker>.rc` (revert armed by an older version)
+ * counts as done unless systemd says otherwise), gone (neither scheduled nor fired: cancelled, or lost in a reboot).
  */
 export function revertStatusScript(token: string, marker: string): string {
+  const rcFile = shq(`${marker}.rc`);
   if (token.startsWith('systemd:')) {
     const unit = token.slice('systemd:'.length);
+    const svc = shq(`${unit}.service`);
     return [
-      `case "$(systemctl is-active ${shq(`${unit}.service`)} 2>/dev/null)" in ${ACTIVE_SERVICE_STATES}) echo running; exit 0 ;; esac`,
-      `if [ -e ${shq(marker)} ]; then echo done`,
+      `case "$(systemctl is-active ${svc} 2>/dev/null)" in ${ACTIVE_SERVICE_STATES}) echo running; exit 0 ;; esac`,
+      `if [ -e ${shq(marker)} ]; then`,
+      // A failed transient unit stays loaded with Result != success; a successful one is unloaded (Result=success).
+      `  seg_res=$(systemctl show -p Result ${svc} 2>/dev/null | sed -n 's/^Result=//p')`,
+      `  seg_rrc=$(cat ${rcFile} 2>/dev/null)`,
+      `  if [ "\${seg_rrc:-0}" = 0 ] && [ "$(systemctl is-active ${svc} 2>/dev/null)" != failed ] && { [ -z "$seg_res" ] || [ "$seg_res" = success ]; }; then echo done; else echo failed; fi`,
       `elif systemctl is-active --quiet ${shq(`${unit}.timer`)} 2>/dev/null; then echo pending`,
       'else echo gone; fi'
     ].join('\n');
@@ -253,21 +301,22 @@ export function revertStatusScript(token: string, marker: string): string {
   return [
     `pid=${token.slice(4)}`,
     `if kill -0 "$pid" 2>/dev/null; then if [ -e ${shq(marker)} ]; then echo running; else echo pending; fi`,
-    `elif [ -e ${shq(marker)} ]; then echo done`,
+    `elif [ -e ${shq(marker)} ]; then seg_rrc=$(cat ${rcFile} 2>/dev/null); if [ "\${seg_rrc:-0}" = 0 ]; then echo done; else echo failed; fi`,
     'else echo gone; fi'
   ].join('\n');
 }
 
 export function parseRevertState(stdout: string, exitCode: number): RevertState {
   const s = (stdout.trim().split('\n').pop() ?? '').trim();
-  return exitCode === 0 && ['pending', 'running', 'done', 'gone'].includes(s) ? (s as RevertState) : 'unknown';
+  return exitCode === 0 && ['pending', 'running', 'done', 'failed', 'gone'].includes(s) ? (s as RevertState) : 'unknown';
 }
 
 /** How long past the revert deadline to keep waiting for it to finish (restore + persistence sync). */
 export const REVERT_SETTLE_GRACE_MS = 120_000;
 
 /**
- * Wait until the scheduled revert has settled — fired and finished ('done'), or no longer
+ * Wait until the scheduled revert has settled — fired and finished ('done', or 'failed' when its
+ * restore did not succeed), or no longer
  * scheduled ('gone') — polling `getState` from the deadline on. Returns the last state seen;
  * 'pending' / 'running' / 'unknown' mean it had not settled (or the host could not be asked)
  * `graceMs` after the deadline. The host lock must stay held until this returns: a new
@@ -286,7 +335,7 @@ export async function awaitRevertSettled(
   for (;;) {
     // Before the deadline only 'running'/'done' (fired early) or 'gone' can end the wait.
     last = await getState();
-    if (last === 'done' || last === 'gone') return last;
+    if (last === 'done' || last === 'failed' || last === 'gone') return last;
     if (now() >= giveUp) return last;
     const untilDeadline = deadline - now();
     await sleep(Math.max(250, Math.min(untilDeadline > 0 ? untilDeadline : pollMs, pollMs, giveUp - now())));
@@ -296,6 +345,7 @@ export async function awaitRevertSettled(
 export function describeRevertState(state: RevertState, backupPath: string): string {
   switch (state) {
     case 'done': return `the automatic revert fired and finished; Segmentra's previous state (${backupPath}) is restored`;
+    case 'failed': return `the automatic revert FAILED (it fired, but restoring ${backupPath} did not succeed); host state unknown - check the host manually before deploying again`;
     case 'gone': return 'the automatic revert is no longer scheduled and did not fire';
     case 'running': return `the automatic revert is STILL RUNNING (restoring ${backupPath}); check the host before deploying again`;
     case 'pending': return 'the automatic revert is STILL PENDING on the host; check the host before deploying again';
@@ -436,7 +486,7 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
     // a marker file when it fires so a late cancel can detect that it already ran.
     const restoreScript = buildRestoreScript(ext, paths);
     const marker = `${BACKUP_DIR}/revert-fired.${timestamp}-${nonce}`;
-    const firingScript = `touch ${shq(marker)}; ${restoreScript}`;
+    const firingScript = revertFiringScript(marker, restoreScript);
     const delay = Math.max(30, Math.floor(opts.rollbackTimeoutSec));
     const watchdog = `sleep ${delay}; ${firingScript}`;
     const scheduleScript = [
@@ -530,7 +580,7 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
       const state = await settleRevert();
       return fail(1, `Host not reachable over a new SSH connection after apply; ${describeRevertState(state, backupPath)}`, {
         backupPath,
-        rolledBack: true
+        rolledBack: state !== 'failed'
       });
     }
 
@@ -544,14 +594,17 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
     add(cancelResult);
     if (cancelResult.exitCode === 9) {
       const state = await settleRevert();
-      return fail(9, state === 'done' ? revertFiredMsg : `${revertFiredMsg}; ${describeRevertState(state, backupPath)}`, { backupPath, rolledBack: true });
+      const msg9 = state === 'done' ? revertFiredMsg
+        : state === 'failed' ? `The automatic revert already fired and the deployment is NOT active; ${describeRevertState(state, backupPath)}`
+        : `${revertFiredMsg}; ${describeRevertState(state, backupPath)}`;
+      return fail(9, msg9, { backupPath, rolledBack: state !== 'failed' });
     }
     if (cancelResult.exitCode !== 0) {
       stderr += `Could not cancel the automatic revert (${token}); waiting for it to restore ${backupPath}\n`;
       const state = await settleRevert();
       return fail(cancelResult.exitCode, `Could not cancel the automatic revert (${token}); ${describeRevertState(state, backupPath)}`, {
         backupPath,
-        rolledBack: true
+        rolledBack: state !== 'failed'
       });
     }
     stdout += 'Reachability verified; automatic revert cancelled\n';

@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import express, { Router } from 'express';
 
 import { pool } from '../db/pool.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
@@ -27,7 +27,13 @@ backupRouter.get('/export', async (req, res) => {
   res.send(JSON.stringify({ ...document, warnings }, null, 2));
 });
 
-backupRouter.post('/import', async (req, res) => {
+/**
+ * Body limit for POST /api/backup/import. The global JSON parser (1 MB) skips this path (index.ts); the body
+ * is parsed here, after requireAuth + requireRole('admin'). Keep nginx client_max_body_size >= this.
+ */
+export const BACKUP_IMPORT_BODY_LIMIT = '25mb';
+
+backupRouter.post('/import', express.json({ limit: BACKUP_IMPORT_BODY_LIMIT }), async (req, res) => {
   const dryRun = String(req.query.dryRun ?? '') === 'true' || String(req.query.dryRun ?? '') === '1';
   let raw: unknown = req.body;
   // Accept either the document itself or { content: "<json text>" } (file upload from the UI)

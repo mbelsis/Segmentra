@@ -13,7 +13,13 @@
 
 # Production
 ./install.sh --production
+
+# Production with the hardened override (no Docker socket, read-only containers,
+# only nginx published; requires the SSH Direct executor)
+./install.sh --production --hardened
 ```
+
+`--hardened` records `COMPOSE_FILE=docker-compose.yml:docker-compose.hardened.yml` in `.env`. Docker Compose reads that variable by itself, so every later `docker compose` command, `./run.sh --start|--stop|--status --production` and `scripts/segmentra-backup.sh` keep using the override; a plain `docker compose up -d` no longer silently recreates the containers without it. An existing install switches with `./run.sh --start --production --hardened` (records the same line). If the running API container is hardened but `.env` has no `COMPOSE_FILE`, `run.sh` keeps the override for that command and tells you to record it.
 
 **Windows (PowerShell):**
 ```powershell
@@ -48,6 +54,8 @@
 
 - **Development:** `admin` / `admin123` (created by the seed when `SEGMENTRA_ADMIN_PASSWORD` is not set; change it after first login)
 - **Production:** `admin` / the `SEGMENTRA_ADMIN_PASSWORD` value. `./install.sh --production` generates one into `.env` and prints it. With `NODE_ENV=production` the seed never creates the `admin123` default.
+
+The seed runs on every API container start, but it creates `admin` only on a **fresh database** (the `users` table is empty). Once any user exists it logs `Initial admin bootstrap skipped` and ignores `SEGMENTRA_ADMIN_PASSWORD`, so deleting or renaming `admin` (a common hardening step, after creating your own admin account) is permanent and a restart never brings it back with the password kept in `.env`. You can remove `SEGMENTRA_ADMIN_PASSWORD` from `.env` after the first start. To recover from losing every admin account, use `SEGMENTRA_BOOTSTRAP_TOKEN` with `POST /api/admin/bootstrap`.
 
 The dev scripts (`start.sh`, `run.sh`, `run.ps1`, `start.bat`) generate a random JWT secret once into the untracked file `.dev-jwt-secret` when `JWT_SECRET` is not set. They also install/refresh dependencies when `package-lock.json` or a `package.json` changed, then migrate, seed and build before starting.
 
@@ -224,6 +232,7 @@ DOCKER_GID=
 # API_PORT=8080
 # API_BIND=127.0.0.1
 # WEB_PORT=80
+# WEB_BIND=0.0.0.0        # 127.0.0.1 when a TLS reverse proxy on this host is in front (see "TLS / reverse proxy")
 # DB_PORT=15432
 ```
 
@@ -249,8 +258,12 @@ docker compose logs -f segmentra-app
 For production, consider the hardened override, which removes the Docker socket and makes the containers read-only (requires the SSH Direct executor):
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.hardened.yml up -d --build
+./install.sh --production --hardened        # or, by hand:
+echo 'COMPOSE_FILE=docker-compose.yml:docker-compose.hardened.yml' >> .env
+docker compose up -d --build
 ```
+
+Prefer `COMPOSE_FILE` in `.env` over passing `-f ... -f ...` by hand: with `-f` every later command must repeat both files, and one plain `docker compose up -d` undoes the hardening. In the hardened API container `/tmp` stays `noexec`; the `SSH_ASKPASS` helper for passphrase-protected SSH keys lives on its own small exec tmpfs (`/run/segmentra-askpass`, mode 0700, owned by the `node` user, `SEGMENTRA_ASKPASS_DIR` points to it).
 
 See [security.md](security.md#hardening-a-production-install).
 
@@ -385,7 +398,7 @@ docker compose up -d        # production: the API re-runs migrations + seed on s
 | `SEGMENTRA_ASKPASS_DIR` | No | OS temp dir | Directory for the short-lived `SSH_ASKPASS` helper used with passphrase-protected keys (the helper never contains a secret) |
 | `SEGMENTRA_SKIP_MIGRATIONS` | No | `0` | Docker only: `1` skips migrations + seed in the API entrypoint |
 
-docker-compose also reads `POSTGRES_PASSWORD` (or legacy `DB_PASSWORD`), `DB_USER`, `DB_NAME`, `DB_PORT`, `API_PORT`, `API_BIND`, `WEB_PORT` and `DOCKER_GID`.
+docker-compose also reads `POSTGRES_PASSWORD` (or legacy `DB_PASSWORD`), `DB_USER`, `DB_NAME`, `DB_PORT`, `API_PORT`, `API_BIND`, `WEB_PORT`, `WEB_BIND`, `COMPOSE_FILE` (hardened mode) and `DOCKER_GID`.
 
 The local dev scripts also read `SEGMENTRA_DATABASE_URL` (custom database URL instead of the local container; `start.sh`, `run.sh`, `run.ps1`) and `SEGMENTRA_RESET_DB=1` (`start.sh` / `start.bat`: wipe the Docker volumes before starting — data loss).
 
@@ -427,8 +440,40 @@ Configure in: **Admin → SSH Credentials**
 - **Docker socket mount** — `/var/run/docker.sock` is root-equivalent and only required for the Ansible executor; if using SSH Direct only, remove the mount and `group_add`. Treat the API container as high-trust when the socket is mounted.
 - **SSH host key verification** — trust-on-first-use (`StrictHostKeyChecking=accept-new`) for both the SSH executor (known_hosts at `SEGMENTRA_KNOWN_HOSTS`, persisted in the `segmentra_ssh_known_hosts` volume) and the Ansible runner (`segmentra_ansible_ssh` volume). A host whose key changes is rejected; remove its old entry from known_hosts after a legitimate re-key.
 - **JWT token lifetime** — tokens are valid for 12 hours. Role changes take effect on the next request. Deactivating a user blocks their tokens only while the account stays deactivated (reactivating it within 12 hours makes unexpired tokens valid again). Changing or resetting a password does not end existing sessions, so keep a compromised account deactivated for at least 12 hours. The expiry is set in `apps/api/src/services/jwt.ts`.
-- **TLS** — in production, place a reverse proxy with TLS (e.g., nginx with Let's Encrypt) in front of the `segmentra-web` container
+- **TLS** — `segmentra-web` serves plain HTTP on port 80 of all interfaces (`0.0.0.0`). Over plain HTTP the login password and every API request's JWT (`Authorization: Bearer ...`) cross the network unencrypted, so in production terminate TLS in front of it, see [TLS / reverse proxy](#tls--reverse-proxy) below
 - **Back up** the PostgreSQL volume (`segmentra_pgdata`) regularly
+
+### TLS / reverse proxy
+
+Segmentra does not terminate TLS itself. Put a reverse proxy (nginx, Caddy, HAProxy, Traefik or a load balancer) with a certificate in front of `segmentra-web`:
+
+1. Bind the UI container to localhost only, so the proxy is the only way in. In `.env`:
+   ```env
+   WEB_BIND=127.0.0.1
+   WEB_PORT=8081
+   ```
+   (`docker compose up -d segmentra-web` to apply). If the proxy runs on another machine, keep the default bind but allow port 80 only from the proxy in the host firewall.
+2. Proxy `https://segmentra.example.com/` to `http://127.0.0.1:8081/`, pass `Host` and `X-Forwarded-For`, allow request bodies of at least 25 MB (backup / policy imports) and a read timeout of 600 s (long deployments). Minimal nginx example on the host:
+   ```nginx
+   server {
+       listen 443 ssl http2;
+       server_name segmentra.example.com;
+       ssl_certificate     /etc/letsencrypt/live/segmentra.example.com/fullchain.pem;
+       ssl_certificate_key /etc/letsencrypt/live/segmentra.example.com/privkey.pem;
+       add_header Strict-Transport-Security "max-age=31536000" always;
+       client_max_body_size 25m;
+       location / {
+           proxy_pass http://127.0.0.1:8081;
+           proxy_set_header Host $host;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+           proxy_read_timeout 600s;
+       }
+   }
+   server { listen 80; server_name segmentra.example.com; return 301 https://$host$request_uri; }
+   ```
+3. Set `CORS_ORIGIN=https://segmentra.example.com`. With two proxies in front of the API (yours + the bundled nginx) set `TRUST_PROXY=2` so login rate limiting and the audit log see the real client IP.
+
+Send HSTS from the TLS proxy only (the bundled nginx speaks HTTP and does not send it). The bundled nginx already sends a Content-Security-Policy (scripts only from the UI's origin, no framing), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer` on every response, including errors (`infra/web/security-headers.conf`). It resolves `segmentra-app` through Docker's DNS at request time, so recreating the API container does not require restarting `segmentra-web`.
 
 ---
 

@@ -67,6 +67,32 @@ interface NotificationPayload {
   body: Record<string, any>;
 }
 
+type FilterScalar = string | number | boolean;
+
+/**
+ * Rule filter semantics (notification_rules.filter): a JSON object whose keys name fields of the event
+ * payload body (dotted paths such as "host.name" reach into nested objects). Every key must match
+ * (AND); a scalar value must equal the field (compared as strings, so 42 and "42" match), an array value
+ * matches when the field equals any element (OR). A field missing from the event never matches. An
+ * empty or absent filter matches every event of the rule's type.
+ */
+export function notificationFilterMatches(filter: unknown, body: Record<string, any>): boolean {
+  if (filter == null) return true;
+  if (typeof filter !== 'object' || Array.isArray(filter)) return false;
+  for (const [key, expected] of Object.entries(filter as Record<string, unknown>)) {
+    let actual: any = body;
+    for (const part of key.split('.')) {
+      actual = actual != null && typeof actual === 'object' ? actual[part] : undefined;
+    }
+    if (actual === undefined || actual === null) return false;
+    const candidates = (Array.isArray(expected) ? expected : [expected]) as FilterScalar[];
+    const actualValues = Array.isArray(actual) ? actual : [actual];
+    const ok = candidates.some((c) => actualValues.some((a) => (typeof a === 'object' ? false : String(a) === String(c))));
+    if (!ok) return false;
+  }
+  return true;
+}
+
 export async function sendNotification(payload: NotificationPayload): Promise<void> {
   try {
     // Find all enabled rules matching this event type
@@ -79,7 +105,16 @@ export async function sendNotification(payload: NotificationPayload): Promise<vo
       [payload.eventType]
     );
 
-    for (const rule of rules) {
+    // Apply each rule's filter, then send at most once per channel even when several rules match.
+    const seenChannels = new Set<string>();
+    const matching = rules.filter((rule) => {
+      if (seenChannels.has(rule.channel_id)) return false;
+      if (!notificationFilterMatches(rule.filter, payload.body ?? {})) return false;
+      seenChannels.add(rule.channel_id);
+      return true;
+    });
+
+    for (const rule of matching) {
       const logId = await createLogEntry(rule.channel_id, payload);
 
       try {
