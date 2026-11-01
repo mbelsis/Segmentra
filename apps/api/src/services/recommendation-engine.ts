@@ -73,7 +73,9 @@ async function resolveIpToEntity(ip: string): Promise<{ type: string; value: str
   }
 
   // Fallback to CIDR
-  return { type: 'CIDR', value: `${ip}/32`, label: `CIDR:${ip}/32` };
+  // One observed address: /32 for IPv4, /128 for IPv6 (a "/32" on an IPv6 address would allow a whole /32 network).
+  const hostCidr = `${ip}/${ip.includes(':') ? 128 : 32}`;
+  return { type: 'CIDR', value: hostCidr, label: `CIDR:${hostCidr}` };
 }
 
 function calculateConfidence(flow: CommunicationFlow, isKnownPort: boolean, bothInInventory: boolean): number {

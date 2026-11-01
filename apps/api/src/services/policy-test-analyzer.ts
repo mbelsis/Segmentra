@@ -1,5 +1,6 @@
 import { pool } from '../db/pool.js';
 import type { CommunicationFlow } from './log-parser.js';
+import { parseRuleAddresses } from '@segmentra/compiler';
 import { cidrContains } from './ip-utils.js';
 
 // Helper: check if an IP matches a CIDR (IPv4 or IPv6; a bare IP is a /32 or /128)
@@ -49,10 +50,19 @@ interface AnalysisResult {
   };
 }
 
-async function resolveSourceValue(rule: any): Promise<string[]> {
+/**
+ * The remote addresses a rule matches, resolved like the compiler resolves them: `null` = any address ("any", "*"),
+ * otherwise a list of addresses/prefixes (a comma-separated CIDR value is several entries). A value the compiler would
+ * refuse matches nothing (the policy could not be deployed with it anyway).
+ */
+async function resolveSourceValue(rule: any): Promise<string[] | null> {
   const ips: string[] = [];
   if (rule.source_type === 'CIDR') {
-    ips.push(rule.source_value);
+    try {
+      return parseRuleAddresses(String(rule.source_value ?? ''));
+    } catch {
+      return [];
+    }
   } else if (rule.source_type === 'TAG') {
     const { rows } = await pool.query(
       `SELECT h.mgmt_ip FROM hosts h
@@ -78,7 +88,7 @@ async function resolveSourceValue(rule: any): Promise<string[]> {
   return ips;
 }
 
-function doesFlowMatchRule(flow: CommunicationFlow, rule: any, sourceIps: string[]): boolean {
+function doesFlowMatchRule(flow: CommunicationFlow, rule: any, sourceIps: string[] | null): boolean {
   // Check direction
   if (rule.direction !== 'BOTH' && rule.direction !== flow.direction) return false;
 
@@ -89,16 +99,12 @@ function doesFlowMatchRule(flow: CommunicationFlow, rule: any, sourceIps: string
   if (!portMatches(flow.destinationPort, rule.ports)) return false;
 
   // Check source IP
+  // Check the remote address (source of inbound, destination of outbound traffic). "any" matches every address;
+  // otherwise family-aware containment, like the compiled rule (0.0.0.0/0 matches IPv4 only, ::/0 IPv6 only, and a
+  // bare address is a /32 or /128 whatever its textual form).
+  if (sourceIps === null) return true;
   const flowSourceIp = flow.direction === 'IN' ? flow.sourceIp : flow.destinationIp;
-  const matchesSource = sourceIps.some(sip => {
-    if (sip.includes('/')) return ipMatchesCidr(flowSourceIp, sip);
-    return sip === flowSourceIp;
-  });
-
-  // For CIDR 0.0.0.0/0, always match
-  if (rule.source_type === 'CIDR' && rule.source_value === '0.0.0.0/0') return true;
-
-  return matchesSource;
+  return sourceIps.some((sip) => sip !== null && sip !== undefined && ipMatchesCidr(flowSourceIp, String(sip)));
 }
 
 export async function analyzePolicyTest(sessionId: string): Promise<AnalysisResult> {
@@ -116,7 +122,7 @@ export async function analyzePolicyTest(sessionId: string): Promise<AnalysisResu
   );
 
   // Pre-resolve source IPs for all rules
-  const ruleSourceIps = new Map<string, string[]>();
+  const ruleSourceIps = new Map<string, string[] | null>();
   for (const rule of rules) {
     ruleSourceIps.set(rule.id, await resolveSourceValue(rule));
   }
@@ -156,7 +162,8 @@ export async function analyzePolicyTest(sessionId: string): Promise<AnalysisResu
     }
 
     for (const rule of rules) {
-      const sourceIps = ruleSourceIps.get(rule.id) ?? [];
+      const resolved = ruleSourceIps.get(rule.id);
+      const sourceIps = resolved === undefined ? [] : resolved; // null = any address
       if (doesFlowMatchRule(flow, rule, sourceIps)) {
         matched = true;
         if (rule.action === 'DENY') {

@@ -391,7 +391,12 @@ subjects: [{ kind: ServiceAccount, name: ${name}, namespace: kube-system }]
   const rmGen = await post(`${own3.networkPolicy.id}/remove`);
   check('removing a generated, never-applied manifest is refused (409) ...', rmGen.status === 409 && (await rmGen.json()).error === 'not_applied');
   check('... and the live policy is still there', (await ownLive()).metadata.uid === uidBefore);
-  await kubectl('delete', 'networkpolicy', OWN, '-n', OWN_NS);
+  // The applied record (own2) still owns the live object although a newer manifest (own3) was generated after it.
+  const rmApplied = await post(`${own2.networkPolicy.id}/remove`);
+  check('the applied record can be removed while a newer manifest is only generated', rmApplied.status === 200, `${rmApplied.status}`);
+  const ownGone = await kubectl('get', 'networkpolicy', OWN, '-n', OWN_NS, '-o', 'name').catch(() => ({ out: '' })); // NotFound expected
+  check('... and the policy is gone from the cluster', !ownGone.out.includes(OWN));
+  await kubectl('delete', 'networkpolicy', OWN, '-n', OWN_NS, '--ignore-not-found');
 
   const vArch = await approvedVersion('k8s-archived', [rule(10, { protocol: 'tcp', ports: '5432', sourceType: 'CIDR', sourceValue: `${ips['client-a']}/32`, comment: 'arch' })]);
   const archGen = await api('POST', `/k8s/clusters/${cluster.id}/deploy-policy`, { token: op, expect: 201, body: { policyVersionId: vArch.id, namespace: OWN_NS, policyName: 'segmentra-archived' } });

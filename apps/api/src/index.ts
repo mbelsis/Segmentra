@@ -273,7 +273,23 @@ app.listen(env.PORT, () => {
   // Start periodic policy test session expiry processor (every 1 minute)
   // When a test session expires, SSH into the host to restore original rules and collect logs.
   // Sessions whose restore failed stay RUNNING (with scheduled_end_at pulled forward) and are retried here.
+  // Tests whose start was interrupted (API stopped while DEPLOYING) are restored from their backup as well, once at
+  // startup and on every tick (see recoverInterruptedTestSession).
+  const recoverInterruptedTests = async () => {
+    try {
+      const { recoverInterruptedTestSessions } = await import('./lib/policy-test-session.js');
+      for (const r of await recoverInterruptedTestSessions()) {
+        // eslint-disable-next-line no-console
+        console.log(`[Policy Test] Interrupted start of session ${r.id} (${r.hostname}): ${r.result.outcome}${'error' in r.result ? ` — ${r.result.error}` : ''}`);
+      }
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[Policy Test] Error recovering interrupted test sessions:', e);
+    }
+  };
+  void recoverInterruptedTests();
   setInterval(async () => {
+    await recoverInterruptedTests();
     try {
       const { pool } = await import('./db/pool.js');
       const { rows } = await pool.query(

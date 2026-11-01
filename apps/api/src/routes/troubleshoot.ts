@@ -1,4 +1,4 @@
-import { acquireHostLock } from '../services/host-lock.js';
+import { acquireHostLock, activeFirewallSession, describeActiveSession } from '../services/host-lock.js';
 import { Router } from 'express';
 import { z } from 'zod';
 import { pool } from '../db/pool.js';
@@ -614,21 +614,11 @@ troubleshootRouter.post('/audit/start', requireRole('operator', 'admin'), async 
     if (!found.has(id)) results.push({ hostId: id, hostname: null, status: 'FAILED', sessionId: null, error: 'host not found or disabled' });
   }
 
-  const busy = await pool.query(
-    `SELECT DISTINCT host_id FROM firewall_audit_sessions WHERE host_id = ANY($1::uuid[]) AND status IN ('PENDING','RUNNING')`,
-    [hostIds]
-  );
-  const busyHosts = new Set(busy.rows.map((r: any) => r.host_id));
-
   const sessions: any[] = [];
   const scheduledRestoreAt = new Date(Date.now() + durationMinutes * 60 * 1000);
   const mgmtSshCidrs = await managementCidrs();
 
   for (const host of hostRes.rows) {
-    if (busyHosts.has(host.id)) {
-      results.push({ hostId: host.id, hostname: host.hostname, status: 'FAILED', sessionId: null, error: 'an audit session is already active for this host' });
-      continue;
-    }
     if (!host.mgmt_ip) {
       results.push({ hostId: host.id, hostname: host.hostname, status: 'FAILED', sessionId: null, error: 'host has no management IP' });
       continue;
@@ -637,16 +627,36 @@ troubleshootRouter.post('/audit/start', requireRole('operator', 'admin'), async 
     const logFilePath = `/var/log/segmentra-audit-${host.hostname}-${Date.now()}.log`;
 
     // Serialize with deployments and other sessions on this host for the whole start (see services/host-lock.ts).
-    const releaseHostLock = await acquireHostLock(host.id);
+    let releaseHostLock: () => Promise<void>;
+    try {
+      releaseHostLock = await acquireHostLock(host.id);
+    } catch (e: any) {
+      results.push({ hostId: host.id, hostname: host.hostname, status: 'FAILED', sessionId: null, error: e?.message ?? String(e) });
+      continue;
+    }
 
-    // Create DB record FIRST so the scheduler can restore if we crash mid-way
-    const sessionRes = await pool.query(
-      `INSERT INTO firewall_audit_sessions
-       (host_id, status, duration_minutes, started_at, scheduled_restore_at, backup_path, log_file_path, created_by)
-       VALUES ($1, 'PENDING', $2, now(), $3, NULL, $4, $5)
-       RETURNING *`,
-      [host.id, durationMinutes, scheduledRestoreAt, logFilePath, userId]
-    );
+    // Only one learning OR policy-test session per host: checked under the host lock, across both kinds. A second
+    // session would back up the first one's log-only rules and put them back when it ends (leaving the host open).
+    let sessionRes;
+    try {
+      const busy = await activeFirewallSession(host.id);
+      if (busy) {
+        results.push({ hostId: host.id, hostname: host.hostname, status: 'FAILED', sessionId: null, error: describeActiveSession(busy) });
+        await releaseHostLock();
+        continue;
+      }
+      // Create DB record FIRST so the scheduler can restore if we crash mid-way
+      sessionRes = await pool.query(
+        `INSERT INTO firewall_audit_sessions
+         (host_id, status, duration_minutes, started_at, scheduled_restore_at, backup_path, log_file_path, created_by)
+         VALUES ($1, 'PENDING', $2, now(), $3, NULL, $4, $5)
+         RETURNING *`,
+        [host.id, durationMinutes, scheduledRestoreAt, logFilePath, userId]
+      );
+    } catch (e) {
+      await releaseHostLock();
+      throw e;
+    }
     const sessionId = sessionRes.rows[0].id;
     let cred: MaterializedSshCredential | null = null;
     let backupPath: string | null = null;

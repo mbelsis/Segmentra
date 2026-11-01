@@ -659,11 +659,13 @@ kubernetesRouter.post('/clusters/:id/network-policies/:npId/remove', requireRole
   if (!cluster) return res.status(404).json({ error: 'not_found' });
   const found = await loadPolicyRow(req.params.id, req.params.npId);
   if (!found) return res.status(404).json({ error: 'policy_not_found' });
-  const { row, isLatest } = found;
-  // Records are keyed by namespace/name on the cluster, so only the newest record owns the live object. Removing a
-  // superseded record (or one that was never applied) by name would delete its newer replacement.
-  if (!isLatest) {
-    return res.status(409).json({ error: 'superseded', message: 'A newer manifest with this name exists, so this older record does not own the live policy; remove the newer manifest instead' });
+  const { row } = found;
+  // The record that owns the live object is the one that was APPLIED last (applying a record marks every other record
+  // of the same namespace/name SUPERSEDED), confirmed below by the live object's record annotation. A newer manifest
+  // that was only GENERATED does not own anything, so it must not block removing the applied one. A superseded or
+  // never-applied record does not own the live object: removing it by name would delete its replacement.
+  if (row.status === 'SUPERSEDED') {
+    return res.status(409).json({ error: 'superseded', message: 'A newer manifest with this name was applied after this one, so this record does not own the live policy; remove the applied manifest instead' });
   }
   if (row.status !== 'APPLIED') {
     return res.status(409).json({ error: 'not_applied', message: `This manifest is ${row.status}, not applied; there is nothing of it to remove from the cluster` });
@@ -674,9 +676,23 @@ kubernetesRouter.post('/clusters/:id/network-policies/:npId/remove', requireRole
     if (live && !isManagedBySegmentra(live)) {
       return res.status(409).json({ error: 'not_managed_by_segmentra', message: `NetworkPolicy ${row.namespace}/${row.policy_name} was not created by Segmentra; refusing to delete it` });
     }
+    // The live object names the record it was applied from; objects applied before the annotation existed have none,
+    // and then the single APPLIED record for the name (this one) is the owner.
     const owner = live?.metadata?.annotations?.[RECORD_ANNOTATION];
     if (live && owner && owner !== row.id) {
       return res.status(409).json({ error: 'owned_by_other_record', message: `The live policy ${row.namespace}/${row.policy_name} was applied from another manifest record; refusing to delete it from this one` });
+    }
+    if (live && !owner) {
+      const newerApplied = await pool.query(
+        `SELECT 1 FROM k8s_network_policies n2 JOIN k8s_network_policies me ON me.id = $2
+          WHERE n2.cluster_id = $1 AND n2.namespace = me.namespace AND n2.policy_name = me.policy_name AND n2.status = 'APPLIED'
+            AND n2.id <> me.id AND COALESCE(n2.applied_at, n2.created_at) > COALESCE(me.applied_at, me.created_at)
+          LIMIT 1`,
+        [req.params.id, row.id]
+      );
+      if (newerApplied.rows[0]) {
+        return res.status(409).json({ error: 'owned_by_other_record', message: `The live policy ${row.namespace}/${row.policy_name} was applied later from another manifest record; refusing to delete it from this one` });
+      }
     }
     if (live) await deleteNetworkPolicy(conn, row.namespace, row.policy_name, { uid: live.metadata?.uid });
     await pool.query(

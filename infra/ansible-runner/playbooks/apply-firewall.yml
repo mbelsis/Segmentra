@@ -75,6 +75,47 @@
         msg: "The tool required by the policy is not installed on the host (policy file: {{ seg_policy_file }}; nft: {{ nft_detect.stdout }}, iptables-restore: {{ ipt_detect.stdout }}). Install it or change the host's firewall_backend setting."
       when: not nft_will_apply and not iptables_will_apply
 
+    # Same check as packages/executor/src/backend-conflict.ts: refuse while Segmentra rules of ANOTHER backend are
+    # still active (the host's backend was changed in the inventory). Both would be enforced, and the old default-deny
+    # would keep dropping traffic the new policy allows. Nothing has been changed on the host yet.
+    - name: Check for Segmentra rules of another firewall backend
+      become: true
+      shell: |
+        PATH="$PATH:/usr/sbin:/sbin"
+        target={{ 'nftables' if nft_will_apply else 'iptables' }}
+        found=""
+        if [ "$target" != nftables ] && command -v nft >/dev/null 2>&1 && nft list table inet segmentra >/dev/null 2>&1; then
+          found="$found nftables(table inet segmentra)"
+        fi
+        for t in iptables-save ip6tables-save; do
+          command -v "$t" >/dev/null 2>&1 || continue
+          out=$("$t" 2>/dev/null) || continue
+          if [ "$target" != iptables ] && printf '%s\n' "$out" | grep -Eq -- '^-A (INPUT|OUTPUT|FORWARD|DOCKER-USER) (.* )?-j SEGMENTRA-'; then
+            case "$found" in *"iptables($t)"*) ;; *) found="$found iptables($t)";; esac
+          fi
+          if printf '%s\n' "$out" | grep -Eq -- '^-A ufw6?-before-(input|output) -j SEGMENTRA-'; then
+            case "$found" in *ufw*) ;; *) found="$found ufw";; esac
+          fi
+        done
+        if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1 && firewall-cmd --info-policy=segmentra-in >/dev/null 2>&1; then
+          found="$found firewalld(policy segmentra-in)"
+        fi
+        if [ -n "$found" ]; then echo "segmentra-backend-conflict:$found"; exit 3; fi
+        echo "segmentra-backend-conflict: none"
+      register: backend_conflict
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if another backend's Segmentra rules are still active
+      fail:
+        msg: "Segmentra rules from another firewall backend are still active on this host ({{ backend_conflict.stdout | regex_replace('^segmentra-backend-conflict:\\s*', '') }}) while this deployment targets {{ 'nftables' if nft_will_apply else 'iptables' }}. Remove the previous backend's Segmentra rules first (Inventory -> host -> Remove previous backend rules, or POST /api/hosts/:id/firewall/remove-backend-rules), then deploy again."
+      when: backend_conflict.rc == 3
+
+    - name: Fail if the backend conflict check could not run
+      fail:
+        msg: "Could not check for Segmentra rules of another firewall backend (exit {{ backend_conflict.rc }}): {{ backend_conflict.stderr | default('') }}"
+      when: backend_conflict.rc not in [0, 3]
+
     - name: Backup nftables.conf
       when: nft_will_apply
       become: true

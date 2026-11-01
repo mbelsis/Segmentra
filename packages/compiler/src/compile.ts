@@ -1132,6 +1132,17 @@ export function compileHostPolicy(input: CompileInput): CompileOutput {
   return { backend, text, sha256: sha256(text), ip6tablesRules };
 }
 
+/**
+ * Parse a CIDR-type rule address (source or destination) exactly like the compiler does: `null` for "any"/"*"
+ * (no address match), otherwise the normalized addresses/prefixes of a single value or comma-separated list.
+ * Throws CompileError for anything the compiler would refuse. Used by the policy-test analyzer so its prediction
+ * and the enforced rules agree.
+ */
+export function parseRuleAddresses(value: string): string[] | null {
+  const addrs = parseAddrList(value, 'address');
+  return addrs ? addrs.map((a) => a.text) : null;
+}
+
 /** Exposed for callers that need to validate a single address the same way the compiler does. */
 export function normalizeCidr(value: string): string {
   return sanitizeCidr(value);

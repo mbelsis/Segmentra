@@ -27,7 +27,9 @@
     "test:unit:iot": "node --test tests/iot-helpers.test.mjs",
     "test:review-fixes": "npm run build -w @segmentra/api && node --test tests/review-fixes.test.mjs",
     "test:integration:review-fixes": "node tests/review-fixes/run.mjs",
-    "test:integration:race": "node tests/review-fixes/race.mjs"
+    "test:integration:race": "node tests/review-fixes/race.mjs",
+    "test:integration:sessions": "npm run build && node tests/review-fixes/sessions.mjs",
+    "test:integration:round3": "npm run build && node tests/review-fixes/round3.mjs"
   },
   "engines": {
     "node": ">=20"

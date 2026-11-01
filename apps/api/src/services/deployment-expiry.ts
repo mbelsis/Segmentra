@@ -71,22 +71,40 @@ async function saveOutcome(deploymentId: string, outcome: ExpiryOutcome) {
   await pool.query(`UPDATE deployments SET expiry_outcome=$2::jsonb WHERE id=$1`, [deploymentId, JSON.stringify(outcome)]);
 }
 
-/** Hosts of the deployment, with the newest later deployment that replaced its rules (if any). */
+/** When a deployment's rules reached a host (deployment_hosts row `x`, deployments row `y`). */
+const appliedAt = (x: string, y: string) => `COALESCE(${x}.finished_at, ${y}.finished_at, ${y}.created_at)`;
+
+/**
+ * Correlated subquery (needs `dh` = the expiring deployment's host row, `d` = its deployment): the newest other deployment
+ * whose rules replaced it on that host. Ordered by when the rules were APPLIED, not when the deployment was created: an
+ * older deployment that is started (scheduled, resumed, retried) after a newer one is what the host runs now.
+ *   - succeeded on the host after `dh` was applied (also when its own deployment later failed partially or expired);
+ *   - being applied right now;
+ *   - queued in an active deployment created after this one (kept from before: it will land after these rules).
+ */
+const SUPERSEDING_SQL = `
+  SELECT d2.id FROM deployment_hosts dh2
+    JOIN deployments d2 ON d2.id = dh2.deployment_id
+   WHERE dh2.host_id = dh.host_id AND dh2.deployment_id <> dh.deployment_id
+     AND (
+       (dh2.status = 'SUCCEEDED' AND ${appliedAt('dh2', 'd2')} > ${appliedAt('dh', 'd')})
+       OR (dh2.status = 'RUNNING' AND d2.status IN ('RUNNING', 'PAUSED'))
+       OR (dh2.status = 'PENDING' AND d2.status IN ('RUNNING', 'PAUSED') AND d2.created_at > d.created_at)
+     )
+   ORDER BY CASE WHEN dh2.status = 'SUCCEEDED' THEN ${appliedAt('dh2', 'd2')} ELSE now() END DESC
+   LIMIT 1`;
+
+/** Hosts of the deployment, with the newest other deployment that replaced its rules (if any). */
 async function loadHosts(dep: any): Promise<ExpiringHost[]> {
   const { rows } = await pool.query(
     `SELECT dh.host_id, dh.status, h.hostname, h.mgmt_ip, h.ssh_port, h.firewall_backend,
-            (SELECT d2.id FROM deployment_hosts dh2
-               JOIN deployments d2 ON d2.id = dh2.deployment_id
-              WHERE dh2.host_id = dh.host_id AND d2.id <> dh.deployment_id
-                AND d2.created_at > $2
-                AND d2.status IN ('SUCCEEDED', 'PARTIAL', 'RUNNING', 'PAUSED', 'EXPIRED')
-                AND dh2.status IN ('SUCCEEDED', 'RUNNING', 'PENDING')
-              ORDER BY d2.created_at DESC LIMIT 1) AS superseded_by
+            (${SUPERSEDING_SQL}) AS superseded_by
      FROM deployment_hosts dh
+     JOIN deployments d ON d.id = dh.deployment_id
      JOIN hosts h ON h.id = dh.host_id
      WHERE dh.deployment_id = $1
      ORDER BY h.hostname ASC`,
-    [dep.id, dep.created_at]
+    [dep.id]
   );
   return rows as ExpiringHost[];
 }
@@ -124,17 +142,13 @@ async function notifyExpiry(dep: any, outcome: ExpiryOutcome, extra: Record<stri
   });
 }
 
-/** Id of the newest later deployment that replaced the rules of `dep` on the host, if any. */
+/** Id of the newest other deployment that replaced the rules of `dep` on the host, if any. */
 async function findSupersedingDeployment(dep: any, hostId: string): Promise<string | null> {
   const { rows } = await pool.query(
-    `SELECT d2.id FROM deployment_hosts dh2
-       JOIN deployments d2 ON d2.id = dh2.deployment_id
-      WHERE dh2.host_id = $1 AND d2.id <> $3
-        AND d2.created_at > $2
-        AND d2.status IN ('SUCCEEDED', 'PARTIAL', 'RUNNING', 'PAUSED', 'EXPIRED')
-        AND dh2.status IN ('SUCCEEDED', 'RUNNING', 'PENDING')
-      ORDER BY d2.created_at DESC LIMIT 1`,
-    [hostId, dep.created_at, dep.id]
+    `SELECT (${SUPERSEDING_SQL}) AS id
+       FROM deployment_hosts dh JOIN deployments d ON d.id = dh.deployment_id
+      WHERE dh.deployment_id = $1 AND dh.host_id = $2`,
+    [dep.id, hostId]
   );
   return rows[0]?.id ?? null;
 }
@@ -261,19 +275,24 @@ async function handleRevert(dep: any, hosts: ExpiringHost[]): Promise<{ outcome:
   // succeeded on at least one of these hosts.
   const candidateIds = candidates.map((h) => h.host_id);
   const prevRes = await pool.query(
-    `SELECT d.id, d.policy_version_id, pv.version_number, pv.status AS version_status
+    // "Earlier" = its rules reached one of these hosts before the expiring deployment's rules did (applied time, not
+    // creation time: see SUPERSEDING_SQL).
+    `SELECT d.id, d.policy_version_id, pv.version_number, pv.status AS version_status,
+            MAX(${appliedAt('dhp', 'd')}) AS applied_at
      FROM deployments d
      JOIN policy_versions pv ON pv.id = d.policy_version_id
+     JOIN deployment_hosts dhp ON dhp.deployment_id = d.id AND dhp.status = 'SUCCEEDED' AND dhp.host_id = ANY($4::uuid[])
+     JOIN deployment_hosts dhe ON dhe.deployment_id = $2 AND dhe.host_id = dhp.host_id
+     JOIN deployments de ON de.id = dhe.deployment_id
      WHERE pv.policy_set_id = $1
        AND d.id <> $2
        AND d.policy_version_id <> $3
-       AND d.created_at < $4
        AND d.status IN ('SUCCEEDED', 'PARTIAL')
-       AND EXISTS (SELECT 1 FROM deployment_hosts dh
-                   WHERE dh.deployment_id = d.id AND dh.status = 'SUCCEEDED' AND dh.host_id = ANY($5::uuid[]))
-     ORDER BY d.created_at DESC
+       AND ${appliedAt('dhp', 'd')} < ${appliedAt('dhe', 'de')}
+     GROUP BY d.id, d.policy_version_id, pv.version_number, pv.status
+     ORDER BY applied_at DESC
      LIMIT 1`,
-    [dep.policy_set_id, dep.id, dep.policy_version_id, dep.created_at, candidateIds]
+    [dep.policy_set_id, dep.id, dep.policy_version_id, candidateIds]
   );
   const prev = prevRes.rows[0];
   if (!prev) {

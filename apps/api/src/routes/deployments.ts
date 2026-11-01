@@ -1309,12 +1309,19 @@ async function executeDeploymentStartInner(
 
         // Serialize with other firewall changes on this host (audit/test sessions, other deployments). Held until the
         // outcome is recorded, so a session restoring an older backup can tell whether this deployment succeeded.
-        const releaseHostLock = await acquireHostLock(h.id);
         let result: { success: boolean; stdout: string; stderr: string; exitCode: number; liveRulesHash?: string; skipped?: boolean; persistence?: PersistenceResult };
+        let releaseHostLock: () => Promise<void> = async () => {};
+        let lockError: string | null = null;
+        try {
+          releaseHostLock = await acquireHostLock(h.id);
+        } catch (e: any) {
+          lockError = e?.message ?? String(e);
+        }
         try {
         const policyFile = hostPolicyFiles.get(h.id)!;
         let cred: MaterializedSshCredential | null = null;
         try {
+          if (lockError) throw new Error(lockError);
           cred = await getSshCredentialForHost(h.id, bundleDir);
           const sshHost: SshHost = {
             hostname: h.hostname,

@@ -4,7 +4,10 @@ import { z } from 'zod';
 import { pool } from '../../db/pool.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 import { isValidIp } from '../../services/ip-utils.js';
-import { effectiveCredentialsForHosts } from '../../services/ssh-credentials.js';
+import { removeSegmentraPolicy } from '@segmentra/executor';
+import { createAuditEvent } from '../../services/audit.js';
+import { acquireHostLock } from '../../services/host-lock.js';
+import { effectiveCredentialsForHosts, getSshCredentialForHost, sshAuthFields, type MaterializedSshCredential } from '../../services/ssh-credentials.js';
 import { evaluateHostAgainstRules } from '../../services/tag-rule-engine.js';
 import { triggerTemplateAutoApply } from '../../services/template-engine.js';
 import { countRuleReferences } from '../../lib/rule-references.js';
@@ -831,3 +834,58 @@ hostsRouter.post('/bulk/set-enabled', requireRole('operator', 'admin'), async (r
   res.json({ ok: true, updated: rowCount });
 });
 
+
+// Remove the Segmentra rules of a firewall backend the host NO LONGER uses (after its firewall backend was changed in
+// the inventory). Deployments refuse while such rules are still active, because the old default-deny would stay
+// enforced next to the new policy (see packages/executor/src/backend-conflict.ts). Only Segmentra's own objects of that
+// backend are removed (a scoped backup is taken first, see removeSegmentraPolicy); the configured backend cannot be
+// removed here (use a policy expiry with REMOVE for that).
+const removeBackendRulesSchema = z.object({ backend: z.enum(['nftables', 'iptables', 'firewalld', 'ufw']) });
+hostsRouter.post('/:id/firewall/remove-backend-rules', requireRole('operator', 'admin'), async (req, res) => {
+  const parsed = removeBackendRulesSchema.safeParse(req.body ?? {});
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_body', message: parsed.error.message });
+  const { backend } = parsed.data;
+  const { rows } = await pool.query(`SELECT id, hostname, mgmt_ip, ssh_port, firewall_backend FROM hosts WHERE id = $1`, [req.params.id]);
+  const host = rows[0];
+  if (!host) return res.status(404).json({ error: 'not_found' });
+  if (!host.mgmt_ip) return res.status(400).json({ error: 'no_mgmt_ip', message: 'The host has no management IP' });
+  if (host.firewall_backend === backend) {
+    return res.status(409).json({
+      error: 'current_backend',
+      message: `${backend} is the host's configured firewall backend; this action only removes the rules of a backend the host no longer uses.`
+    });
+  }
+
+  const release = await acquireHostLock(host.id);
+  let cred: MaterializedSshCredential | null = null;
+  try {
+    cred = await getSshCredentialForHost(host.id);
+    const r = await removeSegmentraPolicy({
+      hostname: host.hostname,
+      ip: String(host.mgmt_ip).split('/')[0],
+      port: Number(host.ssh_port) || 22,
+      ...sshAuthFields(cred),
+      backend
+    });
+    await createAuditEvent({
+      actorUserId: req.auth!.userId ?? null,
+      action: r.success ? 'HOST_BACKEND_RULES_REMOVED' : 'HOST_BACKEND_RULES_REMOVE_FAILED',
+      entityType: 'host',
+      entityId: host.id,
+      ipAddress: req.ip,
+      metadata: { hostname: host.hostname, removedBackend: backend, configuredBackend: host.firewall_backend, exitCode: r.exitCode }
+    });
+    if (!r.success) {
+      const lastErr = String(r.stderr || '').trim().split('\n').filter(Boolean).pop() ?? '';
+      return res.status(502).json({ error: 'remove_failed', message: `Removing the ${backend} Segmentra rules failed (exit ${r.exitCode})${lastErr ? `: ${lastErr}` : ''}` });
+    }
+    res.json({ ok: true, removedBackend: backend, persistence: r.persistence ?? null, message: `Segmentra's ${backend} rules were removed from ${host.hostname}` });
+  } catch (e: any) {
+    const msg = e?.message ?? String(e);
+    if (msg === 'missing_ssh_credential') return res.status(400).json({ error: 'missing_ssh_credential', message: 'SSH credentials are required. Configure them in Admin → SSH Credentials.' });
+    res.status(500).json({ error: 'remove_failed', message: msg });
+  } finally {
+    cred?.cleanup();
+    await release();
+  }
+});

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import type { FirewallBackend } from './types.js';
 import { isManagedBackend, managerCommand } from './manager-scripts.js';
+import { BACKEND_CONFLICT_EXIT, backendConflictCheckScript, backendConflictMessage } from './backend-conflict.js';
 import fs from 'node:fs';
 import { promisify } from 'node:util';
 import { hashLiveRuleset, liveRulesReadScript } from './read-rules.js';
@@ -228,6 +229,19 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
     stdout += `Backend: ${host.backend} (${requiredTool} ${detectResult.stdout.trim()})\n`;
     if (detectResult.stdout.trim() !== 'present') {
       return fail(1, `Error: ${requiredTool} is not installed on the host, but the policy targets ${host.backend}`);
+    }
+
+    // Step 2b: Refuse while another backend's Segmentra rules are still active (the inventory backend was changed):
+    // the old default-deny would stay enforced next to the new policy. Nothing on the host has changed yet.
+    if (ext === 'nft' || ext === 'iptables') {
+      const conflict = await sudo(backendConflictCheckScript(ext === 'nft' ? 'nftables' : 'iptables'));
+      add(conflict);
+      if (conflict.exitCode === BACKEND_CONFLICT_EXIT) {
+        return fail(conflict.exitCode, `Error: ${backendConflictMessage(host.backend, conflict.stdout)}`);
+      }
+      if (conflict.exitCode !== 0) {
+        return fail(conflict.exitCode, `Error: could not check for Segmentra rules of another firewall backend (exit ${conflict.exitCode})`);
+      }
     }
 
     // Step 3: Back up Segmentra's own state (as root). The deploy is aborted if this fails.

@@ -10,13 +10,14 @@ import { analyzePolicyTest } from '../services/policy-test-analyzer.js';
 import { compileHostPolicy, type RuleDirection } from '@segmentra/compiler';
 import { addDestinationSets, compilerDestination, getProtectedDestinations } from '../services/forward-rules.js';
 import { getDockerCompileInput } from '../services/swarm.js';
-import { acquireHostLock } from '../services/host-lock.js';
+import { acquireHostLock, activeFirewallSession } from '../services/host-lock.js';
 import { startAuditSession, deployLogOnlyPolicy, restoreAuditSession, retrieveAuditLogs } from '@segmentra/executor';
 import { parseFirewallLogs, groupCommunicationFlows } from '../services/log-parser.js';
 import { getSshCredentialForHost, type MaterializedSshCredential } from '../services/ssh-credentials.js';
 import { createAuditEvent } from '../services/audit.js';
 import {
   ACTIVE_TEST_SESSION_STATUSES,
+  recoverInterruptedTestSession,
   buildAuditHost,
   markRestoreFailed,
   restoreAndCollectSession
@@ -136,6 +137,17 @@ policyTestingRouter.post('/start', requireRole('operator', 'approver', 'admin'),
         error: 'test_already_running',
         message: `Another policy test (${active.rows[0].id}, ${active.rows[0].status}) is already active on ${host.hostname}. Stop it before starting a new one.`,
         sessionId: active.rows[0].id
+      });
+    }
+    // A firewall learning session also owns the host's firewall: the test would back up its log-only rules and put
+    // them back when it ends, leaving the host without its policy.
+    const learning = await activeFirewallSession(b.hostId, client);
+    if (learning) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'learning_session_active',
+        message: `A firewall learning session (${learning.id}, ${learning.status}) is active on ${host.hostname}. Restore it before starting a policy test.`,
+        sessionId: learning.id
       });
     }
     const { rows: sessionRows } = await client.query(
@@ -363,6 +375,36 @@ policyTestingRouter.post('/start', requireRole('operator', 'approver', 'admin'),
 
 // Stop a running test — SSH into host, restore original rules, retrieve logs
 policyTestingRouter.post('/sessions/:id/stop', requireRole('operator', 'approver', 'admin'), async (req, res) => {
+  // A test still DEPLOYING: either its start is running right now (it holds the host lock), or the API stopped in the
+  // middle of it and the host may be in log-only mode. Recover the latter right away instead of answering 404.
+  const pending = await pool.query(`SELECT id, status FROM policy_test_sessions WHERE id = $1 AND status IN ('PENDING', 'DEPLOYING')`, [req.params.id]);
+  if (pending.rows[0]) {
+    const rec = await recoverInterruptedTestSession(req.params.id, 'stopped while the start was interrupted');
+    if (rec.outcome === 'busy') {
+      return res.status(409).json({ error: 'test_starting', message: 'The test is still being started on the host. Try again when it is RUNNING.' });
+    }
+    if (rec.outcome !== 'not_interrupted') {
+      await createAuditEvent({
+        actorUserId: req.auth!.userId ?? null,
+        action: rec.outcome === 'restore_failed' ? 'POLICY_TEST_RESTORE_FAILED' : 'POLICY_TEST_STOP',
+        entityType: 'policy_test_session',
+        entityId: req.params.id,
+        ipAddress: req.ip,
+        metadata: { interruptedStart: true, outcome: rec.outcome, ...(rec.outcome === 'restore_failed' ? { error: rec.error } : {}) }
+      });
+      if (rec.outcome === 'restore_failed') {
+        return res.status(502).json({ error: 'restore_failed', message: `${rec.error}. The restore will be retried automatically.` });
+      }
+      return res.json({
+        session: { id: req.params.id, status: 'FAILED' },
+        message: rec.outcome === 'restored'
+          ? 'This test was interrupted while starting; the original rules were restored from its backup.'
+          : 'This test was interrupted before the host was changed; it is marked FAILED.',
+        flowCount: 0,
+        entryCount: 0
+      });
+    }
+  }
   const { rows: sessions } = await pool.query(
     `SELECT pts.*, h.hostname, h.mgmt_ip, h.ssh_port, h.firewall_backend
      FROM policy_test_sessions pts

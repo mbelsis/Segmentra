@@ -429,6 +429,12 @@ export const api = {
     }
   },
 
+  // Remove Segmentra's rules of a firewall backend the host no longer uses (after its backend was changed)
+  removeHostBackendRules: (hostId: string, backend: 'nftables' | 'iptables' | 'firewalld' | 'ufw') =>
+    request<{ ok: boolean; removedBackend: string; message: string }>(`/hosts/${hostId}/firewall/remove-backend-rules`, {
+      method: 'POST',
+      body: JSON.stringify({ backend })
+    }),
   // Live firewall rules as currently enforced on the host (read over SSH; operator/admin)
   hostLiveRules: (hostId: string) => request<{
     hostId: string;

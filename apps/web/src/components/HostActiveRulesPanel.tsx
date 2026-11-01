@@ -186,6 +186,25 @@ export function HostActiveRulesPanel({ hostId, hostname, canOperate, onClose }: 
     }
   }
 
+  // Previous firewall backend: after the host's backend was changed in the inventory, the old backend's Segmentra
+  // rules stay active until removed (deployments refuse while they are there).
+  const [oldBackend, setOldBackend] = useState<'nftables' | 'iptables' | 'firewalld' | 'ufw'>('nftables');
+  const [oldBackendBusy, setOldBackendBusy] = useState(false);
+  const [oldBackendResult, setOldBackendResult] = useState<{ ok: boolean; text: string } | null>(null);
+  async function removeOldBackend() {
+    if (!window.confirm(`Remove Segmentra's ${oldBackend} rules from ${hostname}? Only do this if the host now uses a different firewall backend; a backup is taken first.`)) return;
+    setOldBackendBusy(true);
+    setOldBackendResult(null);
+    try {
+      const r = await api.removeHostBackendRules(hostId, oldBackend);
+      setOldBackendResult({ ok: true, text: r.message });
+    } catch (e: any) {
+      setOldBackendResult({ ok: false, text: e?.body?.message || e?.message || 'Removal failed' });
+    } finally {
+      setOldBackendBusy(false);
+    }
+  }
+
   async function fetchExpected() {
     if (!current) return;
     setExpectedBusy(true);
@@ -362,6 +381,28 @@ export function HostActiveRulesPanel({ hostId, hostname, canOperate, onClose }: 
                   <p className="active-rules-muted">Reading the live ruleset needs the operator or admin role.</p>
                 )}
               </section>
+
+              {canOperate && (
+                <section className="active-rules-section">
+                  <h3>Previous firewall backend</h3>
+                  <p className="active-rules-muted">
+                    Changed this host's firewall backend? The old backend's Segmentra rules stay active (and keep their default-deny)
+                    until they are removed; deployments are refused until then.
+                  </p>
+                  <div className="active-rules-actions">
+                    <select value={oldBackend} onChange={(e) => setOldBackend(e.target.value as typeof oldBackend)} disabled={oldBackendBusy}>
+                      <option value="nftables">nftables</option>
+                      <option value="iptables">iptables</option>
+                      <option value="ufw">ufw</option>
+                      <option value="firewalld">firewalld</option>
+                    </select>
+                    <button className="btn-small btn-danger" onClick={removeOldBackend} disabled={oldBackendBusy}>
+                      {oldBackendBusy ? 'Removing...' : 'Remove previous backend rules'}
+                    </button>
+                  </div>
+                  {oldBackendResult && <p className={oldBackendResult.ok ? 'active-rules-muted' : 'error'}>{oldBackendResult.text}</p>}
+                </section>
+              )}
 
               <section className="active-rules-section">
                 <h3>
