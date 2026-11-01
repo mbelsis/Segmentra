@@ -61,7 +61,7 @@ await api('PUT', '/admin/executor-setting', { token: admin, body: { executor: 's
 try {
   const hosts = [];
   for (const n of nodes) {
-    const h = (await api('POST', '/hosts', { token: op, body: { hostname: n.name, mgmtIp: '127.0.0.1', sshPort: n.port, firewallBackend: 'iptables', enabled: true } })).host;
+    const h = (await api('POST', '/hosts', { token: admin, /* SSH target is admin-only */ body: { hostname: n.name, mgmtIp: '127.0.0.1', sshPort: n.port, firewallBackend: 'iptables', enabled: true } })).host;
     await api('POST', '/ssh-credentials', { token: admin, body: { name: `lab-${n.name}`, username: 'segmentra', authMethod: 'PASSWORD', password: 'segmentra123!', scopeType: 'HOST', scopeId: h.id } });
     hosts.push({ ...n, id: h.id });
   }

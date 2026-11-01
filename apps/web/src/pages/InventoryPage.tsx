@@ -595,18 +595,28 @@ export function InventoryPage() {
   async function handleBulkComplianceCheck() {
     if (selectedHostIds.size === 0) return;
     const hostIds = Array.from(selectedHostIds);
-    setCheckingCompliance(new Set(hostIds));
+    setCheckingCompliance(prev => {
+      const next = new Set(prev);
+      for (const id of hostIds) next.add(id);
+      return next;
+    });
     try {
       const result = await api.bulkCheckCompliance(hostIds);
-      const newStatuses = new Map(complianceStatuses);
-      for (const r of result.results) {
-        newStatuses.set(r.hostId, r);
-      }
-      setComplianceStatuses(newStatuses);
+      // Merge into the latest state so concurrent single-host checks are kept.
+      setComplianceStatuses(prev => {
+        const next = new Map(prev);
+        for (const r of result.results) next.set(r.hostId, r);
+        return next;
+      });
     } catch (e: any) {
       setError(`Bulk compliance check failed: ${e.message}`);
     } finally {
-      setCheckingCompliance(new Set());
+      // Only clear the hosts this bulk run marked as checking.
+      setCheckingCompliance(prev => {
+        const next = new Set(prev);
+        for (const id of hostIds) next.delete(id);
+        return next;
+      });
     }
   }
 
@@ -792,11 +802,12 @@ export function InventoryPage() {
               </div>
               <div className="form-group">
                 <label>Management IP</label>
-                <input type="text" value={mgmtIp} onChange={(e) => setMgmtIp(e.target.value)} placeholder="e.g., 10.0.0.100" />
+                <input type="text" value={mgmtIp} onChange={(e) => setMgmtIp(e.target.value)} placeholder="e.g., 10.0.0.100" disabled={!isAdmin} />
+                {!isAdmin && <small>Only admins can set or change the SSH address and port.</small>}
               </div>
               <div className="form-group">
                 <label>SSH Port</label>
-                <input type="number" value={hostSshPort} onChange={(e) => setHostSshPort(e.target.value)} placeholder="22" min="1" max="65535" />
+                <input type="number" value={hostSshPort} onChange={(e) => setHostSshPort(e.target.value)} placeholder="22" min="1" max="65535" disabled={!isAdmin} />
                 <small>SSH port for deployments (default: 22)</small>
               </div>
               <div className="form-group">

@@ -1,5 +1,5 @@
 import { pool } from '../db/pool.js';
-import { hostIpOnly, isValidCidr } from './ip-utils.js';
+import { isValidCidr, normalizeDestinationAddress, parseCidr } from './ip-utils.js';
 
 /**
  * FORWARD rules (traffic routed THROUGH a host, e.g. an IoT/OT gateway) and the devices a
@@ -9,7 +9,8 @@ import { hostIpOnly, isValidCidr } from './ip-utils.js';
  * Destination semantics:
  *  - CIDR:      the rule's destination_value (IP/CIDR)
  *  - HOST:      the host's mgmt_ip
- *  - IOT_ASSET: the IoT asset's ip_address
+ *  - IOT_ASSET: the IoT asset's ip_address (an IP or a CIDR; a CIDR is kept, like the protected
+ *               destinations of getProtectedDestinations)
  *  - TAG:       mgmt_ip of every enabled host carrying the tag + ip_address of every enabled
  *               IoT asset carrying the tag
  *  - VLAN:      the VLAN subnet when set, otherwise the enabled hosts and IoT assets in the VLAN
@@ -24,13 +25,27 @@ export function destinationSetName(destinationType: string, destinationValue: st
   return `dst_${t}_${String(destinationValue).replace(/-/g, '')}`;
 }
 
+/**
+ * Valid, de-duplicated addresses in a deterministic order (family, network, prefix), so the compiled
+ * set elements and the artifact hash do not depend on the order PostgreSQL returns rows in.
+ * CIDRs are kept (an IoT asset stored as 192.168.10.0/24 means the whole network); only a full-length
+ * host prefix (/32, /128 as pg returns inet values) is dropped.
+ */
 function cleanIps(values: unknown[]): string[] {
   const out: string[] = [];
   for (const v of values) {
-    const ip = hostIpOnly(v);
-    if (ip && isValidCidr(ip) && !out.includes(ip)) out.push(ip);
+    const ip = normalizeDestinationAddress(v);
+    if (ip && !out.includes(ip)) out.push(ip);
   }
-  return out;
+  const key = (s: string) => parseCidr(s)!;
+  return out.sort((a, b) => {
+    const x = key(a);
+    const y = key(b);
+    if (x.family !== y.family) return x.family - y.family;
+    if (x.network !== y.network) return x.network < y.network ? -1 : 1;
+    if (x.prefix !== y.prefix) return x.prefix - y.prefix;
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
 }
 
 /** Resolve a FORWARD rule destination to concrete IPs/CIDRs (empty = matches nothing). */

@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 
 import { api } from '../lib/api';
-import { clearToken } from '../lib/auth';
 import { useAuth, hasRole } from '../lib/auth-context';
 
 const sectionLabel = (text: string) => (
@@ -60,7 +59,7 @@ export function AppShell() {
 
         {sectionLabel('Infrastructure')}
         <NavLink to="/inventory">Inventory</NavLink>
-        {isOperator && <NavLink to="/topology">Topology</NavLink>}
+        {isViewer && <NavLink to="/topology">Topology</NavLink>}
         <NavLink to="/kubernetes">Kubernetes</NavLink>
         <NavLink to="/swarm">Docker Swarm</NavLink>
         <NavLink to="/iot">OT/IoT</NavLink>
@@ -98,7 +97,8 @@ export function AppShell() {
           <div style={{ marginBottom: 12 }}>
             <button
               onClick={() => {
-                clearToken();
+                // api.logout clears the token synchronously before the (best effort) API call.
+                void api.logout();
                 navigate('/login');
               }}
             >

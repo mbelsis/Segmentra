@@ -62,7 +62,7 @@ function App() {
           <Route path="policy-templates" element={<PolicyTemplatesPage />} />
 
           {/* Operator + Admin only */}
-          <Route path="topology" element={<RequireRole roles={['operator', 'admin']}><TopologyPage /></RequireRole>} />
+          <Route path="topology" element={<TopologyPage />} />
           <Route path="policy-testing" element={<RequireRole roles={['operator', 'approver', 'admin']}><PolicyTestPage /></RequireRole>} />
 
           {/* Approver + Admin only */}

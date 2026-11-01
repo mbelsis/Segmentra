@@ -39,7 +39,7 @@ async function main() {
 
   // ---- fixture: a host with an approved version carrying one rule, and a "successful" deployment of it ----
   const ip = `198.51.100.${1 + (parseInt(suffix.slice(-3), 36) % 250)}`;
-  const host = (await api('POST', '/hosts', { token: op, body: { hostname: `rf-host-${suffix}`, mgmtIp: ip, sshPort: 22, firewallBackend: 'iptables', enabled: true } })).host;
+  const host = (await api('POST', '/hosts', { token: admin, /* SSH target is admin-only */ body: { hostname: `rf-host-${suffix}`, mgmtIp: ip, sshPort: 22, firewallBackend: 'iptables', enabled: true } })).host;
   const ps = (await api('POST', '/policy-sets', { token: op, body: { name: `rf-pol-${suffix}`, scopeType: 'HOST_LIST', hostIds: [host.id] } })).policySet;
   const v = (await api('POST', `/policy-sets/${ps.id}/versions`, { token: op, body: { changeSummary: 'review fixes', interfaceScopeType: 'ALL_INTERFACES' } })).version;
   await api('POST', `/policy-versions/${v.id}/rules`, { token: op, body: { orderIndex: 10, direction: 'IN', action: 'ALLOW', protocol: 'tcp', ports: '8443', sourceType: 'CIDR', sourceValue: '10.9.0.0/16', logMode: 'NONE', usePolicyInterfaceScope: true, comment: 'rf' } });

@@ -289,7 +289,7 @@ Routers are mounted in `apps/api/src/index.ts` (inventory and policy sub-routers
 - `POST /deployments/:deploymentId/stop` (alias `/cancel`) — `SCHEDULED`/`QUEUED`/`RUNNING`/`PAUSED` → `CANCELLED`; unfinished hosts are marked `SKIPPED` (a host mid-deploy records its real result)
 - `POST /deployments/:deploymentId/retry-failed` — for `FAILED`/`PARTIAL` deployments: resets failed hosts (and hosts skipped by a halted canary/progressive rollout) to `PENDING` and sets the deployment back to `QUEUED`; start it again with `/start`
 
-Host deployments that stay `RUNNING` for more than 10 minutes are marked `FAILED` ("Deployment timeout: Host did not respond within 10 minutes"). The check runs every 2 minutes and when deployments or deployment hosts are fetched.
+Host deployments that stay `RUNNING` (counted from when the host lock was acquired) for longer than the stale-host timeout (default 60 minutes or more, derived from `SEGMENTRA_SSH_COMMAND_TIMEOUT_MS` and the Ansible timeout; override with `SEGMENTRA_HOST_DEPLOYMENT_TIMEOUT_MS`) are marked `FAILED` ("Deployment timeout: Host did not respond within N minutes"). Deployments still executing in this process are skipped, and deployments left `RUNNING` by a previous process are failed and finalized at startup (`recoverInterruptedDeployments`). The check runs every 2 minutes and when deployments or deployment hosts are fetched.
 
 ### Dashboard (any authenticated user)
 
@@ -1566,7 +1566,7 @@ Structured pre-enforcement testing that validates a policy against real traffic 
 Swarm nodes are managed as ordinary hosts over SSH; there is no Docker API integration. Host columns `swarm_cluster`, `swarm_role`, `swarm_addr`, `swarm_encrypted_overlay` and `docker_published_ports` (migration 036) feed the compiler through `apps/api/src/services/swarm.ts` (`getDockerCompileInput`), which every `compileHostPolicy` call site spreads into its input: the peers are the other enabled hosts with the same swarm name, addressed by `swarm_addr` or the management IP.
 
 - The compiler puts the Swarm cluster ports (2377/tcp on managers, 7946/tcp+udp, 4789/udp, optionally ESP) into the baseline of the input chain (`SEGMENTRA-IN`, or the nftables `input` chain), ahead of the policy rules.
-- With `docker_published_ports` the forward chain (`SEGMENTRA-FWD`, or the nftables `forward` chain) gets the inbound rules again, matched on `conntrack --ctstate DNAT --ctorigdstport` (nft: `ct status dnat`, `ct original proto-dst`), then an exemption for Docker's own bridges and a default verdict. Docker publishes ports with NAT, so that traffic is forwarded and never reaches `INPUT`.
+- With `docker_published_ports` the forward chain (`SEGMENTRA-FWD`, or the nftables `forward` chain) gets the inbound rules again, matched on `conntrack --ctstate DNAT --ctorigdstport` (nft: `ct status dnat`, `ct original proto-dst`), then an exemption for Docker's own bridges and a default verdict. All of these only match packets leaving through a Docker bridge (`docker0`, `docker_gwbridge`, `br-*`; nft: a `published_ports` chain jumped to per bridge), so other DNAT traffic on the host (gateway port forwards, libvirt) is left to the FORWARD rules. Docker publishes ports with NAT, so that traffic is forwarded and never reaches `INPUT`.
 - The iptables script keeps a second jump `DOCKER-USER -> SEGMENTRA-FWD` (only when the fragment carries `segmentra:published_default`), because Docker re-inserts its own `DOCKER-USER` / `DOCKER-INGRESS` jumps at the top of `FORWARD` whenever a service publishes a port. Apply, remove, backup/restore and persistence (the saved file declares `DOCKER-USER`, since `iptables-restore` runs before Docker adopts it) manage that jump, and drift detection reports a missing jump as "not present".
 - firewalld hosts reject both settings and UFW hosts reject published-port enforcement at compile time.
 
@@ -2113,7 +2113,7 @@ Rules other tools add outside Segmentra's table/chains do not cause drift.
 ### Deployment Issues
 
 #### Host Timeout
-**Symptom**: Hosts show `FAILED` status with message "Deployment timeout: Host did not respond within 10 minutes"
+**Symptom**: Hosts show `FAILED` status with message "Deployment timeout: Host did not respond within N minutes"
 
 **Causes**:
 - Network connectivity issues
@@ -2288,7 +2288,7 @@ Started in `apps/api/src/index.ts` when the API begins listening (all in-process
 
 | Job | Interval | What it does |
 |-----|----------|--------------|
-| Stale host timeout | 2 min | Marks hosts `RUNNING` for more than 10 minutes as `FAILED` and finalizes their deployments (`checkAndTimeoutStaleHosts`) |
+| Stale host timeout | 2 min | Marks hosts `RUNNING` longer than the stale-host timeout (default ≥ 60 min, `SEGMENTRA_HOST_DEPLOYMENT_TIMEOUT_MS`) as `FAILED` and finalizes their deployments (`checkAndTimeoutStaleHosts`) |
 | Scheduled deployments | 1 min | Starts due `SCHEDULED`/`QUEUED` deployments with `scheduled_at <= now()` that need no (or have) approval (`processScheduledDeployments`) |
 | Firewall Learning sessions | 1 min | Restores hosts and collects/parses logs of expired learning sessions (`services/audit-scheduler.ts`) |
 | Tag rules | 5 min | Re-evaluates all enabled auto-tagging rules (`services/tag-rule-engine.ts`) |
@@ -2411,7 +2411,7 @@ Segmentra encrypts sensitive data stored in the database: SSH private keys, key 
 - `CANARY` / `PROGRESSIVE` rollout gates only apply to the SSH Direct executor; the Ansible executor deploys all target hosts in one playbook run.
 - Baseline management SSH access comes from the subnet of the VLAN in `system_settings.management_vlan_id` (`/admin/management-vlan-setting`). If no management VLAN is configured, the SSH port is allowed from any source so hosts cannot be locked out.
 - SSH Direct runs sequentially (one host at a time); Ansible runs hosts in parallel.
-- Deployment timeout is fixed at 10 minutes per host.
+- The stale-host timeout is global (`SEGMENTRA_HOST_DEPLOYMENT_TIMEOUT_MS`), not per host or per deployment.
 - No rollback button: rollback happens automatically on failure (and via the lockout auto-revert with SSH Direct); `scripts/restore-previous-policy.sh` restores a host manually.
 - Firewall backend `auto` is detected over privileged SSH before compilation; active native managers take precedence. Detection failure fails the host instead of guessing. The detected backend is stored on the host.
 - Drift detection requires SSH access and sudo. Hosts without an applicable SSH credential cannot be checked.

@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -7,11 +8,12 @@ import { Router } from 'express';
 import { z } from 'zod';
 
 import { compileHostPolicy, firewallBackend, type FirewallBackend, type RuleDirection } from '@segmentra/compiler';
-import { SEGMENTRA_MANAGER_PY } from '@segmentra/executor';
+import { DEFAULT_ANSIBLE_TIMEOUT_MS, SEGMENTRA_MANAGER_PY } from '@segmentra/executor';
 import { parseAnsibleRecap, runAnsiblePlaybook, runSshDeployment, checkHostReadiness, checkHostPersistence, checkPrivateKey, persistenceSummary, readHostFirewallRules, type AnsibleAgentKey, type PersistenceResult, type SshHost, type SshHostInfo } from '@segmentra/executor';
 
 import { pool } from '../db/pool.js';
 import { env } from '../lib/env.js';
+import { clampPagination, countHostStatuses, finalDeploymentStatus, hostDeploymentTimeoutMs, isSafeAnsibleUsername, type FinalDeploymentStatus, type HostStatusCounts } from '../lib/deployment-status.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { addDestinationSets, compilerDestination, getProtectedDestinations } from '../services/forward-rules.js';
 import { getDockerCompileInput } from '../services/swarm.js';
@@ -25,8 +27,8 @@ import { notifyDeploymentEvent } from '../services/notifications.js';
 export const deploymentsRouter = Router();
 deploymentsRouter.use(requireAuth);
 
-// Host deployment timeout: 10 minutes (600000 ms)
-const HOST_DEPLOYMENT_TIMEOUT_MS = 10 * 60 * 1000;
+// Stale host timeout (default >= 60 min, env SEGMENTRA_HOST_DEPLOYMENT_TIMEOUT_MS); see hostDeploymentTimeoutMs.
+const HOST_DEPLOYMENT_TIMEOUT_MS = hostDeploymentTimeoutMs(process.env, DEFAULT_ANSIBLE_TIMEOUT_MS);
 
 /** Policy version statuses that may be deployed. */
 const DEPLOYABLE_VERSION_STATUSES = ['APPROVED', 'DEPLOYED'];
@@ -91,6 +93,9 @@ async function failDeployment(deploymentId: string, message: string) {
     [deploymentId, truncateMessage(message)]
   );
   if (upd.rows[0]) notifyDeploymentEvent('DEPLOYMENT_FAILED', deploymentId, { error: truncateMessage(message) });
+  // An automatic expiry REVERT that failed to start (e.g. host lock timeout) must not leave the expired deployment's
+  // hosts REVERT_QUEUED forever.
+  if (upd.rows[0]) await recordRevertOutcome(deploymentId);
 }
 
 /**
@@ -162,169 +167,181 @@ async function recordPersistence(deploymentId: string, host: any, backend?: Fire
   }
 }
 
+/** Names of a deployment's targets, for audit metadata. */
+async function resolveTargetNames(targetQuery: any): Promise<{ tags: string[]; vlans: string[]; hosts: string[]; targetType: string }> {
+  const tq = targetQuery || {};
+  const names: { tags: string[]; vlans: string[]; hosts: string[] } = { tags: [], vlans: [], hosts: [] };
+  if (Array.isArray(tq.tags) && tq.tags.length > 0) {
+    const r = await pool.query(`SELECT name FROM tags WHERE id = ANY($1::uuid[])`, [tq.tags]);
+    names.tags = r.rows.map((x: any) => x.name);
+  }
+  if (Array.isArray(tq.vlans) && tq.vlans.length > 0) {
+    const r = await pool.query(`SELECT name FROM vlans WHERE id = ANY($1::uuid[])`, [tq.vlans]);
+    names.vlans = r.rows.map((x: any) => x.name);
+  }
+  if (Array.isArray(tq.hosts) && tq.hosts.length > 0) {
+    const r = await pool.query(`SELECT hostname FROM hosts WHERE id = ANY($1::uuid[])`, [tq.hosts]);
+    names.hosts = r.rows.map((x: any) => x.hostname);
+  }
+  const types: string[] = [];
+  if (names.tags.length > 0) types.push('Tags');
+  if (names.vlans.length > 0) types.push('VLANs');
+  if (names.hosts.length > 0) types.push('Hosts');
+  return { ...names, targetType: types.join(', ') || 'Unknown' };
+}
+
 /**
- * Check for and timeout stale host deployments that have been RUNNING for too long
- * This function is exported so it can be called from the main index.ts for periodic checks
+ * Finalize a deployment once none of its hosts is PENDING/RUNNING/PAUSED. Shared by the executor, the stale-host
+ * timeout and restart recovery so they all compute the status the same way (finalDeploymentStatus). The status update
+ * is conditional on `fromStatuses` (never overwrites CANCELLED/PAUSED/EXPIRED); only the caller that actually moved
+ * the deployment records the audit event, notification and revert outcome.
+ */
+async function finalizeDeployment(
+  deploymentId: string,
+  opts: { fromStatuses: string[]; completedVia?: string; ipAddress?: string }
+): Promise<{ finalized: boolean; status: FinalDeploymentStatus | null; counts: HostStatusCounts }> {
+  const hostStatusRes = await pool.query(
+    `SELECT status, COUNT(*) AS count FROM deployment_hosts WHERE deployment_id=$1 GROUP BY status`,
+    [deploymentId]
+  );
+  const counts = countHostStatuses(hostStatusRes.rows);
+  const status = finalDeploymentStatus(counts);
+  if (!status) return { finalized: false, status: null, counts };
+
+  const upd = await pool.query(
+    `UPDATE deployments SET status=$2, finished_at=now()
+     WHERE id=$1 AND status = ANY($3::text[])
+     RETURNING id`,
+    [deploymentId, status, opts.fromStatuses]
+  );
+  if (!upd.rows[0]) return { finalized: false, status, counts };
+  if (status === 'SUCCEEDED') await markVersionDeployed(pool, deploymentId);
+
+  try {
+    const depRes = await pool.query(
+      `SELECT d.*, ps.name as policy_set_name, pv.version_number, u.id as user_id
+       FROM deployments d
+       LEFT JOIN policy_versions pv ON d.policy_version_id = pv.id
+       LEFT JOIN policy_sets ps ON pv.policy_set_id = ps.id
+       LEFT JOIN users u ON d.created_by = u.id
+       WHERE d.id=$1`,
+      [deploymentId]
+    );
+    const dep = depRes.rows[0];
+    if (dep) {
+      const t = await resolveTargetNames(dep.target_query);
+      await createAuditEvent({
+        actorUserId: dep.user_id || null,
+        action: 'DEPLOYMENT_FINISHED',
+        entityType: 'DEPLOYMENT',
+        entityId: deploymentId,
+        ipAddress: opts.ipAddress,
+        metadata: {
+          policySetName: dep.policy_set_name || 'Unknown',
+          policyVersionNumber: dep.version_number || null,
+          deploymentMode: dep.mode,
+          targetType: t.targetType,
+          targetTags: t.tags,
+          targetVlans: t.vlans,
+          targetHosts: t.hosts,
+          result: status,
+          createdAt: dep.created_at,
+          startedAt: dep.started_at,
+          finishedAt: new Date().toISOString(),
+          hostCounts: { total: counts.total, succeeded: counts.succeeded, failed: counts.failed, skipped: counts.skipped },
+          ...(opts.completedVia ? { completedVia: opts.completedVia } : {})
+        }
+      });
+    }
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error(`[deployments] could not record the finish of deployment ${deploymentId}:`, (e as Error)?.message ?? e);
+  }
+  notifyDeploymentEvent(status === 'SUCCEEDED' ? 'DEPLOYMENT_COMPLETED' : 'DEPLOYMENT_FAILED', deploymentId, opts.completedVia ? { completedVia: opts.completedVia } : undefined);
+  await recordRevertOutcome(deploymentId);
+  return { finalized: true, status, counts };
+}
+
+/**
+ * Check for and timeout stale host deployments that have been RUNNING for too long.
+ * Exported so index.ts can call it periodically. A host's clock (started_at) starts once its host lock is held, and
+ * hosts of a deployment that this process is still executing are never failed here: the executor records their real
+ * outcome. So this only catches hosts left behind by another (crashed) process.
  */
 export async function checkAndTimeoutStaleHosts() {
-  const client = await pool.connect();
-  try {
-  await client.query('BEGIN');
   const timeoutThreshold = new Date(Date.now() - HOST_DEPLOYMENT_TIMEOUT_MS);
+  const minutes = Math.round(HOST_DEPLOYMENT_TIMEOUT_MS / 60000);
 
-  // Find hosts that have been RUNNING for longer than the timeout (with row lock)
-  const staleHosts = await client.query(
+  const staleHosts = await pool.query(
     `UPDATE deployment_hosts
-     SET status='FAILED', finished_at=now(), message='Deployment timeout: Host did not respond within 10 minutes'
+     SET status='FAILED', finished_at=now(), message=$3
      WHERE status='RUNNING'
-     AND started_at IS NOT NULL
-     AND started_at < $1
+       AND started_at IS NOT NULL
+       AND started_at < $1
+       AND NOT (deployment_id = ANY($2::uuid[]))
      RETURNING deployment_id, host_id`,
-    [timeoutThreshold]
+    [timeoutThreshold, [...activeExecutions], `Deployment timeout: Host did not respond within ${minutes} minutes`]
   );
 
-  const finishedViaTimeout: Array<{ id: string; status: string }> = [];
-  if (staleHosts.rows.length > 0) {
-    // Check if any deployments need to be updated to PARTIAL or FAILED
-    const deploymentIds = [...new Set(staleHosts.rows.map((r: any) => r.deployment_id))];
-    
-    for (const deploymentId of deploymentIds) {
-      // Check deployment status
-      const depRes = await client.query(
-        `SELECT status FROM deployments WHERE id=$1`,
-        [deploymentId]
-      );
-
-      if (depRes.rows[0]?.status === 'RUNNING') {
-        // Check if all hosts are done (SUCCEEDED, FAILED, or SKIPPED)
-        const hostStatusRes = await client.query(
-          `SELECT status, COUNT(*) as count
-           FROM deployment_hosts
-           WHERE deployment_id=$1
-           GROUP BY status`,
-          [deploymentId]
-        );
-        
-        const statusCounts: Record<string, number> = {};
-        for (const row of hostStatusRes.rows) {
-          statusCounts[row.status] = parseInt(row.count, 10);
-        }
-        
-        const runningCount = statusCounts['RUNNING'] || 0;
-        const pendingCount = statusCounts['PENDING'] || 0;
-        const pausedCount = statusCounts['PAUSED'] || 0;
-        
-        // If no hosts are still running/pending/paused, mark deployment as complete
-        if (runningCount === 0 && pendingCount === 0 && pausedCount === 0) {
-          const succeededCount = statusCounts['SUCCEEDED'] || 0;
-          const failedCount = statusCounts['FAILED'] || 0;
-          const skippedCount = statusCounts['SKIPPED'] || 0;
-          const total = succeededCount + failedCount + skippedCount;
-          
-          let finalStatus: string;
-          if (failedCount > 0 && succeededCount > 0) {
-            finalStatus = 'PARTIAL';
-            await client.query(
-              `UPDATE deployments SET status='PARTIAL', finished_at=now() WHERE id=$1`,
-              [deploymentId]
-            );
-          } else if (failedCount === total) {
-            finalStatus = 'FAILED';
-            await client.query(
-              `UPDATE deployments SET status='FAILED', finished_at=now() WHERE id=$1`,
-              [deploymentId]
-            );
-          } else {
-            finalStatus = 'SUCCEEDED';
-            await client.query(
-              `UPDATE deployments SET status='SUCCEEDED', finished_at=now() WHERE id=$1`,
-              [deploymentId]
-            );
-            await markVersionDeployed(client, deploymentId);
-          }
-
-          // Create audit event for deployment completion (via timeout)
-          const depRes = await client.query(
-            `SELECT d.*, ps.name as policy_set_name, pv.version_number, u.id as user_id
-             FROM deployments d
-             LEFT JOIN policy_versions pv ON d.policy_version_id = pv.id
-             LEFT JOIN policy_sets ps ON pv.policy_set_id = ps.id
-             LEFT JOIN users u ON d.created_by = u.id
-             WHERE d.id=$1`,
-            [deploymentId]
-          );
-          const dep = depRes.rows[0];
-          
-          if (dep) {
-            const targetQuery = dep.target_query || {};
-            const targetNames: { tags: string[]; vlans: string[]; hosts: string[] } = { tags: [], vlans: [], hosts: [] };
-            
-            if (targetQuery.tags && Array.isArray(targetQuery.tags) && targetQuery.tags.length > 0) {
-              const tagRes = await client.query(`SELECT name FROM tags WHERE id = ANY($1::uuid[])`, [targetQuery.tags]);
-              targetNames.tags = tagRes.rows.map((r: any) => r.name);
-            }
-            
-            if (targetQuery.vlans && Array.isArray(targetQuery.vlans) && targetQuery.vlans.length > 0) {
-              const vlanRes = await client.query(`SELECT name FROM vlans WHERE id = ANY($1::uuid[])`, [targetQuery.vlans]);
-              targetNames.vlans = vlanRes.rows.map((r: any) => r.name);
-            }
-            
-            if (targetQuery.hosts && Array.isArray(targetQuery.hosts) && targetQuery.hosts.length > 0) {
-              const hostRes = await client.query(`SELECT hostname FROM hosts WHERE id = ANY($1::uuid[])`, [targetQuery.hosts]);
-              targetNames.hosts = hostRes.rows.map((r: any) => r.hostname);
-            }
-
-            const targetTypes: string[] = [];
-            if (targetNames.tags.length > 0) targetTypes.push('Tags');
-            if (targetNames.vlans.length > 0) targetTypes.push('VLANs');
-            if (targetNames.hosts.length > 0) targetTypes.push('Hosts');
-            const targetType = targetTypes.join(', ') || 'Unknown';
-
-            await createAuditEvent({
-              actorUserId: dep.user_id || null,
-              action: 'DEPLOYMENT_FINISHED',
-              entityType: 'DEPLOYMENT',
-              entityId: deploymentId,
-              metadata: {
-                policySetName: dep.policy_set_name || 'Unknown',
-                policyVersionNumber: dep.version_number || null,
-                deploymentMode: dep.mode,
-                targetType: targetType,
-                targetTags: targetNames.tags,
-                targetVlans: targetNames.vlans,
-                targetHosts: targetNames.hosts,
-                result: finalStatus,
-                createdAt: dep.created_at,
-                startedAt: dep.started_at,
-                finishedAt: new Date().toISOString(),
-                hostCounts: {
-                  total: total,
-                  succeeded: succeededCount,
-                  failed: failedCount,
-                  skipped: skippedCount
-                },
-                completedVia: 'timeout_check'
-              }
-            });
-          }
-          finishedViaTimeout.push({ id: deploymentId, status: finalStatus });
-        }
-      }
-    }
-  }
-  
-  await client.query('COMMIT');
-  for (const f of finishedViaTimeout) {
-    notifyDeploymentEvent(f.status === 'SUCCEEDED' ? 'DEPLOYMENT_COMPLETED' : 'DEPLOYMENT_FAILED', f.id, { completedVia: 'timeout_check' });
-    await recordRevertOutcome(f.id);
+  const deploymentIds = [...new Set(staleHosts.rows.map((r: any) => String(r.deployment_id)))];
+  for (const deploymentId of deploymentIds) {
+    if (activeExecutions.has(deploymentId)) continue;
+    await finalizeDeployment(deploymentId, { fromStatuses: ['RUNNING'], completedVia: 'timeout_check' });
   }
   return staleHosts.rows.length;
-  } catch (e) {
-    await client.query('ROLLBACK');
-    throw e;
-  } finally {
-    client.release();
+}
+
+/**
+ * Startup recovery: deployments left RUNNING by a previous API process (no execution in this process) would otherwise
+ * stay RUNNING forever with their remaining hosts PENDING. Their RUNNING/PENDING hosts are failed with
+ * 'Interrupted by API restart' and the deployment is finalized like a normal run (retry-failed picks the hosts up).
+ * A host that was mid-deploy when a PAUSED deployment's process died is failed too (its PENDING hosts stay for resume).
+ * Call once at startup, before the HTTP server and the background jobs start.
+ */
+export async function recoverInterruptedDeployments(): Promise<number> {
+  const message = 'Interrupted by API restart';
+  const { rows } = await pool.query(
+    `SELECT id, status FROM deployments WHERE status IN ('RUNNING', 'PAUSED') AND NOT (id = ANY($1::uuid[]))`,
+    [[...activeExecutions]]
+  );
+  let recovered = 0;
+  for (const row of rows) {
+    const id = String(row.id);
+    if (activeExecutions.has(id)) continue;
+    try {
+      if (row.status === 'PAUSED') {
+        await pool.query(
+          `UPDATE deployment_hosts SET status='FAILED', finished_at=now(), message=$2
+           WHERE deployment_id=$1 AND status='RUNNING'`,
+          [id, message]
+        );
+        continue;
+      }
+      await pool.query(
+        `UPDATE deployment_hosts SET status='FAILED', finished_at=now(), message=$2
+         WHERE deployment_id=$1 AND status IN ('RUNNING', 'PENDING')`,
+        [id, message]
+      );
+      await pool.query(
+        `UPDATE execution_runs SET status='DONE', finished_at=now(), exit_code=COALESCE(exit_code, 1)
+         WHERE deployment_id=$1 AND finished_at IS NULL`,
+        [id]
+      ).catch(() => { /* best effort */ });
+      const r = await finalizeDeployment(id, { fromStatuses: ['RUNNING'], completedVia: 'restart_recovery' });
+      if (r.finalized) {
+        recovered++;
+        await updateProgress(id, { phase: 'failed', error: message, warnings: [message] });
+      }
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error(`[deployments] could not recover interrupted deployment ${id}:`, (e as Error)?.message ?? e);
+    }
   }
+  if (recovered > 0) {
+    // eslint-disable-next-line no-console
+    console.log(`[deployments] recovered ${recovered} deployment(s) interrupted by an API restart`);
+  }
+  return recovered;
 }
 
 const createDeploymentSchema = z.object({
@@ -586,9 +603,8 @@ deploymentsRouter.get('/deployments', requireRole('viewer', 'operator', 'approve
   const toDate = req.query.toDate as string | undefined;
   const sortBy = (req.query.sortBy as string) || 'created_at';
   const sortOrder = (req.query.sortOrder as string) || 'DESC';
-  const page = parseInt(req.query.page as string) || 1;
-  const limit = Math.min(parseInt(req.query.limit as string) || 50, 100); // Max 100 per page
-  const offset = (page - 1) * limit;
+  // page >= 1, 1 <= limit <= 100 (negative/zero values used to produce a negative OFFSET/LIMIT -> 500)
+  const { page, limit, offset } = clampPagination(req.query.page, req.query.limit, { defaultLimit: 50, maxLimit: 100 });
 
   // Build WHERE clause
   const conditions: string[] = [];
@@ -796,7 +812,10 @@ export class AnsibleSecrets {
     const cred = await loadSshCredential(host.id);
     if (!cred) throw new Error('missing_ssh_credential');
     const username = String(cred.username ?? '');
-    if (!username || /\s/.test(username)) throw new Error('invalid_ssh_username');
+    // The INI value is templated by Ansible: only plain login names (same rule as the SSH executor), never `{`, `%`,
+    // quotes, `=`, whitespace (Jinja / extra-variable injection).
+    if (!isSafeAnsibleUsername(username)) throw new Error('invalid_ssh_username');
+    if (!Number.isInteger(host.port) || host.port < 1 || host.port > 65535) throw new Error('invalid_ssh_port');
     const vars = [`ansible_user=${username}`, `ansible_port=${host.port}`];
     const authMethod = String(cred.auth_method ?? 'KEY').toUpperCase();
 
@@ -979,6 +998,7 @@ async function generateBundle(deploymentId: string, opts: { ansible: boolean } =
         // Perform auto-detection via SSH (KEY or PASSWORD credential, host-scoped preferred)
         let materialized: MaterializedSshCredential | null = null;
         try {
+          if (!h.mgmt_ip) throw new Error('Host has no management IP; set one or choose a firewall backend explicitly');
           materialized = await getSshCredentialForHost(h.id);
           const sshHostInfo: SshHostInfo = {
             hostname: h.hostname,
@@ -1118,13 +1138,26 @@ async function generateBundle(deploymentId: string, opts: { ansible: boolean } =
         backend: compiled.backend
       });
 
-      // Store hash of compiled policy for this host (for drift detection)
-      const policyHash = crypto.createHash('sha256').update(compiled.text, 'utf8').digest('hex');
+      // Hash of the compiled artifact (covers the ip6tables file too); shown, not compared with live state
+      const policyHash = compiled.sha256;
       hostPolicyHashes.set(h.id, policyHash);
 
       // Ansible runner sees bundle at /bundles/<deploymentId>/...
       const policyFileRunnerPath = `/bundles/${deploymentId}/host_rules/${h.hostname}.${ext}`;
 
+      // ansible_host comes from an inet column; refuse anything else before it goes into the (templated) inventory.
+      if (ansibleSecrets && net.isIP(String(h.mgmt_ip ?? '')) === 0) {
+        const message = `Management IP "${String(h.mgmt_ip ?? '')}" cannot be used in the Ansible inventory`;
+        warnings.push(`${h.hostname}: ${message}`);
+        hostPolicyFiles.delete(h.id);
+        hostPolicyHashes.delete(h.id);
+        await pool.query(
+          `UPDATE deployment_hosts SET status='FAILED', finished_at=now(), message=$3
+           WHERE deployment_id=$1 AND host_id=$2`,
+          [deploymentId, h.id, message]
+        );
+        continue;
+      }
       const ip6Var = ip6PolicyFileHostPath ? ` segmentra_ip6_policy_file=/bundles/${deploymentId}/host_rules/${h.hostname}.ip6tables` : '';
       inventoryLines.push(
         `${h.hostname} ansible_host=${String(h.mgmt_ip)} ${connectionVars} ansible_become=yes ansible_become_method=sudo segmentra_backend=${compiled.backend} segmentra_manager_script=/bundles/${deploymentId}/segmentra-manager.py segmentra_policy_file=${policyFileRunnerPath}${ip6Var}`
@@ -1178,6 +1211,9 @@ export async function claimDeploymentForStart(deploymentId: string, fromStatuses
      RETURNING *`,
     [deploymentId, fromStatuses, JSON.stringify({ phase: 'starting', checked: 0, totalToCheck: 0, deployed: 0, totalToDeploy: 0, warnings: [] })]
   );
+  // Owned by this process from the claim on (every caller goes on to executeDeploymentStart, which removes it when the
+  // run ends), so the stale-host job, restart recovery, /start and /retry-failed never see it as orphaned.
+  if (rows[0]) activeExecutions.add(deploymentId);
   return rows[0] ?? null;
 }
 
@@ -1297,18 +1333,12 @@ async function executeDeploymentStartInner(
           continue; // remaining hosts stay PENDING (resume) or were SKIPPED by /stop
         }
 
-        // Claim this host: RUNNING with its own started_at, only if still PENDING
-        const claim = await pool.query(
-          `UPDATE deployment_hosts SET status='RUNNING', started_at=now(), finished_at=NULL, message=NULL
-           WHERE deployment_id=$1 AND host_id=$2 AND status='PENDING' RETURNING host_id`,
-          [deploymentId, h.id]
-        );
-        if (!claim.rows[0]) continue;
-
         await updateProgress(deploymentId, { phase: 'deploying', checked: deployHostCount, totalToCheck: deployHostCount, deployed: deployedCount, totalToDeploy: deployHostCount, currentHost: h.hostname, warnings });
 
         // Serialize with other firewall changes on this host (audit/test sessions, other deployments). Held until the
         // outcome is recorded, so a session restoring an older backup can tell whether this deployment succeeded.
+        // Taken BEFORE the host is claimed: the wait (up to SEGMENTRA_HOST_LOCK_TIMEOUT_MS) must not count towards the
+        // stale-host timeout, which starts with started_at.
         let result: { success: boolean; stdout: string; stderr: string; exitCode: number; liveRulesHash?: string; skipped?: boolean; persistence?: PersistenceResult };
         let releaseHostLock: () => Promise<void> = async () => {};
         let lockError: string | null = null;
@@ -1317,11 +1347,30 @@ async function executeDeploymentStartInner(
         } catch (e: any) {
           lockError = e?.message ?? String(e);
         }
+
+        // Claim this host: RUNNING with its own started_at, only if still PENDING and the deployment still RUNNING
+        // (it may have been paused or stopped while we waited for the lock).
+        let claimed = false;
+        try {
+          const claim = await pool.query(
+            `UPDATE deployment_hosts SET status='RUNNING', started_at=now(), finished_at=NULL, message=NULL
+             WHERE deployment_id=$1 AND host_id=$2 AND status='PENDING'
+               AND EXISTS (SELECT 1 FROM deployments WHERE id=$1 AND status='RUNNING')
+             RETURNING host_id`,
+            [deploymentId, h.id]
+          );
+          claimed = Boolean(claim.rows[0]);
+        } finally {
+          if (!claimed) await releaseHostLock();
+        }
+        if (!claimed) continue;
+
         try {
         const policyFile = hostPolicyFiles.get(h.id)!;
         let cred: MaterializedSshCredential | null = null;
         try {
           if (lockError) throw new Error(lockError);
+          if (!h.mgmt_ip) throw new Error('Host has no management IP');
           cred = await getSshCredentialForHost(h.id, bundleDir);
           const sshHost: SshHost = {
             hostname: h.hostname,
@@ -1400,15 +1449,42 @@ async function executeDeploymentStartInner(
     executionId = executionIdRes.rows[0].id;
 
     const bundleHostIds = deployableHosts.map((h: any) => h.id);
-    await pool.query(
-      `UPDATE deployment_hosts SET status='RUNNING', started_at=now(), finished_at=NULL, message=NULL
-       WHERE deployment_id=$1 AND host_id = ANY($2::uuid[]) AND status='PENDING'`,
-      [deploymentId, bundleHostIds]
+    const closeExecutionRun = () => pool.query(
+      `UPDATE execution_runs SET exit_code=1, finished_at=now(), status='DONE' WHERE id=$1 AND finished_at IS NULL`,
+      [executionId]
     );
 
     // Serialize with other firewall changes on every host of this run (audit/test sessions, other deployments), until the
-    // outcome of each host is recorded (see services/host-lock.ts).
-    const releaseHostLocks = await acquireHostLocks(bundleHostIds);
+    // outcome of each host is recorded (see services/host-lock.ts). Taken BEFORE the hosts are marked RUNNING: the lock
+    // wait must not count towards the stale-host timeout (started_at). A lock timeout fails the run (failDeployment).
+    let releaseHostLocks: () => Promise<void>;
+    try {
+      releaseHostLocks = await acquireHostLocks(bundleHostIds);
+    } catch (e) {
+      await closeExecutionRun().catch(() => {});
+      throw e;
+    }
+    let marked: { rows: any[] };
+    try {
+      marked = await pool.query(
+        `UPDATE deployment_hosts SET status='RUNNING', started_at=now(), finished_at=NULL, message=NULL
+         WHERE deployment_id=$1 AND host_id = ANY($2::uuid[]) AND status='PENDING'
+           AND EXISTS (SELECT 1 FROM deployments WHERE id=$1 AND status='RUNNING')
+         RETURNING host_id`,
+        [deploymentId, bundleHostIds]
+      );
+    } catch (e) {
+      await releaseHostLocks();
+      throw e;
+    }
+    if (marked.rows.length === 0) {
+      // Paused or stopped while waiting for the host locks: don't run the playbook (PENDING hosts stay for resume).
+      await releaseHostLocks();
+      cleanupSecrets();
+      await closeExecutionRun();
+      ok = false;
+      exitCode = 1;
+    } else {
     let result: Awaited<ReturnType<typeof runAnsiblePlaybook>>;
     try {
     try {
@@ -1480,126 +1556,17 @@ async function executeDeploymentStartInner(
       await releaseHostLocks();
     }
     }
-
-    // Get final host status counts to determine deployment status
-    const hostStatusRes = await pool.query(
-      `SELECT status, COUNT(*) as count
-       FROM deployment_hosts
-       WHERE deployment_id=$1
-       GROUP BY status`,
-      [deploymentId]
-    );
-
-    const statusCounts: Record<string, number> = {};
-    for (const row of hostStatusRes.rows) {
-      statusCounts[row.status] = parseInt(row.count, 10);
     }
 
-    const succeededCount = statusCounts['SUCCEEDED'] || 0;
-    const failedCount = statusCounts['FAILED'] || 0;
-    const skippedCount = statusCounts['SKIPPED'] || 0;
-    const unfinishedCount = (statusCounts['PENDING'] || 0) + (statusCounts['RUNNING'] || 0) + (statusCounts['PAUSED'] || 0);
-    const total = succeededCount + failedCount + skippedCount;
+    // Finalize (same rule as the stale-host timeout and restart recovery). Don't finalize while hosts are still pending
+    // (paused run) and never overwrite CANCELLED/PAUSED/EXPIRED.
+    const fin = await finalizeDeployment(deploymentId, { fromStatuses: ['RUNNING', 'FAILED', 'PARTIAL', 'SUCCEEDED'], ipAddress });
 
-    // Determine final status
-    let finalStatus: string;
-    if (failedCount > 0 && succeededCount > 0) {
-      finalStatus = 'PARTIAL';
-    } else if (failedCount > 0 || succeededCount === 0) {
-      finalStatus = 'FAILED';
-    } else {
-      finalStatus = 'SUCCEEDED';
-    }
-
-    // Don't finalize while hosts are still pending (paused run) and never overwrite CANCELLED/PAUSED/EXPIRED.
-    let finalized = false;
-    if (unfinishedCount === 0) {
-      const upd = await pool.query(
-        `UPDATE deployments SET status=$2, finished_at=now()
-         WHERE id=$1 AND status IN ('RUNNING', 'FAILED', 'PARTIAL', 'SUCCEEDED')
-         RETURNING id`,
-        [deploymentId, finalStatus]
-      );
-      finalized = Boolean(upd.rows[0]);
-      if (finalized && finalStatus === 'SUCCEEDED') {
-        await markVersionDeployed(pool, deploymentId);
-      }
-      if (finalized) {
-        notifyDeploymentEvent(finalStatus === 'SUCCEEDED' ? 'DEPLOYMENT_COMPLETED' : 'DEPLOYMENT_FAILED', deploymentId);
-        await recordRevertOutcome(deploymentId);
-      }
-    }
-
-    if (!finalized) {
+    if (!fin.finalized) {
       const cur = await pool.query(`SELECT status FROM deployments WHERE id=$1`, [deploymentId]);
-      await updateProgress(deploymentId, { phase: String(cur.rows[0]?.status ?? 'stopped').toLowerCase(), checked: deployHostCount, totalToCheck: deployHostCount, deployed: succeededCount + failedCount, totalToDeploy: deployHostCount, warnings });
+      await updateProgress(deploymentId, { phase: String(cur.rows[0]?.status ?? 'stopped').toLowerCase(), checked: deployHostCount, totalToCheck: deployHostCount, deployed: fin.counts.succeeded + fin.counts.failed, totalToDeploy: deployHostCount, warnings });
       return { ok, exitCode, executionId };
     }
-
-    // Get deployment info for audit
-    const depRes = await pool.query(
-      `SELECT d.*, ps.name as policy_set_name, pv.version_number, u.id as user_id
-       FROM deployments d
-       LEFT JOIN policy_versions pv ON d.policy_version_id = pv.id
-       LEFT JOIN policy_sets ps ON pv.policy_set_id = ps.id
-       LEFT JOIN users u ON d.created_by = u.id
-       WHERE d.id=$1`,
-      [deploymentId]
-    );
-    const dep = depRes.rows[0];
-
-    // Resolve target names for audit
-    const targetQuery = dep.target_query || {};
-    const targetNames: { tags: string[]; vlans: string[]; hosts: string[] } = { tags: [], vlans: [], hosts: [] };
-
-    if (targetQuery.tags && Array.isArray(targetQuery.tags) && targetQuery.tags.length > 0) {
-      const tagRes = await pool.query(`SELECT name FROM tags WHERE id = ANY($1::uuid[])`, [targetQuery.tags]);
-      targetNames.tags = tagRes.rows.map((r: any) => r.name);
-    }
-
-    if (targetQuery.vlans && Array.isArray(targetQuery.vlans) && targetQuery.vlans.length > 0) {
-      const vlanRes = await pool.query(`SELECT name FROM vlans WHERE id = ANY($1::uuid[])`, [targetQuery.vlans]);
-      targetNames.vlans = vlanRes.rows.map((r: any) => r.name);
-    }
-
-    if (targetQuery.hosts && Array.isArray(targetQuery.hosts) && targetQuery.hosts.length > 0) {
-      const hostRes = await pool.query(`SELECT hostname FROM hosts WHERE id = ANY($1::uuid[])`, [targetQuery.hosts]);
-      targetNames.hosts = hostRes.rows.map((r: any) => r.hostname);
-    }
-
-    const targetTypes: string[] = [];
-    if (targetNames.tags.length > 0) targetTypes.push('Tags');
-    if (targetNames.vlans.length > 0) targetTypes.push('VLANs');
-    if (targetNames.hosts.length > 0) targetTypes.push('Hosts');
-    const targetType = targetTypes.join(', ') || 'Unknown';
-
-    // Create audit event for deployment completion
-    await createAuditEvent({
-      actorUserId: dep.user_id || null,
-      action: 'DEPLOYMENT_FINISHED',
-      entityType: 'DEPLOYMENT',
-      entityId: deploymentId,
-      ipAddress: ipAddress,
-      metadata: {
-        policySetName: dep.policy_set_name || 'Unknown',
-        policyVersionNumber: dep.version_number || null,
-        deploymentMode: dep.mode,
-        targetType: targetType,
-        targetTags: targetNames.tags,
-        targetVlans: targetNames.vlans,
-        targetHosts: targetNames.hosts,
-        result: finalStatus,
-        createdAt: dep.created_at,
-        startedAt: dep.started_at,
-        finishedAt: new Date().toISOString(),
-        hostCounts: {
-          total: total,
-          succeeded: succeededCount,
-          failed: failedCount,
-          skipped: skippedCount
-        }
-      }
-    });
 
     await updateProgress(deploymentId, { phase: 'complete', checked: deployHostCount, totalToCheck: deployHostCount, deployed: deployHostCount, totalToDeploy: deployHostCount, warnings });
 
@@ -1645,6 +1612,10 @@ async function explainNotStartable(deploymentId: string, res: import('express').
 deploymentsRouter.post('/deployments/:deploymentId/start', requireRole('operator', 'admin'), async (req, res) => {
   const deploymentId = req.params.deploymentId;
 
+  if (activeExecutions.has(deploymentId)) {
+    return res.status(409).json({ error: 'deployment_still_running', message: 'A previous run of this deployment is still finishing. Try again in a moment.' });
+  }
+
   // Validate the policy version is still deployable before claiming
   const verRes = await pool.query(
     `SELECT pv.status FROM deployments d JOIN policy_versions pv ON pv.id = d.policy_version_id WHERE d.id=$1`,
@@ -1662,19 +1633,22 @@ deploymentsRouter.post('/deployments/:deploymentId/start', requireRole('operator
   const claimed = await claimDeploymentForStart(deploymentId, ['QUEUED', 'SCHEDULED']);
   if (!claimed) return explainNotStartable(deploymentId, res, ['QUEUED', 'SCHEDULED']);
 
-  await createAuditEvent({
-    actorUserId: req.auth!.userId ?? null,
-    action: 'DEPLOYMENT_STARTED',
-    entityType: 'DEPLOYMENT',
-    entityId: deploymentId,
-    ipAddress: req.ip
-  });
-  notifyDeploymentEvent('DEPLOYMENT_STARTED', deploymentId, { startedBy: req.auth!.username });
+  // Once claimed the run must happen (the claim marks it as owned by this process), even if the audit write fails.
+  try {
+    await createAuditEvent({
+      actorUserId: req.auth!.userId ?? null,
+      action: 'DEPLOYMENT_STARTED',
+      entityType: 'DEPLOYMENT',
+      entityId: deploymentId,
+      ipAddress: req.ip
+    });
+    notifyDeploymentEvent('DEPLOYMENT_STARTED', deploymentId, { startedBy: req.auth!.username });
+  } finally {
+    runDeploymentInBackground(deploymentId, req.ip);
+  }
 
   // Return 202 Accepted immediately — execution happens in background
   res.status(202).json({ ok: true, message: 'Deployment started. Monitor progress on the deployment detail page.', deploymentId });
-
-  runDeploymentInBackground(deploymentId, req.ip);
 });
 
 /**
@@ -1803,6 +1777,10 @@ deploymentsRouter.post('/deployments/:deploymentId/cancel', requireRole('operato
 
 deploymentsRouter.post('/deployments/:deploymentId/retry-failed', requireRole('operator', 'admin'), async (req, res) => {
   const deploymentId = req.params.deploymentId;
+  // Never run a deployment twice at once: its previous run may still be winding down after finalizing.
+  if (activeExecutions.has(deploymentId)) {
+    return res.status(409).json({ error: 'deployment_still_running', message: 'The previous run of this deployment is still finishing. Try again in a moment.' });
+  }
   const client = await pool.connect();
   try {
     await client.query('BEGIN');

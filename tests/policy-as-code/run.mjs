@@ -53,8 +53,8 @@ async function main() {
   const viewer = await ensureUser(admin, 'pac-viewer', 'viewer');
 
   const tag = (await api('POST', '/tags', { token: op, body: { name: `pac-web-${suffix}` } })).tag;
-  const h1 = (await api('POST', '/hosts', { token: op, body: { hostname: `pac-h1-${suffix}`, mgmtIp: '192.0.2.11', enabled: true } })).host;
-  const h2 = (await api('POST', '/hosts', { token: op, body: { hostname: `pac-h2-${suffix}`, mgmtIp: '192.0.2.12', enabled: true } })).host;
+  const h1 = (await api('POST', '/hosts', { token: admin, /* SSH target is admin-only */ body: { hostname: `pac-h1-${suffix}`, mgmtIp: '192.0.2.11', enabled: true } })).host;
+  const h2 = (await api('POST', '/hosts', { token: admin, /* SSH target is admin-only */ body: { hostname: `pac-h2-${suffix}`, mgmtIp: '192.0.2.12', enabled: true } })).host;
   const name = `pac-policy-${suffix}`;
   const imp = (d, q = '', who = op) => raw('POST', `/policy-sets/import${q}`, { token: who, body: d });
   const impYaml = (d, q = '', who = op) => raw('POST', `/policy-sets/import${q}`, { token: who, body: stringify(d), type: 'application/yaml' });

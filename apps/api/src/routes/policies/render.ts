@@ -50,7 +50,6 @@ policyRenderRouter.get('/policy-versions/:versionId/render/host/:hostId', requir
   async function resolveRemote(ruleRow: any): Promise<{ kind: 'CIDR' } | { kind: 'SET'; setName: string }> {
     if (ruleRow.source_type === 'CIDR') return { kind: 'CIDR' };
 
-    const key = `${ruleRow.source_type}:${ruleRow.source_value}`;
     const setName = `src_${ruleRow.source_type.toLowerCase()}_${String(ruleRow.source_value).replace(/-/g, '')}`;
     if (sets[setName]) return { kind: 'SET', setName };
 
@@ -74,7 +73,9 @@ policyRenderRouter.get('/policy-versions/:versionId/render/host/:hostId', requir
       ips = q.rows.map((x) => String(x.mgmt_ip));
     }
 
-    if (ips.length === 0) throw new Error(`empty_selector:${key}`);
+    // Same as the deployment bundle (generateBundle in routes/deployments.ts): a TAG/VLAN/HOST selector that currently
+    // resolves to no address compiles to an empty set (the rule matches nothing), so the preview shows exactly what a
+    // deployment would apply instead of failing with a 500.
     sets[setName] = ips;
     return { kind: 'SET', setName };
   }
@@ -125,7 +126,9 @@ policyRenderRouter.get('/policy-versions/:versionId/render/host/:hostId', requir
     }
   }
 
-  const compiled = compileHostPolicy({
+  let compiled: ReturnType<typeof compileHostPolicy>;
+  try {
+  compiled = compileHostPolicy({
     host: {
       id: hostRes.rows[0].id,
       hostname: hostRes.rows[0].hostname,
@@ -141,6 +144,11 @@ policyRenderRouter.get('/policy-versions/:versionId/render/host/:hostId', requir
     protectedDestinations,
     ...(await getDockerCompileInput(hostId))
   });
+  } catch (e: any) {
+    // The bundle fails just that host with this message; the preview reports it the same way instead of a 500.
+    if (e?.name !== 'CompileError') throw e;
+    return res.status(422).json({ error: 'compile_error', message: `Policy compile error: ${e.message}` });
+  }
 
   res.json({ backend: compiled.backend, sha256: compiled.sha256, text: compiled.text });
 });

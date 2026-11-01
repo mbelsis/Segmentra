@@ -89,6 +89,27 @@ export function hostIpOnly(value: unknown): string | null {
   return s.split('/')[0];
 }
 
+/**
+ * Strict IP or CIDR (no zone ids, no whitespace inside, no host names): what the compiler accepts as an
+ * address. Used to validate stored IoT asset addresses.
+ */
+export function isStrictIpOrCidr(value: string | null | undefined): boolean {
+  const s = String(value ?? '').trim();
+  return /^[0-9A-Fa-f.:]+(\/\d{1,3})?$/.test(s) && isValidCidr(s);
+}
+
+/**
+ * A stored address (inet text or IoT asset ip_address) as a FORWARD destination: trimmed, a full-length
+ * host prefix (/32, /128) dropped, any other prefix kept. Returns null when it is not a valid IP/CIDR.
+ */
+export function normalizeDestinationAddress(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const s = String(value).trim();
+  if (!s || !isStrictIpOrCidr(s)) return null;
+  const c = parseCidr(s)!;
+  return c.prefix === c.bits ? s.split('/')[0] : s;
+}
+
 export const PORT_SPEC_REGEX = /^\d{1,5}(-\d{1,5})?(\s*,\s*\d{1,5}(-\d{1,5})?)*$/;
 
 export type PortRange = { from: number; to: number };

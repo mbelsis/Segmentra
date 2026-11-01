@@ -76,10 +76,15 @@ function handleUnauthorized(path: string) {
   window.location.assign(`/login?next=${encodeURIComponent(next)}`);
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+/**
+ * Shared fetch: adds the session token, applies the 401 -> login handling and
+ * turns non-2xx responses into an ApiError carrying the API's JSON `message`.
+ * Returns the raw Response so callers can read JSON, text or a Blob.
+ */
+async function fetchApi(path: string, init: RequestInit = {}): Promise<Response> {
   const token = getToken();
   const headers = new Headers(init.headers);
-  if (init.body !== undefined) headers.set('content-type', 'application/json');
+  if (init.body !== undefined && !headers.has('content-type')) headers.set('content-type', 'application/json');
   if (token) headers.set('authorization', `Bearer ${token}`);
 
   const resp = await fetch(`${API_BASE}${path}`, { ...init, headers });
@@ -111,8 +116,19 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     }
     throw new ApiError(errorMessage, resp.status, body);
   }
+  return resp;
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const resp = await fetchApi(path, init);
   if (resp.status === 204) return undefined as T;
   return (await resp.json()) as T;
+}
+
+/** File name from a Content-Disposition header, or the fallback. */
+function dispositionFilename(resp: Response, fallback: string): string {
+  const disposition = resp.headers.get('content-disposition') || '';
+  return /filename="([^"]+)"/.exec(disposition)?.[1] ?? fallback;
 }
 
 type HostListParams = { hostname?: string; ip?: string; tag?: string; vlan?: string; enabled?: boolean; page?: number; limit?: number };
@@ -150,8 +166,22 @@ export const api = {
   login: (username: string, password: string) =>
     request<{ token: string }>('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
   me: () => request<{ user: any; roles: string[] }>('/auth/me'),
+  /**
+   * Log out: the token is always cleared locally first, then the server is
+   * told (best effort) so it can invalidate the session. Never throws.
+   */
+  logout: async () => {
+    const token = getToken();
+    clearToken();
+    if (!token) return;
+    try {
+      await fetch(`${API_BASE}/auth/logout`, { method: 'POST', headers: { authorization: `Bearer ${token}` }, keepalive: true });
+    } catch {
+      // Ignore: the local session is gone either way.
+    }
+  },
   changePassword: (currentPassword: string, newPassword: string) =>
-    request<{ ok: boolean }>('/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
+    request<{ ok: boolean; token: string }>('/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
 
   hosts: (params?: HostListParams) => fetchHosts(params),
   /** All hosts (pages through the API). Use for pickers. */
@@ -182,23 +212,17 @@ export const api = {
   generateComplianceReport: (body: any) => request<any>('/compliance/reports', { method: 'POST', body: JSON.stringify(body) }),
   /** Fetch a report in another format (html, csv) with the session token; returns the text and the file name. */
   complianceReportFile: async (id: string, format: 'html' | 'csv', dataset?: string) => {
-    const token = getToken();
     const q = `format=${format}${dataset ? `&dataset=${encodeURIComponent(dataset)}` : ''}`;
-    const resp = await fetch(`${API_BASE}/compliance/reports/${id}?${q}`, { headers: token ? { authorization: `Bearer ${token}` } : {} });
-    if (!resp.ok) throw new ApiError(`${resp.status} ${resp.statusText}`, resp.status, undefined);
-    const disposition = resp.headers.get('content-disposition') || '';
-    return { text: await resp.text(), filename: /filename="([^"]+)"/.exec(disposition)?.[1] ?? `report.${format}` };
+    const resp = await fetchApi(`/compliance/reports/${id}?${q}`);
+    return { text: await resp.text(), filename: dispositionFilename(resp, `report.${format}`) };
   },
   /** Download a policy set (or one version) as a policy-as-code document (YAML or JSON). */
   exportPolicySet: async (id: string, format: 'yaml' | 'json' = 'yaml', version?: number | string) => {
-    const token = getToken();
     const q = `format=${format}${version !== undefined ? `&version=${encodeURIComponent(String(version))}` : ''}`;
-    const resp = await fetch(`${API_BASE}/policy-sets/${id}/export?${q}`, { headers: token ? { authorization: `Bearer ${token}` } : {} });
-    if (!resp.ok) throw new ApiError(`${resp.status} ${resp.statusText}`, resp.status, undefined);
-    const disposition = resp.headers.get('content-disposition') || '';
+    const resp = await fetchApi(`/policy-sets/${id}/export?${q}`);
     return {
       text: await resp.text(),
-      filename: /filename="([^"]+)"/.exec(disposition)?.[1] ?? `policy.${format}`,
+      filename: dispositionFilename(resp, `policy.${format}`),
       versionNumber: resp.headers.get('x-segmentra-version'),
     };
   },
@@ -299,13 +323,10 @@ export const api = {
   // Configuration backup (admin): JSON export and name-based import
   backup: {
     export: async () => {
-      const token = getToken();
-      const resp = await fetch(`${API_BASE}/backup/export`, { headers: token ? { authorization: `Bearer ${token}` } : {} });
-      if (!resp.ok) throw new ApiError(`${resp.status} ${resp.statusText}`, resp.status, undefined);
-      const disposition = resp.headers.get('content-disposition') || '';
+      const resp = await fetchApi('/backup/export');
       return {
         text: await resp.text(),
-        filename: /filename="([^"]+)"/.exec(disposition)?.[1] ?? 'segmentra-backup.json',
+        filename: dispositionFilename(resp, 'segmentra-backup.json'),
         warnings: Number(resp.headers.get('x-segmentra-backup-warnings') || 0)
       };
     },
@@ -411,7 +432,12 @@ export const api = {
     }),
     audit: {
       start: (params: { hosts: string[]; durationMinutes: number }) =>
-        request<{ sessions: any[] }>('/troubleshoot/audit/start', {
+        // 201 when every host started, 207 (still a 2xx body) when some failed: check summary.failed.
+        request<{
+          sessions: any[];
+          results: Array<{ hostId: string; hostname: string | null; status: 'RUNNING' | 'FAILED' | 'RESTORE_PENDING'; sessionId: string | null; error?: string }>;
+          summary: { requested: number; started: number; failed: number };
+        }>('/troubleshoot/audit/start', {
           method: 'POST',
           body: JSON.stringify(params)
         }),
@@ -740,13 +766,8 @@ export const api = {
       request<any>('/iot-assets/discover', { method: 'POST', body: JSON.stringify(probe ? { gatewayId, sweepCidr: probe.sweepCidr, confirmActiveProbe: true } : { gatewayId }) }),
     discoverImport: (body: any) => request<{ created: any[]; skipped: any[]; note: string }>('/iot-assets/discover/import', { method: 'POST', body: JSON.stringify(body) }),
     ouiStatus: () => request<{ entries: number }>('/iot-assets/oui/status'),
-    importOui: async (text: string, replace: boolean) => {
-      const token = getToken();
-      const resp = await fetch(`${API_BASE}/iot-assets/oui?replace=${replace}`, { method: 'POST', headers: { 'content-type': 'text/csv', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: text });
-      const body = await resp.json().catch(() => ({}));
-      if (!resp.ok) throw new ApiError(body.message || body.error || `${resp.status} ${resp.statusText}`, resp.status, body);
-      return body as { imported: number; entries: number };
-    },
+    importOui: (text: string, replace: boolean) =>
+      request<{ imported: number; entries: number }>(`/iot-assets/oui?replace=${replace}`, { method: 'POST', headers: { 'content-type': 'text/csv' }, body: text }),
   },
 
   // === Notifications ===

@@ -22,7 +22,7 @@ Do both on a production install: a nightly database dump, and a configuration ex
 - `data.tagRules` (auto-tagging rules; a condition on `vlan_id` is written as the equivalent `vlan_tag` condition so it survives new ids)
 - `data.iotAssets` with their gateways and tags
 - `data.policyTemplates` with their rules
-- `data.policySets` with every version (status, change summary, approval trail with usernames, interface scope, expiry) and every rule
+- `data.policySets` with every version (status, change summary, approval trail with usernames, interface scope, expiry) and every rule (the approval trail is informational: on import, approved versions need re-approval, see below)
 - `data.settings`: management VLAN (by VLAN tag) and deployment executor
 
 Everything refers to other things by **name** (tags by name, VLANs by their tag number, hosts by hostname, IoT assets by name, users by username). No database ids are exported, so the document restores into a database whose ids are different. Dangling references (a rule whose tag was deleted) are exported as the raw id and reported in `warnings`; they cannot be restored. The export is written to the audit log (`BACKUP_EXPORT`).
@@ -31,8 +31,8 @@ Everything refers to other things by **name** (tags by name, VLANs by their tag 
 
 - runs in one transaction (a dry run rolls it back; any error rolls everything back);
 - creates what is missing and **leaves existing items untouched**: VLANs are matched by tag number, policy versions by policy set name and version number, everything else by name. Running the same import twice changes nothing, and a partial restore (for example only the missing policy sets) works the same way;
-- keeps each policy version's **status and approval trail**. Usernames that do not exist on the target are dropped from the trail (the version keeps its status); the importing admin is recorded as creator when the original creator is unknown;
-- never deploys anything. `DEPLOYED` means "this was the deployed version when the backup was taken", not that the hosts have it now: check **Inventory → Active Rules** or **Check Compliance** and redeploy where needed;
+- does **not** trust the approval trail in the file (a backup is a plain JSON document anyone can edit, so restoring `APPROVED` versions with an arbitrary `approvedBy` would bypass separation of duties). A version that was `APPROVED`, `DEPLOYED` or `PENDING_APPROVAL` in the backup is created as **`PENDING_APPROVAL`**, submitted by the importing admin, without an approver, and the result has one warning per such version (`policy set "X": version N (APPROVED in the backup) imported as PENDING_APPROVAL, needs re-approval`; the dry run shows the same warnings). An approver other than the importing admin (and other than the version's creator) has to approve it again before it can be deployed. `DRAFT` and `REJECTED` versions keep their status (and the rejection reason); `ARCHIVED` versions stay `ARCHIVED` (they can never be approved or deployed again) but without the approver from the file, so they never count as approval evidence (for example in compliance reports). Usernames that do not exist on the target are dropped from the trail; the importing admin is recorded as creator when the original creator is unknown;
+- never deploys anything. The backup's `DEPLOYED` status only meant "this was the deployed version when the backup was taken": after approval, check **Inventory → Active Rules** or **Check Compliance** and redeploy where needed;
 - skips a rule whose source or destination cannot be resolved (missing tag, VLAN, host or IoT asset) and says so in the warnings; the version is still created;
 - fills in the management VLAN and executor settings only when they are empty on the target;
 - is written to the audit log (`BACKUP_IMPORT`, with counts).

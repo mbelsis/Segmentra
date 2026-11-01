@@ -126,6 +126,7 @@ export function TroubleshootPage() {
   const [auditSessions, setAuditSessions] = useState<any[]>([]);
   const [selectedSessionHost, setSelectedSessionHost] = useState<string | null>(null);
   const [auditError, setAuditError] = useState<string | null>(null);
+  const [auditStartFailures, setAuditStartFailures] = useState<Array<{ hostId: string; hostname: string | null; status: string; error?: string }>>([]);
   const [allHosts, setAllHosts] = useState<any[]>([]);
 
   // Load all hosts for selection (only enabled hosts)
@@ -163,13 +164,24 @@ export function TroubleshootPage() {
 
     setAuditLoading(true);
     setAuditError(null);
+    setAuditStartFailures([]);
 
     try {
-      await api.troubleshoot.audit.start({
+      const res = await api.troubleshoot.audit.start({
         hosts: auditHosts,
         durationMinutes: auditDuration
       });
-      setAuditHosts([]);
+      // A 207 response means some hosts did not start; show why per host and
+      // keep those hosts selected so they can be retried.
+      const failures = (res.results ?? []).filter((r) => r.status !== 'RUNNING');
+      if (failures.length > 0) {
+        const started = res.summary?.started ?? (res.results.length - failures.length);
+        setAuditError(`${failures.length} of ${res.summary?.requested ?? auditHosts.length} host(s) could not start firewall learning${started > 0 ? ` (${started} started)` : ''}.`);
+        setAuditStartFailures(failures);
+        setAuditHosts(failures.filter((f) => f.status === 'FAILED').map((f) => f.hostId).filter((id) => auditHosts.includes(id)));
+      } else {
+        setAuditHosts([]);
+      }
       setAuditHostFilter('');
       await loadAuditSessions();
     } catch (e: any) {
@@ -214,8 +226,9 @@ export function TroubleshootPage() {
     return `${hours}h ${mins}m`;
   }
 
-  const activeSessions = auditSessions.filter((s) => s.status === 'RUNNING');
+  const activeSessions = auditSessions.filter((s) => s.status === 'RUNNING' || s.status === 'PENDING');
   const completedSessions = auditSessions.filter((s) => s.status === 'COMPLETED');
+  const failedSessions = auditSessions.filter((s) => s.status === 'FAILED');
 
   return (
     <div style={{ padding: 24 }}>
@@ -372,6 +385,16 @@ export function TroubleshootPage() {
         {auditError && (
           <div className="error-banner" style={{ marginTop: 16 }}>
             {auditError}
+            {auditStartFailures.length > 0 && (
+              <ul style={{ margin: '8px 0 0', paddingLeft: 20 }}>
+                {auditStartFailures.map((f) => (
+                  <li key={f.hostId}>
+                    <strong>{f.hostname ?? allHosts.find((h) => h.id === f.hostId)?.hostname ?? f.hostId}</strong>
+                    {f.status === 'RESTORE_PENDING' ? ' (restore of original rules pending)' : ''}: {f.error || 'failed'}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
       </div>
@@ -395,10 +418,10 @@ export function TroubleshootPage() {
                 <tr key={session.id}>
                   <td><strong>{session.hostname}</strong></td>
                   <td>{session.duration_minutes} minutes</td>
-                  <td>{formatTimeRemaining(session)}</td>
-                  <td>{new Date(session.started_at).toLocaleString()}</td>
+                  <td>{session.status === 'PENDING' ? <em style={{ color: '#666' }}>Starting...</em> : formatTimeRemaining(session)}</td>
+                  <td>{session.started_at ? new Date(session.started_at).toLocaleString() : '-'}</td>
                   <td>
-                    {canOperate && <button
+                    {canOperate && session.status === 'RUNNING' && <button
                       onClick={async () => {
                         if (confirm('Cancel this audit session and restore original firewall rules?')) {
                           try {
@@ -414,6 +437,31 @@ export function TroubleshootPage() {
                       Cancel
                     </button>}
                   </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Failed Sessions */}
+      {failedSessions.length > 0 && (
+        <div className="card" style={{ marginBottom: 24 }}>
+          <h2 style={{ marginTop: 0 }}>Failed Audit Sessions</h2>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Hostname</th>
+                <th>Started</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {failedSessions.map((session) => (
+                <tr key={session.id}>
+                  <td><strong>{session.hostname}</strong></td>
+                  <td>{session.started_at ? new Date(session.started_at).toLocaleString() : '-'}</td>
+                  <td style={{ color: '#a63d2f', whiteSpace: 'pre-wrap' }}>{session.log_data?.error || 'Unknown error'}</td>
                 </tr>
               ))}
             </tbody>

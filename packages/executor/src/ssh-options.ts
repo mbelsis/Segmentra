@@ -71,7 +71,8 @@ export function shq(value: string | number): string {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
-function defaultTimeout(): number {
+/** Per-SSH-command timeout: SEGMENTRA_SSH_COMMAND_TIMEOUT_MS or DEFAULT_SSH_COMMAND_TIMEOUT_MS. */
+export function defaultTimeout(): number {
   const env = Number(process.env.SEGMENTRA_SSH_COMMAND_TIMEOUT_MS);
   return Number.isFinite(env) && env > 0 ? env : DEFAULT_SSH_COMMAND_TIMEOUT_MS;
 }
@@ -180,7 +181,16 @@ export function isSafeAbsolutePath(p: string): boolean {
 /**
  * Spawn a process, collect output, and kill it if it exceeds timeoutMs.
  * Never rejects; spawn errors resolve with exitCode 1.
+ *
+ * On timeout the whole process group is signalled when the child was spawned `detached`
+ * (sshpass -> ssh: the grandchild can keep the output pipes open, so
+ * waiting for 'close' alone could hang forever). The result is resolved on 'close', or
+ * CLOSE_GRACE_MS after 'exit' if a descendant still holds the pipes.
+ *
+ * Note: killing the local ssh does not stop the remote command; a timed-out root script
+ * may keep running on the host (deployToHost wraps the apply in a remote `timeout`).
  */
+const CLOSE_GRACE_MS = 2_000;
 export function spawnWithTimeout(
   cmd: string,
   args: string[],
@@ -192,37 +202,56 @@ export function spawnWithTimeout(
     let stderr = '';
     let settled = false;
     let timedOut = false;
+    let exitCode: number | null | undefined;
+    let killTimer: NodeJS.Timeout | undefined;
+    let graceTimer: NodeJS.Timeout | undefined;
+    const detached = opts.detached ?? false;
     const finish = (r: ExecResult) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
+      if (graceTimer) clearTimeout(graceTimer);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
       resolve(r);
     };
-    let killTimer: NodeJS.Timeout | undefined;
+    const result = (code: number | null | undefined): ExecResult =>
+      timedOut
+        ? { exitCode: 124, stdout, stderr: stderr + `\nCommand timed out after ${timeoutMs}ms\n`, timedOut: true }
+        : { exitCode: code ?? 1, stdout, stderr };
     const child = spawn(cmd, args, {
       env: opts.env ?? process.env,
       stdio: [opts.input !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       // New session without a controlling terminal: OpenSSH < 8.4 (no SSH_ASKPASS_REQUIRE)
-      // then uses SSH_ASKPASS instead of /dev/tty for the key passphrase.
-      detached: opts.detached ?? false
+      // then uses SSH_ASKPASS instead of /dev/tty for the key passphrase. It also makes the
+      // child a process-group leader, so a timeout can kill its descendants too.
+      detached
     });
+    const kill = (sig: NodeJS.Signals) => {
+      if (detached && child.pid) {
+        try { process.kill(-child.pid, sig); return; } catch { /* group gone: fall through */ }
+      }
+      try { child.kill(sig); } catch { /* already exited */ }
+    };
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGTERM');
-      killTimer = setTimeout(() => child.kill('SIGKILL'), 5000);
+      kill('SIGTERM');
+      killTimer = setTimeout(() => kill('SIGKILL'), 5000);
     }, timeoutMs);
 
     child.stdout?.on('data', (d) => { stdout += d.toString(); });
     child.stderr?.on('data', (d) => { stderr += d.toString(); });
     child.on('error', (err) => finish({ exitCode: 1, stdout, stderr: stderr + err.message, timedOut }));
-    child.on('close', (code) => {
-      if (timedOut) {
-        finish({ exitCode: 124, stdout, stderr: stderr + `\nCommand timed out after ${timeoutMs}ms\n`, timedOut: true });
-      } else {
-        finish({ exitCode: code ?? 1, stdout, stderr });
-      }
+    child.on('exit', (code) => {
+      exitCode = code;
+      // A descendant (e.g. ssh under sshpass) may still hold stdout/stderr open.
+      graceTimer = setTimeout(() => {
+        if (timedOut) kill('SIGKILL');
+        finish(result(exitCode));
+      }, CLOSE_GRACE_MS);
     });
+    child.on('close', (code) => finish(result(code ?? exitCode)));
     if (opts.input !== undefined && child.stdin) {
       child.stdin.on('error', () => { /* ignore EPIPE */ });
       child.stdin.end(opts.input);
@@ -287,7 +316,7 @@ function withAuth(host: SshTarget, tool: 'ssh' | 'scp', args: string[]): { cmd: 
   if (authMethod(host) === 'password') {
     const env: NodeJS.ProcessEnv = { ...process.env, SSHPASS: host.password ?? '' };
     delete env[ASKPASS_SECRET_ENV];
-    return { cmd: 'sshpass', args: ['-e', tool, ...args], env, detached: false };
+    return { cmd: 'sshpass', args: ['-e', tool, ...args], env, detached: true };
   }
   if (usesAskpass(host)) {
     return { cmd: tool, args, env: askpassEnv(host.keyPassphrase!), detached: true };
@@ -295,7 +324,7 @@ function withAuth(host: SshTarget, tool: 'ssh' | 'scp', args: string[]): { cmd: 
   const env = { ...process.env };
   delete env.SSHPASS;
   delete env[ASKPASS_SECRET_ENV];
-  return { cmd: tool, args, env, detached: false };
+  return { cmd: tool, args, env, detached: true };
 }
 
 /** Replace every secret of `host` in `text` (output returned to callers / stored in logs). */

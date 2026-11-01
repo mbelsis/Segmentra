@@ -162,7 +162,7 @@ async function main() {
     const logOnly = () => /LOG/.test(rules()) && !/-j DROP/.test(rules());
     const brief = () => rules().split('\n').filter((l) => /dport|LOG|DROP/.test(l)).join(' | ').slice(0, 160);
 
-    const host = (await api('POST', '/hosts', { token: op, body: { hostname: `sess-${suffix}`, mgmtIp: '127.0.0.1', sshPort: SSH_PORT, firewallBackend: 'iptables', enabled: true } })).host;
+    const host = (await api('POST', '/hosts', { token: admin, /* SSH target is admin-only */ body: { hostname: `sess-${suffix}`, mgmtIp: '127.0.0.1', sshPort: SSH_PORT, firewallBackend: 'iptables', enabled: true } })).host;
     hostId = host.id;
     const cred = await api('POST', '/ssh-credentials', { token: admin, body: { name: `sess-${suffix}`, username: 'segmentra', authMethod: 'KEY', privateKeyPem: readFileSync(join(keyDir, 'id_ed25519'), 'utf8'), scopeType: 'HOST', scopeId: host.id } });
     credId = (cred.sshCredential ?? cred.credential ?? cred).id;

@@ -199,7 +199,7 @@ async function main() {
   const appr = await mk('k8s-approver', 'approver');
 
   // Hosts/tags/VLANs whose addresses are the pod IPs we want to allow.
-  const host = async (name, ip) => (await api('POST', '/hosts', { token: op, body: { hostname: `${name}-${suffix}`, mgmtIp: ip, sshPort: 22, firewallBackend: 'iptables', enabled: true } })).host;
+  const host = async (name, ip) => (await api('POST', '/hosts', { token: admin, /* SSH target is admin-only */ body: { hostname: `${name}-${suffix}`, mgmtIp: ip, sshPort: 22, firewallBackend: 'iptables', enabled: true } })).host;
   const hostC = await host('k8s-client-c', ips['client-c']);
   const hostE = await host('k8s-client-e', ips['client-e']);
   const tagWeb = (await api('POST', '/tags', { token: op, body: { name: `k8s-web-${suffix}` } })).tag;

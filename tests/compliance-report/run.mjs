@@ -63,9 +63,9 @@ async function main() {
 
   console.log('\nThe report reflects the data');
   const ts = Date.now();
-  const unmanaged = (await api('POST', '/hosts', { token: op, body: { hostname: `cr-unmanaged-${suffix}`, mgmtIp: '192.0.2.77', enabled: true } })).host;
+  const unmanaged = (await api('POST', '/hosts', { token: admin, /* SSH target is admin-only */ body: { hostname: `cr-unmanaged-${suffix}`, mgmtIp: '192.0.2.77', enabled: true } })).host;
   const gwTag = (await api('GET', '/tags', { token: op })).tags.find((t) => t.name === 'iot-gateway');
-  const gw = (await api('POST', '/hosts', { token: op, body: { hostname: `cr-gw-${suffix}`, mgmtIp: '192.0.2.78', enabled: true, tagIds: gwTag ? [gwTag.id] : [] } })).host;
+  const gw = (await api('POST', '/hosts', { token: admin, /* SSH target is admin-only */ body: { hostname: `cr-gw-${suffix}`, mgmtIp: '192.0.2.78', enabled: true, tagIds: gwTag ? [gwTag.id] : [] } })).host;
   const hostile = `cr-<img src=x onerror=alert(1)>-${suffix}`;
   const formula = `=HYPERLINK("http://evil.example","x")-${suffix}`;
   const a1 = (await api('POST', '/iot-assets', { token: op, body: { name: hostile, assetType: 'plc', criticality: 'critical', ipAddress: '192.0.2.201', zone: 'cell-1' } })).asset;

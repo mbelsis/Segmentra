@@ -498,10 +498,10 @@ async function execInServiceAllowFailure(service, ...args) {
   return dockerComposeAllowFailure('exec', '-T', service, ...args);
 }
 
-async function createDebianHostAndPolicy(operatorToken, approverToken) {
+async function createDebianHostAndPolicy(operatorToken, approverToken, adminToken) {
   log(`Registering ${debianTarget.name} and its policy (tcp/8080 from target-b, ICMP from target-a)`);
   const hostResponse = await apiRequest('POST', '/hosts', {
-    token: operatorToken,
+    token: adminToken,
     body: { hostname: debianTarget.name, mgmtIp: debianTarget.ip, sshPort: 22, firewallBackend: 'iptables', enabled: true }
   });
   const hostId = hostResponse.host.id;
@@ -692,7 +692,7 @@ async function main() {
     await waitForApi();
 
     const { adminToken, operatorToken, approverToken } = await prepareUsersAndSettings();
-    const createdHosts = await createHosts(operatorToken);
+    const createdHosts = await createHosts(adminToken); // SSH target is admin-only
     const policies = await createPolicies(operatorToken, approverToken, createdHosts);
 
     await seedForeignRules(policies);
@@ -707,7 +707,7 @@ async function main() {
     await verifyCompliance(operatorToken, policies);
     await verifyDriftOnMissingJump(operatorToken, policies[0]);
 
-    const debianPolicy = await createDebianHostAndPolicy(operatorToken, approverToken);
+    const debianPolicy = await createDebianHostAndPolicy(operatorToken, approverToken, adminToken);
     await runAnsibleRound(adminToken, operatorToken, debianPolicy);
     await verifyLearningSession(operatorToken, debianPolicy);
     await verifyLearningSession(operatorToken, debianPolicy, { rsyslogDropInDisabled: true });

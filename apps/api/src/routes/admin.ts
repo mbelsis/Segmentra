@@ -1,6 +1,5 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import bcrypt from 'bcrypt';
 import { timingSafeEqual } from 'node:crypto';
 
 import { env } from '../lib/env.js';
@@ -72,7 +71,7 @@ adminRouter.post('/bootstrap', async (req, res) => {
     const userRes = await client.query(
       `INSERT INTO users (username, display_name, is_active, password_hash)
        VALUES ($1, $2, true, $3)
-       RETURNING id, username`,
+       RETURNING id, username, token_version`,
       [parsed.data.username, 'Bootstrap Admin', passwordHash]
     );
 
@@ -88,8 +87,9 @@ adminRouter.post('/bootstrap', async (req, res) => {
 
     await client.query('COMMIT');
 
-    const token = signJwt({ sub: userRes.rows[0].username, roles: ['admin'] });
-    return res.json({ token, user: userRes.rows[0] });
+    const { token_version: tv, ...user } = userRes.rows[0];
+    const token = signJwt({ sub: user.username, roles: ['admin'], uid: user.id, tv: Number(tv ?? 0) });
+    return res.json({ token, user });
   } catch (e) {
     await client.query('ROLLBACK');
     // eslint-disable-next-line no-console
@@ -343,7 +343,7 @@ adminRouter.post('/users', requireAuth, requireRole('admin'), async (req, res) =
       return res.status(409).json({ error: 'username_taken', message: `Username "${b.username}" is already in use.` });
     }
 
-    const passwordHash = await bcrypt.hash(b.password, 10);
+    const passwordHash = await hashPassword(b.password);
     const userRes = await client.query(
       `INSERT INTO users (username, display_name, email, password_hash, is_active)
        VALUES ($1, $2, $3, $4, $5) RETURNING id, username, display_name, email, is_active, created_at`,
@@ -413,7 +413,9 @@ adminRouter.put('/users/:id', requireAuth, requireRole('admin'), async (req, res
       `UPDATE users SET
          display_name = COALESCE($2, display_name),
          email = CASE WHEN $5::boolean THEN $3 ELSE email END,
-         is_active = COALESCE($4, is_active)
+         is_active = COALESCE($4, is_active),
+         -- Deactivating revokes the user's sessions for good (re-activation does not revive old tokens).
+         token_version = token_version + CASE WHEN $4::boolean IS FALSE AND is_active THEN 1 ELSE 0 END
        WHERE id = $1 RETURNING id, username, display_name, email, is_active`,
       [req.params.id, b.displayName ?? null, b.email ?? null, b.isActive ?? null, b.email !== undefined]
     );
@@ -471,9 +473,11 @@ adminRouter.post('/users/:id/reset-password', requireAuth, requireRole('admin'),
     });
   }
 
-  const passwordHash = await bcrypt.hash(parsed.data.newPassword, 10);
+  const passwordHash = await hashPassword(parsed.data.newPassword);
+  // Bumping token_version signs the user out everywhere (requireAuth rejects older tokens). Resetting
+  // your own password here signs you out too; use "Change password" to keep your session.
   const { rowCount } = await pool.query(
-    'UPDATE users SET password_hash = $2 WHERE id = $1',
+    'UPDATE users SET password_hash = $2, token_version = token_version + 1 WHERE id = $1',
     [req.params.id, passwordHash]
   );
   if (!rowCount) return res.status(404).json({ error: 'not_found' });

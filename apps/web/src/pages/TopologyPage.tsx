@@ -1,7 +1,11 @@
 import { useState, useEffect } from 'react';
 import { api } from '../lib/api';
+import { useAuth, hasRole } from '../lib/auth-context';
 
 export function TopologyPage() {
+  const { roles } = useAuth();
+  // Viewers and approvers can read topology views; only operators/admins change them (API: requireRole('operator', 'admin')).
+  const canEdit = hasRole(roles, 'operator', 'admin');
   const [views, setViews] = useState<any[]>([]);
   const [selectedView, setSelectedView] = useState<any>(null);
   const [flows, setFlows] = useState<any[]>([]);
@@ -158,6 +162,8 @@ export function TopologyPage() {
 
       {error && <div className="error-banner">{error} <button onClick={() => setError('')} className="btn-small btn-secondary" style={{ marginLeft: 8 }}>dismiss</button></div>}
 
+      {!canEdit && <p style={{ color: '#78644e', fontSize: '12.5px', fontStyle: 'italic' }}>Read-only: creating or changing views, flows and generated policies needs the operator or admin role.</p>}
+
       {/* How it works — shown when no view is selected */}
       {!selectedView && views.length === 0 && !discoveredTopology && (
         <div className="card" style={{ background: '#f7f4ef', border: '1px solid #e8e0d4' }}>
@@ -184,12 +190,12 @@ export function TopologyPage() {
 
       {/* Action buttons */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
-        <button onClick={() => setShowCreate(true)} className="btn-primary">+ New View</button>
+        {canEdit && <button onClick={() => setShowCreate(true)} className="btn-primary">+ New View</button>}
         <button onClick={autoDiscover} className="btn-secondary">Auto-Discover from Inventory</button>
       </div>
 
       {/* Create view form */}
-      {showCreate && (
+      {canEdit && showCreate && (
         <div className="card" style={{ border: '2px solid #8b6914' }}>
           <h3>Create View</h3>
           <div className="form-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
@@ -263,12 +269,12 @@ export function TopologyPage() {
               }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <strong style={{ color: '#3d2e1e', fontSize: '13.5px' }}>{v.name}</strong>
-                <button onClick={(e) => { e.stopPropagation(); deleteView(v.id); }} className="btn-small btn-danger" style={{ padding: '2px 8px', minHeight: 'auto' }}>Del</button>
+                {canEdit && <button onClick={(e) => { e.stopPropagation(); deleteView(v.id); }} className="btn-small btn-danger" style={{ padding: '2px 8px', minHeight: 'auto' }}>Del</button>}
               </div>
               <div style={{ fontSize: '12px', color: '#97846c', marginTop: 2 }}>{v.flow_count || 0} flow(s)</div>
             </div>
           ))}
-          {views.length === 0 && <p style={{ color: '#97846c', fontSize: '13px', fontStyle: 'italic' }}>No views yet. Create one above.</p>}
+          {views.length === 0 && <p style={{ color: '#97846c', fontSize: '13px', fontStyle: 'italic' }}>{canEdit ? "No views yet. Create one above." : "No views yet."}</p>}
         </div>
 
         {/* Selected view content */}
@@ -281,12 +287,12 @@ export function TopologyPage() {
                   <h3 style={{ margin: 0 }}>{selectedView.name}</h3>
                   {selectedView.description && <p style={{ margin: '4px 0 0', color: '#78644e', fontSize: '13px' }}>{selectedView.description}</p>}
                 </div>
-                <div style={{ display: 'flex', gap: 8 }}>
+                {canEdit && <div style={{ display: 'flex', gap: 8 }}>
                   <button onClick={() => setShowAddFlow(true)} className="btn-primary">+ Add Flow</button>
                   <button onClick={generatePolicies} className="btn-secondary" style={{ background: '#5a7a3a', color: '#fdfcf9', border: 'none' }}>
                     Generate Policies
                   </button>
-                </div>
+                </div>}
               </div>
             </div>
 
@@ -340,7 +346,7 @@ export function TopologyPage() {
                       </div>
 
                       {/* Remove button */}
-                      <button onClick={() => removeFlow(f.id)} className="btn-small btn-danger" style={{ padding: '2px 8px', minHeight: 'auto', fontSize: '11px' }}>x</button>
+                      {canEdit && <button onClick={() => removeFlow(f.id)} className="btn-small btn-danger" style={{ padding: '2px 8px', minHeight: 'auto', fontSize: '11px' }}>x</button>}
                     </div>
                   ))}
                 </div>
@@ -357,12 +363,12 @@ export function TopologyPage() {
             {flows.length === 0 && !showAddFlow && (
               <div className="card" style={{ textAlign: 'center', padding: '40px 24px', background: '#f7f4ef' }}>
                 <p style={{ color: '#97846c', marginBottom: 12, fontSize: '14px' }}>No flows defined yet. Add your first traffic flow to start designing your network policy.</p>
-                <button onClick={() => setShowAddFlow(true)} className="btn-primary">+ Add First Flow</button>
+                {canEdit && <button onClick={() => setShowAddFlow(true)} className="btn-primary">+ Add First Flow</button>}
               </div>
             )}
 
             {/* Add flow form */}
-            {showAddFlow && (
+            {canEdit && showAddFlow && (
               <div className="card" style={{ border: '2px solid #8b6914' }}>
                 <h3 style={{ marginBottom: 4 }}>Add Traffic Flow</h3>
                 <p style={{ color: '#78644e', fontSize: '13px', marginBottom: 16 }}>
@@ -448,7 +454,7 @@ export function TopologyPage() {
                         <td>{f.protocol.toUpperCase()}</td>
                         <td><code>{f.ports || 'any'}</code></td>
                         <td style={{ color: '#78644e', fontSize: '12.5px' }}>{f.comment || '-'}</td>
-                        <td><button onClick={() => removeFlow(f.id)} className="btn-small btn-danger" style={{ padding: '2px 8px', minHeight: 'auto' }}>x</button></td>
+                        <td>{canEdit && <button onClick={() => removeFlow(f.id)} className="btn-small btn-danger" style={{ padding: '2px 8px', minHeight: 'auto' }}>x</button>}</td>
                       </tr>
                     ))}
                   </tbody>

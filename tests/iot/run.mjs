@@ -109,11 +109,11 @@ async function main() {
     check('the lab is up: gateway and two devices with addresses', !!(gwIp && d1Ip && d2Ip), `${gwIp} ${d1Ip} ${d2Ip}`);
 
     const iotTag = (await api('GET', '/tags', { token: op })).tags.find((t) => t.name === 'iot-gateway');
-    const gw = (await api('POST', '/hosts', { token: op, body: { hostname: `iot-gw-${suffix}`, mgmtIp: '127.0.0.1', sshPort: SSH_PORT, firewallBackend: 'iptables', enabled: true, tagIds: [iotTag.id] } })).host;
+    const gw = (await api('POST', '/hosts', { token: admin, /* SSH target is admin-only */ body: { hostname: `iot-gw-${suffix}`, mgmtIp: '127.0.0.1', sshPort: SSH_PORT, firewallBackend: 'iptables', enabled: true, tagIds: [iotTag.id] } })).host;
     hostIds.push(gw.id);
     const cred = await api('POST', '/ssh-credentials', { token: admin, body: { name: `iot-${suffix}`, username: 'segmentra', authMethod: 'PASSWORD', password: 'segmentra123!', scopeType: 'HOST', scopeId: gw.id } });
     credId = (cred.sshCredential ?? cred.credential ?? cred).id;
-    const plainHost = (await api('POST', '/hosts', { token: op, body: { hostname: `iot-plain-${suffix}`, mgmtIp: '127.0.0.1', sshPort: SSH_PORT, enabled: true } })).host;
+    const plainHost = (await api('POST', '/hosts', { token: admin, /* SSH target is admin-only */ body: { hostname: `iot-plain-${suffix}`, mgmtIp: '127.0.0.1', sshPort: SSH_PORT, enabled: true } })).host;
     hostIds.push(plainHost.id);
 
     console.log('\nPassive discovery');

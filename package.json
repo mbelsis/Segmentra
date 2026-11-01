@@ -25,6 +25,7 @@
     "test:integration:iot": "node tests/iot/run.mjs",
     "test:integration:ot-gateway": "node tests/ot-gateway-lab/run.mjs",
     "test:unit:iot": "node --test tests/iot-helpers.test.mjs",
+    "test:audit-r4": "npm run build && node --test tests/audit-r4-compiler.test.mjs tests/audit-r4-deployments.test.mjs tests/audit-r4-executor.test.mjs tests/audit-r4-security.test.mjs tests/audit-r4-sessions.test.mjs",
     "test:review-fixes": "npm run build -w @segmentra/api && node --test tests/review-fixes.test.mjs",
     "test:integration:review-fixes": "node tests/review-fixes/run.mjs",
     "test:integration:race": "node tests/review-fixes/race.mjs",

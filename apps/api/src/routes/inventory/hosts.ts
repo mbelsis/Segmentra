@@ -52,6 +52,32 @@ async function credentialAssignmentProblem(req: any, body: any, value: string | 
   return null;
 }
 
+export const SSH_TARGET_FORBIDDEN = {
+  error: 'forbidden',
+  message: "Only admins can set or change a host's SSH address/port"
+} as const;
+const DEFAULT_SSH_PORT = 22;
+
+/**
+ * The SSH target of a host (mgmt_ip + ssh_port) decides where the automatically resolved, admin-managed
+ * SSH credential (login / sudo password, key) is sent. Host keys are accepted on first use
+ * (StrictHostKeyChecking=accept-new), so whoever can point a host at an address they control receives the
+ * credential on the next readiness check / deployment. Setting or changing it is therefore admin-only;
+ * operators may create hosts without a target (address empty, default port) and edit everything else.
+ * The executors only ever connect to mgmt_ip (never to the hostname), so the hostname stays operator-editable.
+ */
+export function isAdmin(req: any): boolean {
+  return Boolean(req.auth?.roles?.includes('admin'));
+}
+
+/** Create: a non-admin may not give an address or a non-default port. */
+export function createSshTargetForbidden(req: any, b: { mgmtIp?: string | null; sshPort?: number | null }): boolean {
+  if (isAdmin(req)) return false;
+  if (b.mgmtIp !== undefined && b.mgmtIp !== null && String(b.mgmtIp).trim() !== '') return true;
+  if (b.sshPort !== undefined && b.sshPort !== null && b.sshPort !== DEFAULT_SSH_PORT) return true;
+  return false;
+}
+
 export const hostsRouter = Router();
 
 // Apply authentication to all routes
@@ -219,6 +245,7 @@ hostsRouter.post('/', requireRole('operator', 'admin'), async (req, res) => {
   const b = parsed.data;
   const credProblem = await credentialAssignmentProblem(req, req.body, b.sshCredentialId);
   if (credProblem) return res.status(credProblem.status).json(credProblem.body);
+  if (createSshTargetForbidden(req, b)) return res.status(403).json(SSH_TARGET_FORBIDDEN);
 
   const swarmCols = swarmColumns(b);
 
@@ -334,7 +361,15 @@ hostsRouter.get('/:id', requireRole('viewer', 'operator', 'approver', 'admin'), 
   res.json({ host: hostOut });
 });
 
-const updateHostSchema = createHostSchema.partial();
+const updateHostSchema = createHostSchema.partial().extend({
+  // null clears the management IP (admin only, like any change of the SSH target); '' / omitted keep it.
+  mgmtIp: z
+    .string()
+    .trim()
+    .nullable()
+    .optional()
+    .refine((v) => v === undefined || v === null || v === '' || isValidIp(v), { message: 'mgmtIp must be a valid IPv4 or IPv6 address' })
+});
 
 hostsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
   const parsed = updateHostSchema.safeParse(req.body);
@@ -349,15 +384,35 @@ hostsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
   // Swarm profile: sent as a group (swarmCluster/swarmRole/swarmAddr); an empty cluster clears it.
   const setSwarm = ['swarmCluster', 'swarmRole', 'swarmAddr'].some((k) => Object.prototype.hasOwnProperty.call(req.body ?? {}, k));
   const swarmCols = swarmColumns(b);
+  const clearMgmtIp = b.mgmtIp === null;
+  const newMgmtIp = typeof b.mgmtIp === 'string' && b.mgmtIp !== '' ? b.mgmtIp : null;
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    // Operators may send the SSH address/port (the UI may send the whole form), but only unchanged.
+    if (!isAdmin(req) && (clearMgmtIp || newMgmtIp !== null || b.sshPort !== undefined)) {
+      const cur = await client.query(
+        `SELECT (mgmt_ip IS NOT DISTINCT FROM $2::inet) AS same_ip, ssh_port FROM hosts WHERE id = $1 FOR UPDATE`,
+        [req.params.id, newMgmtIp]
+      );
+      if (!cur.rows[0]) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const ipChanged = (clearMgmtIp || newMgmtIp !== null) && !cur.rows[0].same_ip;
+      const portChanged = b.sshPort !== undefined && b.sshPort !== null && Number(cur.rows[0].ssh_port ?? DEFAULT_SSH_PORT) !== b.sshPort;
+      if (ipChanged || portChanged) {
+        await client.query('ROLLBACK');
+        return res.status(403).json(SSH_TARGET_FORBIDDEN);
+      }
+    }
     
     const { rows } = await client.query(
       `UPDATE hosts
        SET hostname = COALESCE($2, hostname),
-           mgmt_ip = COALESCE($3, mgmt_ip),
+           mgmt_ip = CASE WHEN $19::boolean THEN NULL ELSE COALESCE($3::inet, mgmt_ip) END,
            ssh_port = COALESCE($4, ssh_port),
            environment = COALESCE($5, environment),
            os_family = COALESCE($6, os_family),
@@ -376,7 +431,7 @@ hostsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
       [
         req.params.id,
         b.hostname ?? null,
-        b.mgmtIp || null,
+        newMgmtIp,
         b.sshPort ?? null,
         b.environment ?? null,
         b.osFamily ?? null,
@@ -391,7 +446,8 @@ hostsRouter.put('/:id', requireRole('operator', 'admin'), async (req, res) => {
         swarmCols.role,
         swarmCols.addr,
         typeof b.swarmEncryptedOverlay === 'boolean' ? b.swarmEncryptedOverlay : null,
-        typeof b.dockerPublishedPorts === 'boolean' ? b.dockerPublishedPorts : null
+        typeof b.dockerPublishedPorts === 'boolean' ? b.dockerPublishedPorts : null,
+        clearMgmtIp
       ]
     );
     if (!rows[0]) {
@@ -651,6 +707,7 @@ hostsRouter.post('/bulk/import', requireRole('operator', 'admin'), async (req, r
   const results: Array<{ row: number; hostname: string; success: boolean; error?: string; warnings?: string[] }> = [];
 
   const importedTagIds: string[] = [];
+  const adminImport = isAdmin(req);
   const client = await pool.connect();
 
   try {
@@ -735,18 +792,34 @@ hostsRouter.post('/bulk/import', requireRole('operator', 'admin'), async (req, r
       // ---- Write the row inside a savepoint so one bad row can't poison the transaction ----
       await client.query('SAVEPOINT import_row');
       try {
+        // The SSH target (management IP / SSH port) is admin-only (see createSshTargetForbidden). A missing
+        // column keeps the existing value of an existing host; for an operator a present column must match it.
+        if (!adminImport && (ipIdx >= 0 || sshPortIdx >= 0)) {
+          const cur = await client.query(
+            `SELECT (mgmt_ip IS NOT DISTINCT FROM $2::inet) AS same_ip, ssh_port FROM hosts WHERE hostname = $1 FOR UPDATE`,
+            [hostname, mgmtIp]
+          );
+          const existing = cur.rows[0];
+          const ipChanged = ipIdx >= 0 && (existing ? !existing.same_ip : mgmtIp !== null);
+          const portChanged = sshPortIdx >= 0 && sshPort !== Number(existing?.ssh_port ?? DEFAULT_SSH_PORT);
+          if (ipChanged || portChanged) {
+            await client.query('RELEASE SAVEPOINT import_row');
+            fail(SSH_TARGET_FORBIDDEN.message);
+            continue;
+          }
+        }
         const hostRes = await client.query(
           `INSERT INTO hosts (hostname, mgmt_ip, ssh_port, firewall_backend, vlan_id, enabled)
            VALUES ($1, $2, $3, $4, $5, $6)
            ON CONFLICT (hostname) DO UPDATE SET
-             mgmt_ip = EXCLUDED.mgmt_ip,
-             ssh_port = EXCLUDED.ssh_port,
+             mgmt_ip = CASE WHEN $7::boolean THEN EXCLUDED.mgmt_ip ELSE hosts.mgmt_ip END,
+             ssh_port = CASE WHEN $8::boolean THEN EXCLUDED.ssh_port ELSE hosts.ssh_port END,
              firewall_backend = EXCLUDED.firewall_backend,
              vlan_id = EXCLUDED.vlan_id,
              enabled = EXCLUDED.enabled,
              updated_at = now()
            RETURNING id`,
-          [hostname, mgmtIp, sshPort, firewallBackend, vlanId, enabled]
+          [hostname, mgmtIp, sshPort, firewallBackend, vlanId, enabled, ipIdx >= 0, sshPortIdx >= 0]
         );
 
         const hostId = hostRes.rows[0].id;

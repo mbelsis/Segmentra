@@ -98,7 +98,7 @@ async function main() {
 
   try {
     for (const n of nodes) {
-      const h = (await api('POST', '/hosts', { token: op, body: {
+      const h = (await api('POST', '/hosts', { token: admin, /* SSH target is admin-only */ body: {
         hostname: `swarm-node${n.i}-${suffix}`, mgmtIp: '127.0.0.1', sshPort: n.port, firewallBackend: 'iptables', enabled: true,
         swarmCluster: `lab-${suffix}`, swarmRole: n.i === 1 ? 'manager' : 'worker', swarmAddr: n.ip, dockerPublishedPorts: true
       } })).host;

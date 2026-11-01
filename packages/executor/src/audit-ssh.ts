@@ -120,11 +120,11 @@ function collectKernelLogFallbackSnippet(logFilePath: string): string {
     '      [ -f "$seg_f" ] || continue',
     '      seg_size=$(wc -c < "$seg_f")',
     '      if [ "$seg_size" -ge "${seg_off:-0}" ]; then tail -c +$((${seg_off:-0}+1)) "$seg_f"; else cat "$seg_f"; fi | grep -F FW-AUDIT >> "$seg_tmp" || true',
-    '      if grep -q "SRC=\\|saddr" "$seg_tmp" 2>/dev/null; then break; fi',
+    '      if grep -Eq \'SRC=|saddr\' "$seg_tmp" 2>/dev/null; then break; fi',
     '    done',
     '  fi',
     `  for seg_f in ${KERNEL_LOG_FILES.join(' ')}; do if [ -f "$seg_f" ]; then echo "file $seg_f $(wc -c < "$seg_f")" >> "$seg_new"; fi; done`,
-    '  seg_n=$(grep -F FW-AUDIT "$seg_tmp" | grep -c "SRC=\\|saddr" || true)',
+    '  seg_n=$(grep -F FW-AUDIT "$seg_tmp" | grep -Ec \'SRC=|saddr\' || true)',
     '  if [ "$seg_n" -gt 0 ]; then',
     `    grep -F FW-AUDIT "$seg_tmp" >> ${log}`,
     `    echo "collected $seg_n FW-AUDIT lines from the kernel log (rsyslog drop-in inactive)"`,
@@ -167,7 +167,8 @@ export async function startAuditSession(
     return { hostname: host.hostname, success: false, exitCode: 1, stdout: '', stderr: 'Learning sessions are not supported for native firewalld/UFW backends; the enforced permanent policy was not changed.' };
   }
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-  const backupPath = `${BACKUP_DIR}/${host.backend === 'nftables' ? 'nft' : 'iptables'}.audit-backup.${timestamp}`;
+  // Random suffix: two sessions started within the same second must never share a backup file.
+  const backupPath = `${BACKUP_DIR}/${host.backend === 'nftables' ? 'nft' : 'iptables'}.audit-backup.${timestamp}-${crypto.randomBytes(4).toString('hex')}`;
   const c = collector(host);
   const sudo = (script: string, o: { args?: string[] } = {}) => runSshSudo(host, script, { ...opts, args: o.args });
 

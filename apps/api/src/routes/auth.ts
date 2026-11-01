@@ -2,10 +2,10 @@ import { Router } from 'express';
 
 import { z } from 'zod';
 
-import { signJwt } from '../services/jwt.js';
+import { sessionClaims, signJwt } from '../services/jwt.js';
 import { requireAuth } from '../middleware/auth.js';
 import { ldapLogin } from '../services/ldap.js';
-import { verifyPassword, hashPassword } from '../services/password.js';
+import { verifyPassword, hashPassword, burnPasswordCheck } from '../services/password.js';
 import { pool } from '../db/pool.js';
 
 export const authRouter = Router();
@@ -74,7 +74,7 @@ authRouter.post('/login', async (req, res) => {
 
   // First, try local authentication (users with password_hash)
   const localUserRes = await pool.query(
-    `SELECT u.id, u.username, u.display_name, u.email, u.password_hash, u.is_active
+    `SELECT u.id, u.username, u.display_name, u.email, u.password_hash, u.is_active, u.token_version
      FROM users u
      WHERE u.username=$1 AND u.password_hash IS NOT NULL`,
     [username]
@@ -83,13 +83,10 @@ authRouter.post('/login', async (req, res) => {
   if (localUserRes.rows.length > 0) {
     const user = localUserRes.rows[0];
 
-    // All failure cases return the same generic error to prevent enumeration
-    if (!user.is_active) {
-      return fail();
-    }
-
+    // All failure cases return the same generic error to prevent enumeration. The password is checked
+    // before is_active so a disabled account answers in the same time as a wrong password.
     const passwordValid = await verifyPassword(password, user.password_hash);
-    if (!passwordValid) {
+    if (!passwordValid || !user.is_active) {
       return fail();
     }
 
@@ -111,9 +108,13 @@ authRouter.post('/login', async (req, res) => {
     }
 
     resetFailedLogins(clientIp);
-    const token = signJwt({ sub: username, roles });
+    const token = signJwt({ sub: user.username, roles, uid: user.id, tv: Number(user.token_version ?? 0) });
     return res.json({ token, user: { id: user.id, username: user.username, display_name: user.display_name, email: user.email }, roles });
   }
+
+  // No local user with that name: spend the same bcrypt work as a real password check, so the response
+  // time does not reveal which usernames exist locally (LDAP, when configured, adds its own latency).
+  await burnPasswordCheck(password);
 
   // If no local user, try LDAP authentication
   let ldap: Awaited<ReturnType<typeof ldapLogin>>;
@@ -156,7 +157,7 @@ authRouter.post('/login', async (req, res) => {
                      email=EXCLUDED.email,
                      directory_subject=EXCLUDED.directory_subject,
                      last_login_at=now()
-       RETURNING id, username, display_name, email`,
+       RETURNING id, username, display_name, email, token_version`,
         [username, ldap.displayName, ldap.email, String(ldap.directorySubject)]
       );
 
@@ -181,18 +182,31 @@ authRouter.post('/login', async (req, res) => {
     }
 
     resetFailedLogins(clientIp);
-    const token = signJwt({ sub: username, roles });
-    return res.json({ token, user: userRes.rows[0], roles });
+    const { token_version: ldapTv, ...ldapUser } = userRes.rows[0];
+    const token = signJwt({ sub: ldapUser.username, roles, uid: ldapUser.id, tv: Number(ldapTv ?? 0) });
+    return res.json({ token, user: ldapUser, roles });
 });
 
-authRouter.post('/logout', async (_req, res) => {
-  // JWT is stateless in v1; client drops token
+/**
+ * Logout revokes the session server-side: with a valid token it bumps users.token_version, which
+ * invalidates ALL of that user's tokens (every browser/session), not only this one. Without a (valid)
+ * token it is a no-op, so a client can always call it before dropping its token.
+ */
+authRouter.post('/logout', async (req, res) => {
+  const m = (req.header('authorization') ?? '').match(/^Bearer\s+(.+)$/i);
+  const claims = m ? sessionClaims(m[1]) : null;
+  if (claims) {
+    await pool.query(
+      `UPDATE users SET token_version = token_version + 1 WHERE id::text = $1 AND username = $2 AND token_version = $3`,
+      [claims.uid, claims.sub, claims.tv]
+    );
+  }
   return res.json({ ok: true });
 });
 
 authRouter.get('/me', requireAuth, async (req, res) => {
-  const { rows } = await pool.query(`SELECT id, username, display_name, email FROM users WHERE username=$1`, [
-    req.auth!.username
+  const { rows } = await pool.query(`SELECT id, username, display_name, email FROM users WHERE id=$1`, [
+    req.auth!.userId
   ]);
   return res.json({ user: rows[0] ?? null, roles: req.auth!.roles });
 });
@@ -207,12 +221,11 @@ authRouter.post('/change-password', requireAuth, async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
 
   const { currentPassword, newPassword } = parsed.data;
-  const username = req.auth!.username;
 
   // Check if user has a local password (password_hash)
   const userRes = await pool.query(
-    `SELECT id, password_hash FROM users WHERE username=$1`,
-    [username]
+    `SELECT id, username, password_hash FROM users WHERE id=$1`,
+    [req.auth!.userId]
   );
 
   if (userRes.rows.length === 0) {
@@ -235,12 +248,15 @@ authRouter.post('/change-password', requireAuth, async (req, res) => {
   // Hash and update new password
   const newPasswordHash = await hashPassword(newPassword);
 
-  await pool.query(
-    `UPDATE users SET password_hash=$1 WHERE id=$2`,
+  // Bumping token_version revokes every existing session of this user (a stolen token stops working);
+  // the caller gets a fresh token so this session continues.
+  const upd = await pool.query(
+    `UPDATE users SET password_hash=$1, token_version = token_version + 1 WHERE id=$2 RETURNING token_version`,
     [newPasswordHash, user.id]
   );
+  const token = signJwt({ sub: user.username, roles: req.auth!.roles, uid: user.id, tv: Number(upd.rows[0].token_version) });
 
-  return res.json({ ok: true });
+  return res.json({ ok: true, token });
 });
 
 

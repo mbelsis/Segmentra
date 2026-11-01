@@ -172,6 +172,14 @@ app.listen(env.PORT, () => {
       console.error('[SIEM] Error starting audit forwarder:', e);
     });
 
+  // Deployments left RUNNING by a previous process: fail their unfinished hosts and finalize.
+  void import('./routes/deployments.js')
+    .then(({ recoverInterruptedDeployments }) => recoverInterruptedDeployments())
+    .catch((e) => {
+      // eslint-disable-next-line no-console
+      console.error('[Deployments] Restart recovery failed:', e);
+    });
+
   // Start periodic timeout check for stale host deployments (every 2 minutes)
   setInterval(async () => {
     try {
@@ -270,51 +278,19 @@ app.listen(env.PORT, () => {
     }
   }, 60 * 1000); // Check every 1 minute
 
-  // Start periodic policy test session expiry processor (every 1 minute)
-  // When a test session expires, SSH into the host to restore original rules and collect logs.
-  // Sessions whose restore failed stay RUNNING (with scheduled_end_at pulled forward) and are retried here.
-  // Tests whose start was interrupted (API stopped while DEPLOYING) are restored from their backup as well, once at
-  // startup and on every tick (see recoverInterruptedTestSession).
-  const recoverInterruptedTests = async () => {
+  // Policy test session expiry (startup + every 1 minute): restores the original rules of expired tests and collects
+  // their logs, retries failed restores (sessions stay RUNNING with scheduled_end_at pulled forward), and restores tests
+  // whose start was interrupted (API stopped while DEPLOYING). Passes never overlap (see processExpiredTestSessions).
+  const runTestSessionExpiry = async () => {
     try {
-      const { recoverInterruptedTestSessions } = await import('./lib/policy-test-session.js');
-      for (const r of await recoverInterruptedTestSessions()) {
-        // eslint-disable-next-line no-console
-        console.log(`[Policy Test] Interrupted start of session ${r.id} (${r.hostname}): ${r.result.outcome}${'error' in r.result ? ` — ${r.result.error}` : ''}`);
-      }
-    } catch (e) {
-      // eslint-disable-next-line no-console
-      console.error('[Policy Test] Error recovering interrupted test sessions:', e);
-    }
-  };
-  void recoverInterruptedTests();
-  setInterval(async () => {
-    await recoverInterruptedTests();
-    try {
-      const { pool } = await import('./db/pool.js');
-      const { rows } = await pool.query(
-        `SELECT pts.*, h.hostname, h.mgmt_ip, h.ssh_port, h.firewall_backend
-         FROM policy_test_sessions pts
-         JOIN hosts h ON h.id = pts.host_id
-         WHERE pts.status = 'RUNNING' AND pts.scheduled_end_at <= now()`
-      );
-      if (rows.length === 0) return;
-
-      const { restoreAndCollectSession } = await import('./lib/policy-test-session.js');
-      for (const session of rows) {
-        const result = await restoreAndCollectSession(session);
-        if (result.ok) {
-          // eslint-disable-next-line no-console
-          console.log(`[Policy Test] Auto-restored ${session.hostname}, collected ${result.entryCount} entries, ${result.flowCount} flows`);
-        } else {
-          // eslint-disable-next-line no-console
-          console.error(`[Policy Test] Restore failed for session ${session.id} (${session.hostname}); will retry: ${result.error}`);
-        }
-      }
+      const { processExpiredTestSessions } = await import('./lib/policy-test-session.js');
+      await processExpiredTestSessions();
     } catch (e) {
       // eslint-disable-next-line no-console
       console.error('[Policy Test] Error processing expired test sessions:', e);
     }
-  }, 60 * 1000); // Check every 1 minute
+  };
+  void runTestSessionExpiry();
+  setInterval(runTestSessionExpiry, 60 * 1000); // Check every 1 minute
 });
 

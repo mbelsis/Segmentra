@@ -14,9 +14,11 @@
  *
  * Import semantics: everything is matched by name (VLANs by their tag number, policy versions by
  * policy set name + version number). Missing things are created, existing ones are left untouched
- * and reported, so an import is idempotent and safe to repeat. Policy versions keep the status and
- * the approval trail they had; users in that trail are matched by username and dropped when they
- * do not exist. Nothing is deployed.
+ * and reported, so an import is idempotent and safe to repeat. Policy versions keep DRAFT, REJECTED
+ * and ARCHIVED; APPROVED, DEPLOYED and PENDING_APPROVAL versions are created as PENDING_APPROVAL
+ * (submitted by the importing admin, no approver) and must be approved again, so a backup cannot
+ * bypass separation of duties (see importedVersionStatus). Users in the trail are matched by
+ * username and dropped when they do not exist. Nothing is deployed.
  */
 import type { PoolClient } from 'pg';
 import { z } from 'zod';
@@ -602,6 +604,27 @@ async function insertRules(
 }
 
 /**
+ * Status a policy version gets when an import CREATES it. A backup is a plain JSON document anyone can
+ * edit, so its approval trail is not evidence: importing APPROVED / DEPLOYED versions with an arbitrary
+ * `approvedBy` would bypass separation of duties (the importing admin could make any rule set
+ * deployable). Versions that are, or were on their way to being, deployable are created as
+ * PENDING_APPROVAL, submitted by the importing admin (who therefore cannot approve them), with no
+ * approver. DRAFT and REJECTED keep their status; ARCHIVED stays ARCHIVED (archived versions can never
+ * be approved or deployed again) but without the unverifiable approver, so it never counts as approval
+ * evidence (e.g. in compliance reports).
+ */
+export function importedVersionStatus(v: { versionNumber: number; status: string }): { status: string; resubmit: boolean; warning: string | null } {
+  if (v.status === 'APPROVED' || v.status === 'DEPLOYED' || v.status === 'PENDING_APPROVAL') {
+    return {
+      status: 'PENDING_APPROVAL',
+      resubmit: true,
+      warning: `version ${v.versionNumber} (${v.status} in the backup) imported as PENDING_APPROVAL, needs re-approval`
+    };
+  }
+  return { status: v.status, resubmit: false, warning: null };
+}
+
+/**
  * Import a backup document. Runs in one transaction; with dryRun the transaction is rolled back
  * and the result shows what would happen.
  */
@@ -833,6 +856,8 @@ export async function importBackup(document: BackupDocument, opts: { dryRun: boo
           continue;
         }
         const vWhere = `${where} v${v.versionNumber}`;
+        const imp = importedVersionStatus(v);
+        if (imp.warning) warnings.push(`${where}: ${imp.warning}`);
         const { rows } = await client.query(
           `INSERT INTO policy_versions
              (policy_set_id, version_number, status, change_summary, created_by, created_at, submitted_by, submitted_at, submission_note,
@@ -842,18 +867,18 @@ export async function importBackup(document: BackupDocument, opts: { dryRun: boo
           [
             setId,
             v.versionNumber,
-            v.status,
+            imp.status,
             v.changeSummary ?? null,
             res.user(v.createdBy) ?? opts.actorUserId,
             v.createdAt ?? null,
-            res.user(v.submittedBy),
-            v.submittedAt ?? null,
+            imp.resubmit ? opts.actorUserId : res.user(v.submittedBy),
+            imp.resubmit ? new Date().toISOString() : (v.submittedAt ?? null),
             v.submissionNote ?? null,
-            res.user(v.approvedBy),
-            v.approvedAt ?? null,
-            res.user(v.rejectedBy),
-            v.rejectedAt ?? null,
-            v.rejectionReason ?? null,
+            null, // approved_by: never taken from a backup (see importedVersionStatus)
+            null,
+            imp.resubmit ? null : res.user(v.rejectedBy),
+            imp.resubmit ? null : (v.rejectedAt ?? null),
+            imp.resubmit ? null : (v.rejectionReason ?? null),
             v.interfaceScope.type,
             v.interfaceScope.roles ?? null,
             v.interfaceScope.names ?? null,

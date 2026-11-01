@@ -134,7 +134,7 @@ async function main() {
 
   console.log('\nInventory: gateway host and OT assets');
   const iotTag = (await api('GET', '/tags', { token: op })).tags.find((t) => t.name === 'iot-gateway');
-  const gw = (await api('POST', '/hosts', { token: op, body: { hostname: 'ot-gw', mgmtIp: GW.it, sshPort: 22, firewallBackend: 'iptables', enabled: true, tagIds: [iotTag.id] } })).host;
+  const gw = (await api('POST', '/hosts', { token: admin, /* SSH target is admin-only */ body: { hostname: 'ot-gw', mgmtIp: GW.it, sshPort: 22, firewallBackend: 'iptables', enabled: true, tagIds: [iotTag.id] } })).host;
   const readiness = await api('POST', `/host-readiness/hosts/${gw.id}/check`, { token: op });
   check('readiness on the gateway over SSH: no errors, iptables found', (readiness.errors ?? []).length === 0 && /iptables/.test(readiness.iptablesVersion ?? ''), readiness.iptablesVersion);
   const plc = (await api('POST', '/iot-assets', { token: op, body: { name: 'plc-1', assetType: 'plc', vendor: 'Siemens', model: 'S7-1500', ipAddress: PLC, zone: 'line-1', criticality: 'critical', gatewayIds: [gw.id] } })).asset;
@@ -223,7 +223,10 @@ async function main() {
     let st = '';
     for (let i = 0; i < 90; i += 1) { st = (await api('GET', `/deployments/${expDep.deployment.id}`, { token: op })).deployment.status; if (st === 'EXPIRED') break; await delay(2000); }
     check('a deployment with a one-minute expiry and REMOVE is marked EXPIRED', st === 'EXPIRED', st);
-    check('SEGMENTRA-FWD and the FORWARD jump are gone and all traffic to the devices passes again', !/SEGMENTRA-FWD/.test((await execAllow('gateway', 'iptables -S')).stdout) && (await tcp('hmi', PLC, 102)) && (await tcp('eng', RTU, 502)));
+    // EXPIRED is set when the expiry job claims the deployment; the REMOVE on the host follows, so wait for it.
+    let fwdGone = false;
+    for (let i = 0; i < 20 && !fwdGone; i += 1) { fwdGone = !/SEGMENTRA-FWD/.test((await execAllow('gateway', 'iptables -S')).stdout); if (!fwdGone) await delay(2000); }
+    check('SEGMENTRA-FWD and the FORWARD jump are gone and all traffic to the devices passes again', fwdGone && (await tcp('hmi', PLC, 102)) && (await tcp('eng', RTU, 502)));
   } else {
     check('deployment expiry could not be requested through the API', false, `${expDep.status} ${JSON.stringify(expDep).slice(0, 200)}`);
   }

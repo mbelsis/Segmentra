@@ -3,7 +3,15 @@ import { pool } from '../db/pool.js';
 export async function instantiateTemplate(
   templateId: string,
   userId: string | null,
-  options?: { name?: string; scopeType?: string; scopeTagId?: string; scopeVlanId?: string; hostIds?: string[] }
+  options?: {
+    name?: string; scopeType?: string; scopeTagId?: string; scopeVlanId?: string; hostIds?: string[];
+    /**
+     * Auto-apply: create nothing (returns policySet null) when a policy set from this template for scopeTagId already
+     * exists. Checked under a transaction-scoped advisory lock keyed on (template, tag), so concurrent auto-apply runs
+     * for the same tag cannot both create one.
+     */
+    onlyIfAbsentForTag?: boolean;
+  }
 ): Promise<{ policySet: any; version: any; rulesCreated: number }> {
   const { rows: templates } = await pool.query(`SELECT * FROM policy_templates WHERE id = $1`, [templateId]);
   if (!templates[0]) throw new Error('Template not found');
@@ -21,6 +29,18 @@ export async function instantiateTemplate(
     // Create policy set
     const scopeType = options?.scopeType ?? (template.target_tag_id ? 'TAG' : 'HOST_LIST');
     const scopeTagId = options?.scopeTagId ?? template.target_tag_id;
+
+    if (options?.onlyIfAbsentForTag && scopeTagId) {
+      await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`segmentra-template-apply:${templateId}:${scopeTagId}`]);
+      const existing = await client.query(
+        `SELECT id FROM policy_sets WHERE source_template_id = $1 AND scope_tag_id = $2 LIMIT 1`,
+        [templateId, scopeTagId]
+      );
+      if (existing.rows[0]) {
+        await client.query('ROLLBACK');
+        return { policySet: null, version: null, rulesCreated: 0 };
+      }
+    }
     const psRes = await client.query(
       `INSERT INTO policy_sets (name, description, scope_type, scope_tag_id, scope_vlan_id, source_template_id, created_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
@@ -152,11 +172,14 @@ export async function autoApplyTemplates(tagId: string): Promise<{ templatesAppl
     const { rows: sysUser } = await pool.query(`SELECT id FROM users WHERE username = 'admin' LIMIT 1`);
     const systemUserId = sysUser[0]?.id ?? null;
 
-    await instantiateTemplate(template.id, systemUserId, {
+    // Re-checked under a (template, tag) advisory lock inside the creating transaction: two auto-apply runs for the
+    // same tag (e.g. CSV import + tag rule) both pass the unlocked check above, only one may create the policy set.
+    const created = await instantiateTemplate(template.id, systemUserId, {
       scopeType: 'TAG',
-      scopeTagId: tagId
+      scopeTagId: tagId,
+      onlyIfAbsentForTag: true
     });
-    templatesApplied++;
+    if (created.policySet) templatesApplied++;
   }
 
   return { templatesApplied };

@@ -416,6 +416,14 @@ policyTestingRouter.post('/sessions/:id/stop', requireRole('operator', 'approver
   const session = sessions[0];
 
   const result = await restoreAndCollectSession(session);
+  if (!result.ok && result.notActive) {
+    // The expiry job (or a concurrent Stop) restored it while this request waited for the host lock.
+    return res.status(409).json({
+      error: 'not_running',
+      message: `This test was already stopped${result.status ? ` (it is ${result.status})` : ''}; the original rules were restored by the other run.`,
+      status: result.status ?? null
+    });
+  }
   await createAuditEvent({
     actorUserId: req.auth!.userId ?? null,
     action: result.ok ? 'POLICY_TEST_STOP' : 'POLICY_TEST_RESTORE_FAILED',
@@ -487,11 +495,12 @@ policyTestingRouter.post('/sessions/:id/collect-logs', requireRole('operator', '
     const parsedEntries = parseFirewallLogs(logContent);
     const flows = groupCommunicationFlows(parsedEntries);
 
-    // Update raw_log_data with latest snapshot (preserve any restore bookkeeping keys)
+    // Update raw_log_data with latest snapshot (preserve any restore bookkeeping keys). Only while still RUNNING: if
+    // Stop/expiry restored the session meanwhile, its final log collection must not be replaced by this older peek.
     await pool.query(
       `UPDATE policy_test_sessions
          SET raw_log_data = COALESCE(raw_log_data, '{}'::jsonb) || $2::jsonb
-       WHERE id = $1`,
+       WHERE id = $1 AND status = 'RUNNING'`,
       [session.id, JSON.stringify({ entries: parsedEntries, flows })]
     );
 
@@ -510,6 +519,12 @@ policyTestingRouter.post('/sessions/:id/collect-logs', requireRole('operator', '
 
 // Analyze: compare collected traffic flows against the policy rules
 policyTestingRouter.post('/sessions/:id/analyze', requireRole('operator', 'approver', 'admin'), async (req, res) => {
+  // Analysis marks the session COMPLETED. A session that still owns the host's firewall (log-only rules active) must be
+  // stopped first, or the expiry job would no longer restore it.
+  const st = await pool.query(`SELECT status FROM policy_test_sessions WHERE id = $1`, [req.params.id]);
+  if (st.rows[0] && (ACTIVE_TEST_SESSION_STATUSES as readonly string[]).includes(st.rows[0].status)) {
+    return res.status(409).json({ error: 'test_still_running', message: `The test is ${st.rows[0].status}; stop it (which restores the original rules) before analyzing.` });
+  }
   try {
     const result = await analyzePolicyTest(req.params.id);
     res.json({

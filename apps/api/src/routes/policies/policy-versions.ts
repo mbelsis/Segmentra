@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 
 import { pool } from '../../db/pool.js';
+import { ACTIVE_TEST_SESSION_STATUSES } from '../../services/host-lock.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 import { comparePolicyVersions } from '../../services/policy-diff.js';
 import { isPolicyVersionHighRisk } from '../../services/high-risk.js';
@@ -480,14 +481,45 @@ policyVersionsRouter.delete('/policy-versions/:versionId', requireRole('operator
     });
   }
 
-  // Delete atomically only if still DRAFT/REJECTED (rules cascade)
-  const del = await pool.query(
-    `DELETE FROM policy_versions WHERE id = $1 AND status IN ('DRAFT', 'REJECTED') RETURNING id`,
-    [req.params.versionId]
-  );
-  if (!del.rows[0]) {
-    return res.status(409).json({ error: 'cannot_delete', message: 'The version changed state and can no longer be deleted.' });
+  // Delete atomically only if still DRAFT/REJECTED and no policy test of it is live (rules AND test sessions cascade:
+  // deleting a live session would leave its host in log-only test mode with nothing left to restore it).
+  // The version row is locked first (FOR UPDATE): a concurrent test start inserting a session takes a FOR KEY SHARE
+  // lock on it through the foreign key, so it either committed before we look (and is seen) or waits and then fails.
+  const client = await pool.connect();
+  let refusal: { status: number; body: Record<string, unknown> } | null = null;
+  try {
+    await client.query('BEGIN');
+    const locked = await client.query(
+      `SELECT status FROM policy_versions WHERE id = $1 FOR UPDATE`,
+      [req.params.versionId]
+    );
+    if (!locked.rows[0] || !['DRAFT', 'REJECTED'].includes(locked.rows[0].status)) {
+      refusal = { status: 409, body: { error: 'cannot_delete', message: 'The version changed state and can no longer be deleted.' } };
+    } else {
+      const live = await client.query(
+        `SELECT COUNT(*)::int AS n FROM policy_test_sessions WHERE policy_version_id = $1 AND status = ANY($2::text[])`,
+        [req.params.versionId, [...ACTIVE_TEST_SESSION_STATUSES]]
+      );
+      if (live.rows[0].n > 0) {
+        refusal = {
+          status: 409,
+          body: {
+            error: 'policy_test_active',
+            message: `This version has ${live.rows[0].n} policy test session(s) still running. Stop them (so the hosts' original rules are restored) before deleting the version.`
+          }
+        };
+      } else {
+        await client.query(`DELETE FROM policy_versions WHERE id = $1`, [req.params.versionId]);
+      }
+    }
+    await client.query(refusal ? 'ROLLBACK' : 'COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
   }
+  if (refusal) return res.status(refusal.status).json(refusal.body);
 
   await pool.query(
     `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
@@ -500,21 +532,25 @@ policyVersionsRouter.delete('/policy-versions/:versionId', requireRole('operator
 
 // Archive a policy version (APPROVED, DEPLOYED, or PENDING_APPROVAL)
 policyVersionsRouter.post('/policy-versions/:versionId/archive', requireRole('operator', 'admin'), async (req, res) => {
+  // The prior status comes from the row locked in the CTE (RETURNING alone would only ever say ARCHIVED).
   const { rows } = await pool.query(
-    `UPDATE policy_versions SET status = 'ARCHIVED'
-     WHERE id = $1 AND status IN ('APPROVED', 'DEPLOYED', 'PENDING_APPROVAL')
-     RETURNING *`,
+    `WITH prev AS (SELECT id, status FROM policy_versions WHERE id = $1 FOR UPDATE)
+     UPDATE policy_versions pv SET status = 'ARCHIVED'
+       FROM prev
+      WHERE pv.id = prev.id AND prev.status IN ('APPROVED', 'DEPLOYED', 'PENDING_APPROVAL')
+     RETURNING pv.*, prev.status AS previous_status`,
     [req.params.versionId]
   );
   if (!rows[0]) return res.status(404).json({ error: 'not_found_or_not_archivable', message: 'Only APPROVED, DEPLOYED, or PENDING_APPROVAL versions can be archived.' });
+  const { previous_status: previousStatus, ...version } = rows[0];
 
   await pool.query(
     `INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, metadata)
      VALUES ((SELECT id FROM users WHERE username=$1 LIMIT 1), 'POLICY_VERSION_ARCHIVE', 'policy_version', $2, $3)`,
-    [req.auth!.username, req.params.versionId, JSON.stringify({ previousStatus: rows[0].status })]
+    [req.auth!.username, req.params.versionId, JSON.stringify({ previousStatus })]
   );
 
-  res.json({ version: rows[0] });
+  res.json({ version });
 });
 
 /**

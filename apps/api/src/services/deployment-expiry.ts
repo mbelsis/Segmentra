@@ -27,6 +27,15 @@ import { getSshCredentialForHost, sshAuthFields, type MaterializedSshCredential 
  */
 
 const DEPLOYABLE_VERSION_STATUSES = ['APPROVED', 'DEPLOYED'];
+
+/**
+ * Deployments whose rules may be on hosts and so must expire: SUCCEEDED/PARTIAL, and CANCELLED ones that got at least
+ * one host deployed before the stop (their rules stay enforced otherwise). REMOVE/REVERT only act on SUCCEEDED hosts.
+ */
+const EXPIRABLE_SQL = (alias: string) =>
+  `(${alias}.status IN ('SUCCEEDED', 'PARTIAL')
+    OR (${alias}.status = 'CANCELLED'
+        AND EXISTS (SELECT 1 FROM deployment_hosts edh WHERE edh.deployment_id = ${alias}.id AND edh.status = 'SUCCEEDED')))`;
 const REMOVE_SSH_TIMEOUT_MS = 2 * 60 * 1000;
 const MAX_PER_TICK = 20;
 
@@ -171,7 +180,25 @@ async function handleRemove(dep: any, hosts: ExpiringHost[]): Promise<{ outcome:
 
     // Serialize with deployments and learning/test sessions on this host (see host-lock.ts), and look again for a
     // deployment that replaced these rules while we waited: removing the table would then remove the newer policy.
-    const releaseHostLock = await acquireHostLock(h.host_id);
+    // A lock timeout (another long deployment/session on the host) fails just this host: the deployment is already
+    // marked EXPIRED, so aborting here would leave the remaining hosts unprocessed with no per-host record.
+    let releaseHostLock: () => Promise<void>;
+    try {
+      releaseHostLock = await acquireHostLock(h.host_id);
+    } catch (e: any) {
+      const message = truncate(`Removal not attempted: ${e?.message ?? String(e)}`);
+      counts.failed++;
+      failures.push(`${h.hostname}: ${truncate(message, 200)}`);
+      await setHostExpiry(dep.id, h.host_id, 'FAILED', message);
+      await createAuditEvent({
+        actorUserId: null,
+        action: 'POLICY_EXPIRY_REMOVE_FAILED',
+        entityType: 'DEPLOYMENT',
+        entityId: dep.id,
+        metadata: { automatic: true, hostId: h.host_id, hostname: h.hostname, policySetName: dep.policy_set_name, versionNumber: dep.version_number, exitCode: null, message },
+      });
+      continue;
+    }
     try {
     const supersedingNow = await findSupersedingDeployment(dep, h.host_id);
     if (supersedingNow) {
@@ -412,7 +439,7 @@ async function handleRevert(dep: any, hosts: ExpiringHost[]): Promise<{ outcome:
 export async function processExpiredDeployment(deploymentId: string): Promise<boolean> {
   const claim = await pool.query(
     `UPDATE deployments SET expired=true, status='EXPIRED'
-     WHERE id=$1 AND expired=false AND status IN ('SUCCEEDED', 'PARTIAL')
+     WHERE id=$1 AND expired=false AND ${EXPIRABLE_SQL('deployments')}
        AND expires_at IS NOT NULL AND expires_at <= now()
      RETURNING id`,
     [deploymentId]
@@ -479,7 +506,7 @@ async function sendExpiringSoonWarnings() {
        AND d.expires_at > now()
        AND d.expires_at <= now() + interval '24 hours'
        AND d.expired = false
-       AND d.status IN ('SUCCEEDED', 'PARTIAL')
+       AND ${EXPIRABLE_SQL('d')}
        AND NOT EXISTS (
          SELECT 1 FROM notification_log nl
          WHERE nl.event_type = 'POLICY_EXPIRING_SOON'
@@ -514,7 +541,7 @@ export async function processExpiredDeployments(): Promise<number> {
     const { rows } = await pool.query(
       `SELECT id FROM deployments
        WHERE expires_at IS NOT NULL AND expires_at <= now() AND expired = false
-         AND status IN ('SUCCEEDED', 'PARTIAL')
+         AND ${EXPIRABLE_SQL('deployments')}
        ORDER BY expires_at ASC
        LIMIT ${MAX_PER_TICK}`
     );

@@ -111,7 +111,7 @@ export type CompileOutput = {
    * (iptables, IPv4 only). The executor adds the INPUT/OUTPUT(/FORWARD) jumps.
    */
   text: string;
-  /** sha256 of `text`. */
+  /** sha256 of `text`; for iptables of `text + '\n#ip6\n' + ip6tablesRules` (both families are one artifact). */
   sha256: string;
   /**
    * iptables backend only: `ip6tables-restore --noflush` fragment for IPv6 traffic.
@@ -279,15 +279,45 @@ function validateSetName(name: string): string {
   return name;
 }
 
-/** Strip quotes, backslashes, newlines and control chars; limit length. */
-function sanitizeText(value: string | null | undefined, maxLen: number): string {
-  return String(value ?? '')
+/**
+ * Byte limits of the free-text fields the backends accept. They are UTF-8 BYTE limits in the kernel /
+ * netlink attributes, not character limits, so a comment in Greek, CJK or with emoji must be cut by bytes.
+ *  - nft rule comment: 128 bytes (NFTNL_UDATA_COMMENT_MAXLEN).
+ *  - nft log prefix: 127 bytes + NUL (NF_LOG_PREFIXLEN 128); the text is "<body>: ", so body <= 125.
+ *  - iptables --log-prefix: 29 bytes; body <= 27 (+ ": ").
+ *  - iptables --comment: 255 bytes (XT_MAX_COMMENT_LEN 256 incl. NUL).
+ */
+/** User rule comments are pre-cut to this; every use site then applies its own limit (with margin). */
+const RULE_COMMENT_MAX_BYTES = 120;
+const NFT_COMMENT_MAX_BYTES = 120;
+const NFT_LOG_PREFIX_BODY_MAX_BYTES = 120;
+const IPT_LOG_PREFIX_BODY_MAX_BYTES = 27;
+const IPT_COMMENT_MAX_BYTES = 255;
+
+/** Cut a string to at most `maxBytes` UTF-8 bytes without splitting a code point (or surrogate pair). */
+export function truncateUtf8(value: string, maxBytes: number): string {
+  let bytes = 0;
+  let out = '';
+  for (const ch of value) { // iterates by code point: a surrogate pair is one step
+    const cp = ch.codePointAt(0)!;
+    const n = cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+    if (bytes + n > maxBytes) break;
+    bytes += n;
+    out += ch;
+  }
+  return out;
+}
+
+/** Strip quotes, backslashes, newlines and control chars; limit to `maxBytes` UTF-8 bytes. */
+function sanitizeText(value: string | null | undefined, maxBytes: number): string {
+  const cleaned = String(value ?? '')
+    // Lone surrogates would be encoded as U+FFFD (3 bytes) and are never meaningful text.
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD')
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u001f\u007f"'`\\]/g, ' ')
     .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, maxLen)
     .trim();
+  return truncateUtf8(cleaned, maxBytes).trim();
 }
 
 function validateSshPort(port: number | null | undefined): number {
@@ -508,6 +538,16 @@ function swarmPeers(sw: SwarmProfile | null | undefined, fam: Family): string[] 
 
 /** Interfaces of Docker's own bridges: traffic from containers/overlay gateways is not "external". */
 const DOCKER_INTERNAL_IFACES = { ipt: ['docker0', 'docker_gwbridge', 'br-+'], nft: ['docker0', 'docker_gwbridge', 'br-*'] };
+/**
+ * Docker-published traffic is DNAT'd to a container and forwarded OUT of one of Docker's bridges
+ * (docker0 / user-defined br-*; the Swarm routing mesh forwards into the ingress sandbox via
+ * docker_gwbridge). The published-port rules and their catch-all default only apply to DNAT'd packets
+ * leaving through those bridges, so DNAT traffic of other tools (libvirt/LXC port forwards, gateways
+ * with their own DNAT, Kubernetes) is not caught and reaches the user's FORWARD rules unchanged.
+ */
+const DOCKER_EGRESS_IFACES = DOCKER_INTERNAL_IFACES;
+/** nft chain holding the published-port rules; jumped to from the forward chain for Docker egress only. */
+const NFT_PUBLISHED_CHAIN = 'published_ports';
 
 /** conntrack original-destination-port arguments (iptables): one per range, or a single empty string. */
 function iptCtPortArgs(ports: Array<[number, number]> | null): string[] {
@@ -559,8 +599,8 @@ function nftPublishedPortRules(input: CompileInput, sets: PreparedSets): string[
     if (r.direction !== 'IN' && r.direction !== 'BOTH') continue;
     if (r.protocol === 'icmp') continue;
     const ports = rulePorts(r);
-    const commentText = sanitizeText(r.comment, 120);
-    const comment = `comment "${sanitizeText(`published rule${r.orderIndex}${commentText ? ` ${commentText}` : ''}`, 120)}"`;
+    const commentText = sanitizeText(r.comment, RULE_COMMENT_MAX_BYTES);
+    const comment = `comment "${sanitizeText(`published rule${r.orderIndex}${commentText ? ` ${commentText}` : ''}`, NFT_COMMENT_MAX_BYTES)}"`;
     const ifs = resolveInterfaceNames(input.host, ruleScope(r, input));
     const ifExpr = ifs.length === 0 ? '' : `iifname { ${ifs.map((n) => `"${n}"`).join(', ')} }`;
     for (const t of resolveTargets(r, sets)) {
@@ -578,23 +618,28 @@ function nftPublishedPortRules(input: CompileInput, sets: PreparedSets): string[
   return out;
 }
 
+/** Forward-chain dispatch into the published-port chain: only DNAT'd packets leaving via a Docker bridge. */
+function nftPublishedDispatch(): string[] {
+  return DOCKER_EGRESS_IFACES.nft.map((n) => `oifname "${n}" ct status dnat jump ${NFT_PUBLISHED_CHAIN} comment "published_dispatch"`);
+}
+
 /** Lines of the nft forward chain (without the chain header). */
 function nftForwardRules(input: CompileInput, sets: PreparedSets, prot: ProtectedDests, logOnly: boolean): string[] {
   const lines: string[] = [];
   // Replies of allowed connections (and related ICMP) always pass.
   lines.push('ct state established,related accept');
-  if (input.dockerPublishedPorts && !logOnly) lines.push(...nftPublishedPortRules(input, sets));
+  if (input.dockerPublishedPorts && !logOnly) lines.push(...nftPublishedDispatch());
   const rulesSorted = [...input.rules].filter((r) => r.direction === 'FORWARD').sort((a, b) => a.orderIndex - b.orderIndex);
   for (const r of rulesSorted) {
     const ports = rulePorts(r);
-    const commentText = sanitizeText(r.comment, 120);
+    const commentText = sanitizeText(r.comment, RULE_COMMENT_MAX_BYTES);
     const comment = commentText ? `comment "${commentText}"` : '';
     for (const m of forwardMatches(r, sets)) {
       const fam = m.family === 6 ? 'ip6' : 'ip';
       const srcExpr = m.src.nftAddr === null ? '' : `${fam} saddr ${m.src.nftAddr}`;
       const dstExpr = m.dst.nftAddr === null ? '' : `${fam} daddr ${m.dst.nftAddr}`;
       const tail = logOnly
-        ? [`log prefix "${sanitizeText(`FW-AUDIT: ${r.action} ${commentText || 'forward rule'}`, 120)}: "`, 'accept']
+        ? [`log prefix "${sanitizeText(`FW-AUDIT: ${r.action} ${commentText || 'forward rule'}`, NFT_LOG_PREFIX_BODY_MAX_BYTES)}: "`, 'accept']
         : [r.action === 'ALLOW' ? 'accept' : 'drop'];
       const ruleLog = logOnly ? null : nftRuleLogStmt(r, commentText);
       if (ruleLog) lines.push([srcExpr, dstExpr, nftProtoExpr(r, ports, m.family), ruleLog, comment].filter(Boolean).join(' '));
@@ -618,7 +663,7 @@ function compileNft(input: CompileInput, logOnly: boolean): string {
   const T = NFT_TABLE_NAME;
   const inputRules: string[] = [];
   const outputRules: string[] = [];
-  const logStmt = (label: string) => (logOnly ? `log prefix "${sanitizeText(`FW-AUDIT: ${label}`, 120)}: " ` : '');
+  const logStmt = (label: string) => (logOnly ? `log prefix "${sanitizeText(`FW-AUDIT: ${label}`, NFT_LOG_PREFIX_BODY_MAX_BYTES)}: " ` : '');
 
   // --- Baseline ---
   inputRules.push(`iif "lo" ${logStmt('ALLOW: loopback')}accept`);
@@ -667,7 +712,7 @@ function compileNft(input: CompileInput, logOnly: boolean): string {
     const ifs = resolveInterfaceNames(input.host, scope);
     const ports = rulePorts(r);
     const action = r.action === 'ALLOW' ? 'accept' : 'drop';
-    const commentText = sanitizeText(r.comment, 120);
+    const commentText = sanitizeText(r.comment, RULE_COMMENT_MAX_BYTES);
     const comment = commentText ? `comment "${commentText}"` : '';
     const targets = resolveTargets(r, sets);
     if (targets.length === 0) {
@@ -684,7 +729,7 @@ function compileNft(input: CompileInput, logOnly: boolean): string {
         const dir = chain === 'input' ? 'saddr' : 'daddr';
         const addrExpr = t.nftAddr === null ? '' : `${t.family === 6 ? 'ip6' : 'ip'} ${dir} ${t.nftAddr}`;
         const tail = logOnly
-          ? [`log prefix "${sanitizeText(`FW-AUDIT: ${r.action} ${commentText || 'rule'}`, 120)}: "`, 'accept']
+          ? [`log prefix "${sanitizeText(`FW-AUDIT: ${r.action} ${commentText || 'rule'}`, NFT_LOG_PREFIX_BODY_MAX_BYTES)}: "`, 'accept']
           : [action];
         const ruleLog = logOnly ? null : nftRuleLogStmt(r, commentText);
         if (ruleLog) (chain === 'input' ? inputRules : outputRules).push([ifExpr, addrExpr, protoExpr, ruleLog, comment].filter(Boolean).join(' '));
@@ -704,6 +749,7 @@ function compileNft(input: CompileInput, logOnly: boolean): string {
 
   const prot = prepareProtected(input, sets);
   const forwardRules = forwardingEnabled(input, prot) ? nftForwardRules(input, sets, prot, logOnly) : null;
+  const publishedRules = forwardRules && input.dockerPublishedPorts && !logOnly ? nftPublishedPortRules(input, sets) : null;
 
   const lines: string[] = [];
   lines.push('#!/usr/sbin/nft -f');
@@ -737,6 +783,13 @@ function compileNft(input: CompileInput, logOnly: boolean): string {
   lines.push('  chain output {', '    type filter hook output priority 0; policy accept;');
   for (const r of outputRules) lines.push(`    ${r}`);
   lines.push('  }');
+  if (publishedRules) {
+    // Regular chain (no hook), declared before the forward chain that jumps to it. Verdicts here are
+    // final; packets from Docker's own bridges fall through and return to the forward chain.
+    lines.push(`  chain ${NFT_PUBLISHED_CHAIN} {`);
+    for (const r of publishedRules) lines.push(`    ${r}`);
+    lines.push('  }');
+  }
   if (forwardRules) {
     // Policy accept: only traffic to protected devices is default-denied; other routed
     // traffic (Docker, Kubernetes, plain routing) passes as before.
@@ -761,18 +814,18 @@ const RULE_LOG_RATE_NFT = 'limit rate 5/second burst 10 packets';
 const RULE_LOG_RATE_IPT = '-m limit --limit 5/sec --limit-burst 10';
 function nftRuleLogStmt(r: PolicyRule, commentText: string): string | null {
   if (!r.logMode || r.logMode === 'NONE') return null;
-  const prefix = sanitizeText(`SEGMENTRA: ${r.action} ${commentText || 'rule'}`, 120);
+  const prefix = sanitizeText(`SEGMENTRA: ${r.action} ${commentText || 'rule'}`, NFT_LOG_PREFIX_BODY_MAX_BYTES);
   return `${r.logMode === 'LOG_RATE_LIMITED' ? `${RULE_LOG_RATE_NFT} ` : ''}log prefix "${prefix}: "`;
 }
 function iptRuleLogTarget(r: PolicyRule, commentText: string): string | null {
   if (!r.logMode || r.logMode === 'NONE') return null;
-  const body = sanitizeText(`SEGMENTRA: ${r.action} ${commentText || 'rule'}`, 27);
+  const body = sanitizeText(`SEGMENTRA: ${r.action} ${commentText || 'rule'}`, IPT_LOG_PREFIX_BODY_MAX_BYTES);
   return `${r.logMode === 'LOG_RATE_LIMITED' ? `${RULE_LOG_RATE_IPT} ` : ''}-j LOG --log-prefix "${body}: "`;
 }
 
-/** iptables --log-prefix is limited to 29 characters. */
+/** iptables --log-prefix is limited to 29 bytes. */
 function iptLogPrefix(label: string): string {
-  const body = sanitizeText(`FW-AUDIT: ${label}`, 27);
+  const body = sanitizeText(`FW-AUDIT: ${label}`, IPT_LOG_PREFIX_BODY_MAX_BYTES);
   return `"${body}: "`;
 }
 
@@ -810,9 +863,9 @@ export const IPT_COMMENT_PREFIX = 'segmentra';
 /** Header line identifying the chain-scoped iptables fragment format. */
 export const IPT_FORMAT_MARKER = '# segmentra-format: iptables-chains-v2';
 
-/** `-m comment --comment "segmentra:<label>"` (label sanitized, comment max 256 chars). */
+/** `-m comment --comment "segmentra:<label>"` (label sanitized, comment max 255 bytes). */
 function iptComment(label: string): string {
-  const body = sanitizeText(`${IPT_COMMENT_PREFIX}:${label}`, 200);
+  const body = sanitizeText(`${IPT_COMMENT_PREFIX}:${label}`, IPT_COMMENT_MAX_BYTES);
   return `-m comment --comment "${body}"`;
 }
 
@@ -905,7 +958,7 @@ function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Famil
     const action = r.action === 'ALLOW' ? ALLOW : 'DROP';
     const proto = r.protocol === 'any' ? '' : `-p ${r.protocol === 'icmp' ? icmpProto : r.protocol}`;
     const portArgs = iptPortArgs(ports);
-    const commentText = sanitizeText(r.comment, 120);
+    const commentText = sanitizeText(r.comment, RULE_COMMENT_MAX_BYTES);
     const comment = iptComment(`rule${r.orderIndex}${commentText ? ` ${commentText}` : ''}`);
     const targets = resolveTargets(r, sets).filter((t) => t.family === null || t.family === fam);
     // Empty sets / sources of the other family produce no rules here.
@@ -958,37 +1011,45 @@ function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Famil
     if (input.dockerPublishedPorts && !logOnly) {
       // Docker-published ports and the Swarm routing mesh: DNAT'd packets are forwarded, never INPUT.
       // Same rules as INPUT, matched on the original destination port; unmatched DNAT traffic from
-      // outside Docker's own bridges follows the default verdict.
+      // outside Docker's own bridges follows the default verdict. Every rule is restricted to packets
+      // leaving through a Docker bridge (-o, one per rule), so other DNAT'd forwarded traffic is not
+      // caught here and reaches the FORWARD rules below.
       for (const r of rulesSorted) {
         if (r.direction !== 'IN' && r.direction !== 'BOTH') continue;
         if (r.protocol === 'icmp') continue;
         const ports = rulePorts(r);
         const pubProto = r.protocol === 'any' ? '' : `-p ${r.protocol}`;
-        const commentText = sanitizeText(r.comment, 120);
+        const commentText = sanitizeText(r.comment, RULE_COMMENT_MAX_BYTES);
         const pubComment = iptComment(`published rule${r.orderIndex}${commentText ? ` ${commentText}` : ''}`);
         const ifNames = resolveInterfaceNames(input.host, ruleScope(r, input));
         for (const t of resolveTargets(r, sets).filter((x) => x.family === null || x.family === fam)) {
           for (const iface of ifNames.length === 0 ? [''] : ifNames) {
             for (const addr of t.iptAddrs.length === 0 ? [''] : t.iptAddrs) {
               for (const p of iptCtPortArgs(ports)) {
-                push(`-A ${FWD} ${iface ? `-i ${iface}` : ''} ${pubProto} ${addr ? `-s ${addr}` : ''} -m conntrack --ctstate DNAT ${p} ${pubComment} -j ${r.action === 'ALLOW' ? ALLOW : 'DROP'}`);
+                for (const out of DOCKER_EGRESS_IFACES.ipt) {
+                  push(`-A ${FWD} ${iface ? `-i ${iface}` : ''} -o ${out} ${pubProto} ${addr ? `-s ${addr}` : ''} -m conntrack --ctstate DNAT ${p} ${pubComment} -j ${r.action === 'ALLOW' ? ALLOW : 'DROP'}`);
+                }
               }
             }
           }
         }
       }
-      // iptables accepts one -i per rule, so each Docker bridge gets its own exemption: traffic that
+      // iptables accepts one -i/-o per rule, so each Docker bridge pair gets its own exemption: traffic that
       // containers/overlay gateways send to published ports is not an external client.
-      for (const iface of DOCKER_INTERNAL_IFACES.ipt) {
-        push(`-A ${FWD} -i ${iface} -m conntrack --ctstate DNAT ${iptComment('published_docker_internal')} -j RETURN`);
+      for (const out of DOCKER_EGRESS_IFACES.ipt) {
+        for (const iface of DOCKER_INTERNAL_IFACES.ipt) {
+          push(`-A ${FWD} -i ${iface} -o ${out} -m conntrack --ctstate DNAT ${iptComment('published_docker_internal')} -j RETURN`);
+        }
       }
-      push(`-A ${FWD} -m conntrack --ctstate DNAT ${iptComment('published_default')} -j ${defaultAccept ? 'RETURN' : 'DROP'}`);
+      for (const out of DOCKER_EGRESS_IFACES.ipt) {
+        push(`-A ${FWD} -o ${out} -m conntrack --ctstate DNAT ${iptComment('published_default')} -j ${defaultAccept ? 'RETURN' : 'DROP'}`);
+      }
     }
     const fwdRules = rulesSorted.filter((r) => r.direction === 'FORWARD');
     for (const r of fwdRules) {
       const ports = rulePorts(r);
       const proto = r.protocol === 'any' ? '' : `-p ${r.protocol === 'icmp' ? icmpProto : r.protocol}`;
-      const commentText = sanitizeText(r.comment, 120);
+      const commentText = sanitizeText(r.comment, RULE_COMMENT_MAX_BYTES);
       const comment = iptComment(`fwd${r.orderIndex}${commentText ? ` ${commentText}` : ''}`);
       for (const m of forwardMatches(r, sets)) {
         if (m.family !== null && m.family !== fam) continue;
@@ -1129,7 +1190,8 @@ export function compileHostPolicy(input: CompileInput): CompileOutput {
   if (backend !== 'iptables') throw new CompileError(`Unsupported firewall backend: "${backend}"`);
   const text = compileIptablesFamily(input, logOnly, 4);
   const ip6tablesRules = compileIptablesFamily(input, logOnly, 6);
-  return { backend, text, sha256: sha256(text), ip6tablesRules };
+  // The hash identifies the whole artifact: both families are deployed together.
+  return { backend, text, sha256: sha256(`${text}\n#ip6\n${ip6tablesRules}`), ip6tablesRules };
 }
 
 /**

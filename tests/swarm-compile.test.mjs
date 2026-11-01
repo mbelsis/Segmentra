@@ -70,8 +70,11 @@ test('iptables: published ports are matched on the original destination port in 
   assert.ok(fwd.some((x) => x.includes('-p tcp -s 172.28.77.50/32 -m conntrack --ctstate DNAT --ctorigdstport 8080') && x.endsWith('-j RETURN')));
   assert.ok(fwd.some((x) => x.includes('--ctorigdstport 9000:9010') && x.includes('-s 10.1.0.0/16')));
   assert.ok(fwd.some((x) => x.includes('--ctorigdstport 8081') && x.endsWith('-j DROP')));
-  const dflt = fwd.find((x) => x.includes('published_default'));
-  assert.match(dflt, /^-A SEGMENTRA-FWD -m conntrack --ctstate DNAT -m comment .* -j DROP$/);
+  // The published-port rules only apply to DNAT'd packets leaving via a Docker bridge (one -o per rule).
+  const dflts = fwd.filter((x) => x.includes('published_default'));
+  assert.deepEqual(dflts.map((x) => x.match(/ -o (\S+) /)[1]), ['docker0', 'docker_gwbridge', 'br-+']);
+  for (const d of dflts) assert.match(d, /^-A SEGMENTRA-FWD -o \S+ -m conntrack --ctstate DNAT -m comment .* -j DROP$/);
+  const dflt = dflts[0];
   // Docker's own bridges are exempt (one -i per rule: iptables allows a single --in-interface), and
   // replies of allowed connections pass first.
   for (const br of ['docker0', 'docker_gwbridge', 'br-+']) {
@@ -96,8 +99,8 @@ test('published ports: default ACCEPT hands unmatched traffic back, log-only mod
 test('published ports: rules without ports match all DNAT traffic from that source; OUT rules are not copied', () => {
   const out = compileHostPolicy(input({ dockerPublishedPorts: true, rules: [rule({ protocol: 'any', ports: null }), rule({ orderIndex: 20, direction: 'OUT' })] })).text;
   const fwd = lines(out).filter((x) => x.startsWith('-A SEGMENTRA-FWD') && x.includes('published rule'));
-  assert.equal(fwd.length, 1);
-  assert.ok(fwd[0].includes('-s 172.28.77.50/32 -m conntrack --ctstate DNAT') && !fwd[0].includes('--ctorigdstport') && !fwd[0].includes(' -p '));
+  assert.equal(fwd.length, 3, 'one copy per Docker egress bridge');
+  assert.ok(fwd[0].includes('-o docker0 -s 172.28.77.50/32 -m conntrack --ctstate DNAT') && !fwd[0].includes('--ctorigdstport') && !fwd[0].includes(' -p '));
 });
 
 test('published ports: interface-scoped rules keep their interface', () => {

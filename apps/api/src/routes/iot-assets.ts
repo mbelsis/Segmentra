@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import { pool } from '../db/pool.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
+import { isStrictIpOrCidr, parseCidr } from '../services/ip-utils.js';
 
 export const iotAssetsRouter = Router();
 iotAssetsRouter.use(requireAuth);
@@ -68,6 +69,22 @@ iotAssetsRouter.get('/:id', requireRole('viewer', 'operator', 'approver', 'admin
   res.json({ asset: rows[0], gateways, observedFlows: flows, tags });
 });
 
+/**
+ * IoT asset address: an IPv4/IPv6 address or a network CIDR (it becomes a FORWARD destination and a
+ * protected destination of its gateways, so it must compile). Empty string = no address, as before.
+ * A CIDR with host bits set (192.168.10.5/24) is refused: it would silently cover the whole network.
+ */
+const iotIpAddress = z
+  .string()
+  .trim()
+  .refine((v) => v === '' || isStrictIpOrCidr(v), { message: 'must be an IP address or CIDR (e.g. 192.168.10.5 or 192.168.10.0/24)' })
+  .refine((v) => {
+    if (v === '' || !v.includes('/')) return true;
+    const c = parseCidr(v)!;
+    const ip = parseCidr(v.split('/')[0])!;
+    return c.network === ip.network;
+  }, { message: 'CIDR has host bits set; use the device IP or the network address' });
+
 const iotAssetSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
@@ -76,7 +93,7 @@ const iotAssetSchema = z.object({
   model: z.string().optional(),
   firmwareVersion: z.string().optional(),
   macAddress: z.string().optional(),
-  ipAddress: z.string().optional(),
+  ipAddress: iotIpAddress.optional(),
   vlanId: z.string().uuid().optional().nullable(),
   zone: z.string().optional(),
   criticality: z.enum(['critical', 'high', 'medium', 'low']).default('medium'),

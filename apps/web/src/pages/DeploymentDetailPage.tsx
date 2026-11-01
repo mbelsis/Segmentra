@@ -233,6 +233,32 @@ export function DeploymentDetailPage() {
               Cancel
             </button>
           )}
+          {canOperate && deployment.status === 'RUNNING' && (
+            <button
+              className="btn-small"
+              style={{ background: '#FF9800', color: 'white' }}
+              onClick={() => runAction(() => api.pauseDeployment(deployment.id), 'Pause this deployment? You can resume it later.')}
+            >
+              Pause
+            </button>
+          )}
+          {canOperate && deployment.status === 'PAUSED' && (
+            <button
+              className="btn-small btn-primary"
+              onClick={() => runAction(() => api.resumeDeployment(deployment.id), 'Resume this deployment?')}
+            >
+              Resume
+            </button>
+          )}
+          {canOperate && (deployment.status === 'RUNNING' || deployment.status === 'PAUSED') && (
+            <button
+              className="btn-small"
+              style={{ background: '#F44336', color: 'white' }}
+              onClick={() => runAction(() => api.stopDeployment(deployment.id), 'Stop this deployment? This will cancel all pending hosts and cannot be undone.')}
+            >
+              Stop
+            </button>
+          )}
         </div>
       </div>
 
@@ -315,7 +341,7 @@ export function DeploymentDetailPage() {
               <label>Automatic Revert</label>
               <div style={{ fontSize: '13px', color: '#5c4633' }}>
                 Created by the system because deployment{' '}
-                <a href={`/deployments/${deployment.revert_of_deployment_id}`} onClick={(e) => { e.preventDefault(); navigate(`/deployments/${deployment.revert_of_deployment_id}`); }}>
+                <a href={`/deployment/${deployment.revert_of_deployment_id}`} onClick={(e) => { e.preventDefault(); navigate(`/deployment/${deployment.revert_of_deployment_id}`); }}>
                   <code>{String(deployment.revert_of_deployment_id).slice(0, 8)}</code>
                 </a>{' '}expired (pre-authorised; no separate approval).
               </div>
@@ -353,7 +379,7 @@ export function DeploymentDetailPage() {
                   {o.revertDeploymentId && (
                     <div style={{ marginTop: 4 }}>
                       Revert deployment:{' '}
-                      <a href={`/deployments/${o.revertDeploymentId}`} onClick={(e) => { e.preventDefault(); navigate(`/deployments/${o.revertDeploymentId}`); }}>
+                      <a href={`/deployment/${o.revertDeploymentId}`} onClick={(e) => { e.preventDefault(); navigate(`/deployment/${o.revertDeploymentId}`); }}>
                         <code>{String(o.revertDeploymentId).slice(0, 8)}</code>
                       </a>
                       {o.revertToVersionNumber != null && <span> (v{o.revertToVersionNumber})</span>}

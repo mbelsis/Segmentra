@@ -149,13 +149,16 @@ export function DeploymentsPage() {
     api.deploymentCreators().then((r) => setCreators(r.creators)).catch(() => {});
   }, []);
 
-  // Keep the list current while any deployment is in progress.
-  const hasActive = deployments.some((d) => ['RUNNING', 'QUEUED', 'PAUSED'].includes(d.status));
+  // Keep the list current while any deployment is in progress (fast) or
+  // waiting to start / resume (slower: scheduled ones start on the minute job).
+  const hasActive = deployments.some((d) => ['RUNNING', 'QUEUED'].includes(d.status));
+  const hasWaiting = deployments.some((d) => ['SCHEDULED', 'PAUSED'].includes(d.status));
+  const pollMs = hasActive ? 5000 : hasWaiting ? 30000 : 0;
   useEffect(() => {
-    if (!hasActive) return;
-    const t = setInterval(loadDeployments, 5000);
+    if (!pollMs) return;
+    const t = setInterval(loadDeployments, pollMs);
     return () => clearInterval(t);
-  }, [hasActive, loadDeployments]);
+  }, [pollMs, loadDeployments]);
 
   function resetForm() {
     setFormPolicyVersionId('');

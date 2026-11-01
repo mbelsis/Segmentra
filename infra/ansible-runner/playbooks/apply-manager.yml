@@ -66,7 +66,9 @@
       become: true
       shell: |
         test ! -e {{ manager_marker | quote }} || exit 9
-        systemctl stop {{ (manager_unit ~ '.timer') | quote }} || exit 1
+        systemctl stop {{ (manager_unit ~ '.timer') | quote }} || { test ! -e {{ manager_marker | quote }} || exit 9; exit 1; }
+        # Stopping the timer does not stop a .service it already started (the restore is running).
+        case "$(systemctl is-active {{ (manager_unit ~ '.service') | quote }} 2>/dev/null)" in active|activating|deactivating|reloading|refreshing) exit 9 ;; esac
         test ! -e {{ manager_marker | quote }} || exit 9
   rescue:
     - name: Restore the previous permanent policy and native runtime

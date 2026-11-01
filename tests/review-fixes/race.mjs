@@ -75,7 +75,7 @@ async function main() {
     }
     if (!ready) throw new Error('the gateway container did not become usable (iptables and SSH login)');
 
-    const host = (await api('POST', '/hosts', { token: op, body: { hostname: `race-${suffix}`, mgmtIp: '127.0.0.1', sshPort: SSH_PORT, firewallBackend: 'iptables', enabled: true } })).host;
+    const host = (await api('POST', '/hosts', { token: admin, /* SSH target is admin-only */ body: { hostname: `race-${suffix}`, mgmtIp: '127.0.0.1', sshPort: SSH_PORT, firewallBackend: 'iptables', enabled: true } })).host;
     hostId = host.id;
     const cred = await api('POST', '/ssh-credentials', { token: admin, body: { name: `race-${suffix}`, username: 'segmentra', authMethod: 'KEY', privateKeyPem: readFileSync(join(keyDir, 'id_ed25519'), 'utf8'), scopeType: 'HOST', scopeId: host.id } });
     credId = (cred.sshCredential ?? cred.credential ?? cred).id;

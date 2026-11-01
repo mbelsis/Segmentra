@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import { promisify } from 'node:util';
 import { hashLiveRuleset, liveRulesReadScript } from './read-rules.js';
 import {
+  HOST_IPTABLES_SCRIPT,
   SEGMENTRA_BACKUP_DIR,
   installHostScriptsSnippet,
   persistSnippet,
@@ -16,11 +17,11 @@ import {
   LEGACY_POLICY_FILE,
   LEGACY_POLICY_FILE6,
   preserveLegacyPolicyScript,
-  retireLegacyPolicyScript,
-  segmentraIptablesCommand
+  retireLegacyPolicyScript
 } from './iptables-scripts.js';
 import { parsePersistenceOutput, persistenceSummary, type PersistenceResult } from './persist-scripts.js';
 import {
+  defaultTimeout,
   runSshCommand,
   runSshSudo,
   scpUpload,
@@ -163,17 +164,143 @@ function buildRestoreScript(backend: 'nft' | 'iptables' | 'firewalld' | 'ufw', p
 
 type BackupPaths = { backupFile: string; backupFile6: string };
 
-/** Root shell script applying /etc/segmentra.policy (+ /etc/segmentra.policy6) with the chain-scoped iptables design. */
+/**
+ * Root shell script applying /etc/segmentra.policy (+ /etc/segmentra.policy6) with the chain-scoped
+ * iptables design. Uses the host script copy installed in step 3 (keeps the command short enough
+ * to be wrapped in a remote `timeout`, see remoteTimeoutWrap).
+ */
 function iptablesApplyScript(): string {
+  const ipt = (args: string[]) => `/bin/sh ${shq(HOST_IPTABLES_SCRIPT)} ${args.map((a) => shq(a)).join(' ')}`;
   return [
     'set -e',
-    segmentraIptablesCommand(['apply', 'iptables', '/etc/segmentra.policy', LEGACY_POLICY_FILE]),
+    ipt(['apply', 'iptables', '/etc/segmentra.policy', LEGACY_POLICY_FILE]),
     'if [ -f /etc/segmentra.policy6 ]; then',
     '  if command -v ip6tables-restore >/dev/null 2>&1; then',
-    `    ${segmentraIptablesCommand(['apply', 'ip6tables', '/etc/segmentra.policy6', LEGACY_POLICY_FILE6])}`,
+    `    ${ipt(['apply', 'ip6tables', '/etc/segmentra.policy6', LEGACY_POLICY_FILE6])}`,
     '  else echo "warning: ip6tables-restore not found; IPv6 rules not applied" >&2; fi',
     'fi'
   ].join('\n');
+}
+
+/**
+ * Root script (run on the host) bounding `script` with the host's own `timeout`, so a command
+ * whose SSH session timed out locally does not keep changing the firewall on the host while the
+ * rollback runs. Hosts whose `timeout` lacks the coreutils / busybox >= 1.30 syntax (probed with
+ * `timeout 1 true`) run the script unbounded. Exit 124 = the remote timeout fired.
+ */
+export function remoteTimeoutWrap(script: string, seconds: number): string {
+  const secs = Math.max(5, Math.floor(seconds));
+  return [
+    'if command -v timeout >/dev/null 2>&1 && timeout 1 true >/dev/null 2>&1; then',
+    `  timeout ${secs} /bin/sh -c ${shq(script)}`,
+    'else',
+    `  /bin/sh -c ${shq(script)}`,
+    'fi'
+  ].join('\n');
+}
+
+const ACTIVE_SERVICE_STATES = 'active|activating|deactivating|reloading|refreshing';
+
+/**
+ * Root script cancelling the scheduled revert (`token` = "systemd:<unit>" or "pid:<n>").
+ * Exit 0 = cancelled before it fired; 9 = it already fired or is firing (marker present, the
+ * transient .service is active, or the watchdog is gone); anything else = cancel failed.
+ * A running restore is never stopped half-way (that could leave a partial ruleset); the caller
+ * waits for it to finish instead (see awaitRevertSettled).
+ */
+export function revertCancelScript(token: string, marker: string): string {
+  if (token.startsWith('systemd:')) {
+    const unit = token.slice('systemd:'.length);
+    return [
+      `if [ -e ${shq(marker)} ]; then exit 9; fi`,
+      // A failed stop (unit already elapsed and unloaded) is only fatal when the revert did not run.
+      `if ! systemctl stop ${shq(`${unit}.timer`)}; then if [ -e ${shq(marker)} ]; then exit 9; fi; exit 1; fi`,
+      // Stopping the timer does not stop a .service the timer already started.
+      `case "$(systemctl is-active ${shq(`${unit}.service`)} 2>/dev/null)" in ${ACTIVE_SERVICE_STATES}) exit 9 ;; esac`,
+      `if [ -e ${shq(marker)} ]; then exit 9; fi`,
+      `systemctl reset-failed ${shq(`${unit}.timer`)} ${shq(`${unit}.service`)} >/dev/null 2>&1`,
+      'exit 0'
+    ].join('\n');
+  }
+  return [
+    `pid=${token.slice(4)}`,
+    `if [ -e ${shq(marker)} ] || ! kill -0 "$pid" 2>/dev/null; then exit 9; fi`,
+    'kill "$pid" 2>/dev/null',
+    'sleep 1',
+    'if kill -0 "$pid" 2>/dev/null; then exit 1; fi',
+    `if [ -e ${shq(marker)} ]; then exit 9; fi`,
+    'exit 0'
+  ].join('\n');
+}
+
+export type RevertState = 'pending' | 'running' | 'done' | 'gone' | 'unknown';
+
+/**
+ * Root script printing the state of the scheduled revert: pending (not fired yet), running
+ * (firing now), done (fired and finished), gone (neither scheduled nor fired: cancelled, or
+ * lost in a reboot).
+ */
+export function revertStatusScript(token: string, marker: string): string {
+  if (token.startsWith('systemd:')) {
+    const unit = token.slice('systemd:'.length);
+    return [
+      `case "$(systemctl is-active ${shq(`${unit}.service`)} 2>/dev/null)" in ${ACTIVE_SERVICE_STATES}) echo running; exit 0 ;; esac`,
+      `if [ -e ${shq(marker)} ]; then echo done`,
+      `elif systemctl is-active --quiet ${shq(`${unit}.timer`)} 2>/dev/null; then echo pending`,
+      'else echo gone; fi'
+    ].join('\n');
+  }
+  return [
+    `pid=${token.slice(4)}`,
+    `if kill -0 "$pid" 2>/dev/null; then if [ -e ${shq(marker)} ]; then echo running; else echo pending; fi`,
+    `elif [ -e ${shq(marker)} ]; then echo done`,
+    'else echo gone; fi'
+  ].join('\n');
+}
+
+export function parseRevertState(stdout: string, exitCode: number): RevertState {
+  const s = (stdout.trim().split('\n').pop() ?? '').trim();
+  return exitCode === 0 && ['pending', 'running', 'done', 'gone'].includes(s) ? (s as RevertState) : 'unknown';
+}
+
+/** How long past the revert deadline to keep waiting for it to finish (restore + persistence sync). */
+export const REVERT_SETTLE_GRACE_MS = 120_000;
+
+/**
+ * Wait until the scheduled revert has settled — fired and finished ('done'), or no longer
+ * scheduled ('gone') — polling `getState` from the deadline on. Returns the last state seen;
+ * 'pending' / 'running' / 'unknown' mean it had not settled (or the host could not be asked)
+ * `graceMs` after the deadline. The host lock must stay held until this returns: a new
+ * deployment started while the old revert is armed would be silently rolled back by it.
+ */
+export async function awaitRevertSettled(
+  getState: () => Promise<RevertState>,
+  deadline: number,
+  o: { graceMs?: number; pollMs?: number; now?: () => number; sleep?: (ms: number) => Promise<void> } = {}
+): Promise<RevertState> {
+  const now = o.now ?? Date.now;
+  const sleep = o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const giveUp = deadline + (o.graceMs ?? REVERT_SETTLE_GRACE_MS);
+  const pollMs = o.pollMs ?? 5_000;
+  let last: RevertState = 'unknown';
+  for (;;) {
+    // Before the deadline only 'running'/'done' (fired early) or 'gone' can end the wait.
+    last = await getState();
+    if (last === 'done' || last === 'gone') return last;
+    if (now() >= giveUp) return last;
+    const untilDeadline = deadline - now();
+    await sleep(Math.max(250, Math.min(untilDeadline > 0 ? untilDeadline : pollMs, pollMs, giveUp - now())));
+  }
+}
+
+export function describeRevertState(state: RevertState, backupPath: string): string {
+  switch (state) {
+    case 'done': return `the automatic revert fired and finished; Segmentra's previous state (${backupPath}) is restored`;
+    case 'gone': return 'the automatic revert is no longer scheduled and did not fire';
+    case 'running': return `the automatic revert is STILL RUNNING (restoring ${backupPath}); check the host before deploying again`;
+    case 'pending': return 'the automatic revert is STILL PENDING on the host; check the host before deploying again';
+    default: return `the state of the automatic revert could not be determined (host unreachable); it restores ${backupPath} when it fires - check the host before deploying again`;
+  }
 }
 
 async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecutionResult> {
@@ -186,8 +313,8 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
   const run = (cmd: string, o: { timeoutMs?: number } = {}) =>
     runSshCommand(host, cmd, { knownHostsPath: opts.knownHostsPath, timeoutMs: o.timeoutMs ?? opts.timeoutMs });
   // Root commands: one `sudo sh -c` per step, honouring the host's sudo mode (password or not).
-  const sudo = (script: string, o: { args?: string[] } = {}) =>
-    runSshSudo(host, script, { knownHostsPath: opts.knownHostsPath, timeoutMs: opts.timeoutMs, args: o.args });
+  const sudo = (script: string, o: { args?: string[]; timeoutMs?: number } = {}) =>
+    runSshSudo(host, script, { knownHostsPath: opts.knownHostsPath, timeoutMs: o.timeoutMs ?? opts.timeoutMs, args: o.args });
 
   let stdout = '';
   let stderr = '';
@@ -253,14 +380,14 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
       isManagedBackend(host.backend)
         ? { backupFile: `${BACKUP_DIR}/${host.backend}.${timestamp}-${nonce}.json`, backupFile6: '' }
         : ext === 'nft'
-        ? { backupFile: `${BACKUP_DIR}/nft.ruleset.${timestamp}`, backupFile6: '' }
-        : { backupFile: `${BACKUP_DIR}/iptables.${timestamp}`, backupFile6: `${BACKUP_DIR}/ip6tables.${timestamp}` };
+        ? { backupFile: `${BACKUP_DIR}/nft.ruleset.${timestamp}-${nonce}`, backupFile6: '' }
+        : { backupFile: `${BACKUP_DIR}/iptables.${timestamp}-${nonce}`, backupFile6: `${BACKUP_DIR}/ip6tables.${timestamp}-${nonce}` };
     const backupScript = [
       'set -e',
       'umask 077',
       installHostScriptsSnippet(),
       ...(ext === 'nft'
-        ? [`if [ -f /etc/nftables.conf ]; then cp /etc/nftables.conf ${shq(`${BACKUP_DIR}/nftables.conf.${timestamp}`)}; fi`]
+        ? [`if [ -f /etc/nftables.conf ]; then cp /etc/nftables.conf ${shq(`${BACKUP_DIR}/nftables.conf.${timestamp}-${nonce}`)}; fi`]
         : []),
       isManagedBackend(host.backend)
         ? scopedBackupSnippet(host.backend, paths.backupFile, undefined, 'installed')
@@ -331,23 +458,17 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
     }
     stdout += `Automatic revert scheduled in ${delay}s (${token})\n`;
     // Exit code 9 = the revert already fired (or is firing); the deployment has been undone.
-    const cancelScript = token.startsWith('systemd:')
-      ? [
-          `if [ -e ${shq(marker)} ]; then exit 9; fi`,
-          `systemctl stop ${shq(`${unit}.timer`)} || exit 1`,
-          `systemctl reset-failed ${shq(`${unit}.timer`)} ${shq(`${unit}.service`)} >/dev/null 2>&1`,
-          `if [ -e ${shq(marker)} ]; then exit 9; fi`,
-          'exit 0'
-        ].join('\n')
-      : [
-          `pid=${token.slice(4)}`,
-          `if [ -e ${shq(marker)} ] || ! kill -0 "$pid" 2>/dev/null; then exit 9; fi`,
-          'kill "$pid" 2>/dev/null',
-          'sleep 1',
-          'if kill -0 "$pid" 2>/dev/null; then exit 1; fi',
-          `if [ -e ${shq(marker)} ]; then exit 9; fi`,
-          'exit 0'
-        ].join('\n');
+    const cancelScript = revertCancelScript(token, marker);
+    const statusScript = revertStatusScript(token, marker);
+    /** Wait (holding the caller's host lock) until the armed revert has fired and finished. */
+    const settleRevert = async (): Promise<RevertState> => {
+      const state = await awaitRevertSettled(async () => {
+        const r = await sudo(statusScript, { timeoutMs: 20_000 });
+        return parseRevertState(r.stdout, r.exitCode);
+      }, deadline);
+      stdout += `Automatic revert state: ${state}\n`;
+      return state;
+    };
     const revertFiredMsg = `The automatic revert already fired; Segmentra's previous state (${backupPath}) was restored and the deployment is NOT active`;
 
     // Step 7: Apply firewall rules (as root; redirects happen inside sudo).
@@ -356,22 +477,33 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
     // transaction, then cleans up rules left by the legacy full-table design.
     const applyScript = isManagedBackend(host.backend) ? managerCommand(host.backend, 'apply', '/etc/segmentra.policy', true)
       : ext === 'nft' ? 'nft -f /etc/segmentra.policy' : iptablesApplyScript();
-    const applyResult = await sudo(applyScript);
+    // Bounded on the host as well, ending before the local SSH timeout: a timed-out apply must
+    // not keep changing the firewall while the rollback below restores the backup.
+    const localTimeoutMs = opts.timeoutMs ?? defaultTimeout();
+    const applyResult = await sudo(remoteTimeoutWrap(applyScript, Math.min(localTimeoutMs / 1000 - 15, delay - 15)));
     add(applyResult);
 
     if (applyResult.exitCode !== 0) {
       stdout += '\n=== Rollback (apply failed) ===\n';
       const rb = await sudo(restoreScript);
       add(rb);
+      let outcome: string;
       if (rb.exitCode === 0) {
         stdout += `Restored ${backupPath}\n`;
         const c = await sudo(cancelScript);
         add(c);
+        if (c.exitCode === 0) {
+          outcome = `rollback succeeded (${backupPath} restored), automatic revert cancelled`;
+        } else {
+          // The revert restores the same backup; wait for it so a retry cannot be rolled back by it.
+          outcome = `rollback succeeded (${backupPath} restored); ${describeRevertState(await settleRevert(), backupPath)}`;
+        }
       } else {
-        stderr += `Immediate rollback failed; automatic revert will retry within ${delay}s\n`;
+        stderr += `Immediate rollback failed (exit ${rb.exitCode}); waiting for the automatic revert (${delay}s after scheduling)\n`;
+        outcome = `immediate rollback FAILED; ${describeRevertState(await settleRevert(), backupPath)}`;
       }
       const rbPersist = parsePersistenceOutput(rb.stdout);
-      return fail(applyResult.exitCode, 'Firewall apply failed; rollback attempted', {
+      return fail(applyResult.exitCode, `Firewall apply failed${applyResult.exitCode === 124 ? ' (timed out)' : ''}; ${outcome}`, {
         backupPath,
         rolledBack: true,
         ...(rbPersist.status !== 'unknown' ? { persistence: rbPersist } : {})
@@ -394,11 +526,12 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
       }
     }
     if (!reachable) {
-      return fail(
-        1,
-        `Host not reachable over a new SSH connection after apply; the automatic revert restores ${backupPath} ${delay}s after scheduling`,
-        { backupPath, rolledBack: true }
-      );
+      stderr += `Host not reachable over a new SSH connection after apply; waiting for the automatic revert (${delay}s after scheduling)\n`;
+      const state = await settleRevert();
+      return fail(1, `Host not reachable over a new SSH connection after apply; ${describeRevertState(state, backupPath)}`, {
+        backupPath,
+        rolledBack: true
+      });
     }
 
     // Step 9: Cancel the revert (verifying it has not fired yet)
@@ -410,14 +543,16 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
     }
     add(cancelResult);
     if (cancelResult.exitCode === 9) {
-      return fail(9, revertFiredMsg, { backupPath, rolledBack: true });
+      const state = await settleRevert();
+      return fail(9, state === 'done' ? revertFiredMsg : `${revertFiredMsg}; ${describeRevertState(state, backupPath)}`, { backupPath, rolledBack: true });
     }
     if (cancelResult.exitCode !== 0) {
-      return fail(
-        cancelResult.exitCode,
-        `Could not cancel the automatic revert (${token}); Segmentra's previous state (${backupPath}) will be restored`,
-        { backupPath, rolledBack: true }
-      );
+      stderr += `Could not cancel the automatic revert (${token}); waiting for it to restore ${backupPath}\n`;
+      const state = await settleRevert();
+      return fail(cancelResult.exitCode, `Could not cancel the automatic revert (${token}); ${describeRevertState(state, backupPath)}`, {
+        backupPath,
+        rolledBack: true
+      });
     }
     stdout += 'Reachability verified; automatic revert cancelled\n';
     if (ext === 'iptables') {
@@ -438,7 +573,18 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
     if (isManagedBackend(host.backend) && (persistRes.exitCode !== 0 || persistence.status !== 'persisted')) {
       const rb = await sudo(restoreScript);
       add(rb);
-      return fail(1, 'Native manager reboot persistence verification failed; rollback attempted', { backupPath, rolledBack: true, persistence });
+      if (rb.exitCode !== 0) {
+        return fail(
+          1,
+          `Native manager reboot persistence verification failed; rollback FAILED (exit ${rb.exitCode}), host left with the unpersisted new policy - check the host manually`,
+          { backupPath, rolledBack: false, persistence }
+        );
+      }
+      return fail(1, `Native manager reboot persistence verification failed; rollback succeeded (${backupPath} restored)`, {
+        backupPath,
+        rolledBack: true,
+        persistence
+      });
     }
 
     // Step 10: Read back live ruleset for drift detection (same read + normalization as readHostFirewallRules)

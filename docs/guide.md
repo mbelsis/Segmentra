@@ -509,7 +509,7 @@ Segmentra API Server                              Target Host
 - **All commands use `sudo`**: The SSH user doesn't need to be root, but needs full sudo rights. Each root step is one `sudo sh -c '…'` (`sudo -n` without a password, `sudo -k -S -p ''` with the password on stdin)
 - **Missing tool**: If the tool for the policy's backend (`nft` or `iptables-restore`) is missing on the host, the deployment fails for that host before anything is changed
 - **Automatic rollback**: If `nft -f` or `iptables-restore` fails, the backup is restored at once; if the host stops answering after the apply, the scheduled revert restores it
-- **Timeout**: Hosts that don't finish within 10 minutes are marked as FAILED by a background job
+- **Timeout**: Hosts that don't finish within the stale-host timeout (default 60 minutes or more, `SEGMENTRA_HOST_DEPLOYMENT_TIMEOUT_MS`) are marked as FAILED by a background job; deployments interrupted by an API restart are failed and finalized at startup
 
 ### SSH Direct Pros and Cons
 
@@ -1034,7 +1034,7 @@ Segmentra runs several background jobs automatically:
 
 | Job | Interval | Purpose |
 |-----|----------|---------|
-| **Stale deployment timeout** | 2 min | Marks hosts as FAILED if stuck in RUNNING > 10 minutes |
+| **Stale deployment timeout** | 2 min | Marks hosts as FAILED if stuck in RUNNING longer than the stale-host timeout |
 | **Scheduled deployments** | 1 min | Starts deployments scheduled for the current time |
 | **Expired audit sessions** | 1 min | Restores firewall rules and collects logs when learning sessions expire |
 | **Tag rule evaluation** | 5 min | Re-evaluates all enabled auto-tagging rules against hosts |
