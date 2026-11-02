@@ -270,6 +270,16 @@ input::placeholder, textarea::placeholder {
   color: #b8a890;
 }
 
+select option {
+  color: #3d2e1e;
+  background-color: #fff;
+}
+
+select option:checked {
+  color: #fff;
+  background-color: #8b6914;
+}
+
 /* Buttons */
 button {
   padding: 10px 20px;
@@ -331,7 +341,7 @@ button {
   cursor: not-allowed;
 }
 
-/* Inventory row actions: one aligned column, every button the same size as Edit */
+/* Row actions (policy sets, approvals): one aligned column, every button the same size as Edit */
 .host-actions {
   display: flex;
   flex-direction: column;
@@ -348,6 +358,59 @@ button {
 .host-actions .btn-small {
   white-space: nowrap;
   text-align: center;
+}
+
+/* One line per host, however long the credential name: the full name is in the tooltip */
+.host-credential-cell {
+  max-width: 190px;
+  overflow: hidden;
+  font-size: 0.85em;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Row actions dropdown (Inventory hosts) */
+.row-actions-button {
+  white-space: nowrap;
+}
+
+.row-actions-menu {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  min-width: 190px;
+  padding: 4px;
+  background: #fff;
+  border: 1px solid #d4c9b8;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(41, 32, 24, 0.18);
+}
+
+.row-actions-menu button {
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 12px;
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+  color: #2f5560;
+  background: transparent;
+  border-radius: 6px;
+}
+
+.row-actions-menu button:hover:not(:disabled),
+.row-actions-menu button:focus-visible {
+  background: #e6eef0;
+  color: #1f3f48;
+  outline: none;
+}
+
+.row-actions-menu button:disabled {
+  color: #97846c;
+  cursor: not-allowed;
 }
 
 .btn-danger {
@@ -882,4 +945,44 @@ small {
   max-height: 420px;
   overflow: auto;
   white-space: pre;
+}
+
+/* Firewall logs modal (Inventory -> host -> Peek at Logs) */
+.firewall-logs-note {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  font-size: 13.5px;
+  color: #6b5310;
+  background: #fff8e6;
+  border: 1px solid #f0d58c;
+  border-radius: 6px;
+}
+
+.firewall-logs-filter {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.firewall-logs-table {
+  width: 100%;
+  font-size: 13px;
+}
+
+.firewall-logs-table td {
+  overflow-wrap: anywhere;
+}
+
+.firewall-logs-allow {
+  color: #2e7d32;
+  font-weight: 600;
+}
+
+.firewall-logs-deny {
+  color: #a63d2f;
+  font-weight: 600;
+}
+
+.firewall-logs-footnote {
+  margin-top: 12px;
 }

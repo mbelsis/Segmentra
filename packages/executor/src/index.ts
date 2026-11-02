@@ -4,6 +4,7 @@ export * from './read-rules.js';
 export * from './check-host-readiness.js';
 export * from './types.js';
 export * from './audit-ssh.js';
+export * from './firewall-logs.js';
 export * from './ssh-options.js';
 export * from './remove-policy.js';
 export * from './iptables-scripts.js';

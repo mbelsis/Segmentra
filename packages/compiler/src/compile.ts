@@ -614,7 +614,9 @@ function nftPublishedPortRules(input: CompileInput, sets: PreparedSets): string[
     }
   }
   const external = DOCKER_INTERNAL_IFACES.nft.map((n) => `iifname != "${n}"`).join(' ');
-  out.push(`ct status dnat ${external} ${(input.defaultInputAction ?? 'DROP') === 'ACCEPT' ? 'accept' : 'drop'} comment "published_default"`);
+  const publishedAccept = (input.defaultInputAction ?? 'DROP') === 'ACCEPT';
+  if (!publishedAccept) out.push(nftDenyLog('published', `ct status dnat ${external}`));
+  out.push(`ct status dnat ${external} ${publishedAccept ? 'accept' : 'drop'} comment "published_default"`);
   return out;
 }
 
@@ -648,8 +650,14 @@ function nftForwardRules(input: CompileInput, sets: PreparedSets, prot: Protecte
   }
   // Default deny for traffic to protected devices; everything else forwarded is untouched.
   const verdict = logOnly ? 'log prefix "FW-AUDIT: DENY: protected-default: " accept' : 'drop';
-  if (prot.v4.length > 0) lines.push(`ip daddr @${NFT_PROTECTED_SET_V4} ${verdict} comment "protected_default_deny"`);
-  if (prot.v6.length > 0) lines.push(`ip6 daddr @${NFT_PROTECTED_SET_V6} ${verdict} comment "protected_default_deny"`);
+  if (prot.v4.length > 0) {
+    if (!logOnly) lines.push(nftDenyLog('protected', `ip daddr @${NFT_PROTECTED_SET_V4}`));
+    lines.push(`ip daddr @${NFT_PROTECTED_SET_V4} ${verdict} comment "protected_default_deny"`);
+  }
+  if (prot.v6.length > 0) {
+    if (!logOnly) lines.push(nftDenyLog('protected', `ip6 daddr @${NFT_PROTECTED_SET_V6}`));
+    lines.push(`ip6 daddr @${NFT_PROTECTED_SET_V6} ${verdict} comment "protected_default_deny"`);
+  }
   return lines;
 }
 
@@ -745,6 +753,9 @@ function compileNft(input: CompileInput, logOnly: boolean): string {
   if (logOnly) {
     inputRules.push('log prefix "FW-AUDIT: ALLOW: catch-all: " accept');
     outputRules.push('log prefix "FW-AUDIT: ALLOW: catch-all: " accept');
+  } else if ((input.defaultInputAction ?? 'DROP') === 'DROP') {
+    // Falls through to the chain's drop policy.
+    inputRules.push(nftDenyLog('default'));
   }
 
   const prot = prepareProtected(input, sets);
@@ -812,6 +823,17 @@ function compileNft(input: CompileInput, logOnly: boolean): string {
  */
 const RULE_LOG_RATE_NFT = 'limit rate 5/second burst 10 packets';
 const RULE_LOG_RATE_IPT = '-m limit --limit 5/sec --limit-burst 10';
+/**
+ * Default-deny logging on enforced rulesets: always rate limited (a host can receive a lot of unwanted
+ * traffic) and in front of the drop, so the limit never changes the verdict. Labels stay short: the
+ * iptables prefix is limited to 29 bytes.
+ */
+function nftDenyLog(label: string, match = ''): string {
+  return [match, RULE_LOG_RATE_NFT, `log prefix "SEGMENTRA: DENY ${label}: "`, `comment "${label}_deny_log"`].filter(Boolean).join(' ');
+}
+function iptDenyLog(label: string, match: string): string {
+  return `${match} ${iptComment(`${label}_deny_log`)} ${RULE_LOG_RATE_IPT} -j LOG --log-prefix "SEGMENTRA: DENY ${label}: "`;
+}
 function nftRuleLogStmt(r: PolicyRule, commentText: string): string | null {
   if (!r.logMode || r.logMode === 'NONE') return null;
   const prefix = sanitizeText(`SEGMENTRA: ${r.action} ${commentText || 'rule'}`, NFT_LOG_PREFIX_BODY_MAX_BYTES);
@@ -890,6 +912,8 @@ function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Famil
   const FWD = IPT_FORWARD_CHAIN;
   const prot = prepareProtected(input, sets);
   const withForward = forwardingEnabled(input, prot);
+  // UFW has its own logging setting and validates what goes into its rule files.
+  const logDenies = input.host.firewallBackend !== 'ufw';
 
   lines.push(IPT_FORMAT_MARKER);
   lines.push(`# Managed by Segmentra (${fam === 6 ? 'ip6tables' : 'iptables'}). Apply with ${fam === 6 ? 'ip6tables' : 'iptables'}-restore --noflush.`);
@@ -998,6 +1022,7 @@ function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Famil
     push(`-A ${IN} ${iptComment('default')} -j RETURN`);
     push(`-A ${OUT} ${iptComment('catch_all')} -j LOG --log-prefix "FW-AUDIT: ALLOW: catch-all: "`);
   } else {
+    if (logDenies && !defaultAccept) push(iptDenyLog('default', `-A ${IN}`));
     push(`-A ${IN} ${iptComment('default')} -j ${defaultAccept ? 'RETURN' : 'DROP'}`);
   }
   // Output default is accept: hand back to the rest of OUTPUT.
@@ -1042,6 +1067,7 @@ function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Famil
         }
       }
       for (const out of DOCKER_EGRESS_IFACES.ipt) {
+        if (logDenies && !defaultAccept) push(iptDenyLog('published', `-A ${FWD} -o ${out} -m conntrack --ctstate DNAT`));
         push(`-A ${FWD} -o ${out} -m conntrack --ctstate DNAT ${iptComment('published_default')} -j ${defaultAccept ? 'RETURN' : 'DROP'}`);
       }
     }
@@ -1078,6 +1104,7 @@ function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Famil
         push(`${match} -j LOG --log-prefix "FW-AUDIT: DENY: protected: "`);
         push(`${match} -j RETURN`);
       } else {
+        if (logDenies) push(iptDenyLog('protected', `-A ${FWD} -d ${addr}`));
         push(`${match} -j DROP`);
       }
     }

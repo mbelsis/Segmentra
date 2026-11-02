@@ -496,6 +496,29 @@ export const api = {
     } | null;
     error?: string;
   }>(`/compliance/hosts/${hostId}`),
+  hostFirewallLogs: (hostId: string, limit = 200) => request<{
+    hostname: string;
+    success: boolean;
+    source: 'rsyslog' | 'journald' | 'kernel-log-file' | 'dmesg' | 'audit-file' | 'none';
+    activeSession: 'learning' | 'policy_test' | null;
+    entries: Array<{
+      at: number | null;
+      timestamp: string;
+      action: string;
+      logOnly: boolean;
+      direction: 'IN' | 'OUT' | 'FORWARD';
+      sourceIp: string;
+      destinationIp: string;
+      protocol: string;
+      sourcePort: number | null;
+      destinationPort: number | null;
+      rule: string | null;
+      inInterface: string | null;
+      outInterface: string | null;
+    }>;
+    error: string | null;
+    readAt: string;
+  }>(`/compliance/hosts/${hostId}/firewall-logs?limit=${limit}`),
   bulkCheckCompliance: (hostIds: string[]) => request<{
     results: Array<{
       hostId: string;

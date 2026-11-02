@@ -579,6 +579,42 @@ On Windows use `.\run.ps1` with the same options. `--stop --development` only st
 - **Development**: `admin` / `admin123` (created by the seed when `SEGMENTRA_ADMIN_PASSWORD` is not set — change it after first login)
 - **Production** (`NODE_ENV=production`): `admin` / the value of `SEGMENTRA_ADMIN_PASSWORD` (min. 12 chars). Without it the seed refuses to create the default admin; use `SEGMENTRA_BOOTSTRAP_TOKEN` instead if you only use LDAP.
 
+### Test lab (optional)
+
+To try Segmentra on real firewalls without real servers, start Segmentra and run:
+
+```bash
+python3 scripts/demo-lab.py up        # on Windows: python scripts\demo-lab.py up
+```
+
+In about a minute this creates three Docker machines (images and containers `test-a`, `test-b`, `test-c`), adds them to the inventory with the tag `demo-lab`, and creates, approves and deploys the policy `Demo lab policy`. It then tries ping, ssh, telnet and curl between the machines with real clients, and checks each result against the policy:
+
+| Traffic | Allowed from | Blocked from |
+|---|---|---|
+| ping | `test-a` | `test-b`, `test-c` |
+| ssh (port 2222) | `test-a` | `test-b`, `test-c` |
+| telnet | `test-c` | `test-a` (default deny), `test-b` (explicit DENY rule) |
+| curl (port 80) | `test-a`, `test-b` | `test-c` |
+
+Then try **Inventory > Actions > Peek at Logs** on a machine, or start a test in **Policy Impact Analysis** while the traffic runs.
+
+The full guide, with the architecture and things to try, is in [docs/lab.md](docs/lab.md).
+
+```bash
+python3 scripts/demo-lab.py traffic                # send the traffic again (--repeat 10 --interval 30 to keep it going)
+python3 scripts/demo-lab.py status                 # what exists right now
+python3 scripts/demo-lab.py down                   # remove it (--remove-images removes the images too)
+```
+
+Good to know:
+
+- **Login:** the script uses `admin` and the password from `--password`, `SEGMENTRA_ADMIN_PASSWORD` or `.env`, and otherwise tries the development default and then asks.
+- **Development mode:** deployments default to Ansible, which cannot reach the machines when the API runs outside Docker. Add `--set-executor-ssh`, which changes that setting for all deployments.
+- **SSH uses port 2222:** with no management network configured, Segmentra keeps port 22 open from everywhere so a host can never be locked out, so a policy could not block it.
+- **What stays after `down`:** Segmentra keeps deployment history, so the hosts stay disabled, the policy stays archived and the switched-off user `demo-lab-approver` stays. Running `up` again reuses them. Approvals need a second person, which is why that user exists.
+- **What else it touches:** it connects the API and Ansible runner containers to the lab network, and turns on `net.netfilter.nf_log_all_netns` on the Docker host's kernel so that containers can log firewall lines (`down` puts the old value back). In development mode, the machines' host keys are added to your `known_hosts`.
+- **Testing only:** these are privileged containers with a known user password. Do not run this on a production Segmentra, because it adds hosts, a policy and a user to it.
+
 ### Demo data (optional)
 
 To explore the UI without real servers, load the sample dataset after the migrations and the seed. In the local development setup (`./run.sh --start --development`) the database runs on `127.0.0.1:15432` and the loader uses that connection when `DATABASE_URL` is not set:

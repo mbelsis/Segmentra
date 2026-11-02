@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { firewallBackend } from '@segmentra/compiler';
 
-import { restoreAuditSession, retrieveAuditLogs, type AuditSshHost } from '@segmentra/executor';
+import { restoreAuditSession, retrieveAuditLogs, type AuditLogSource, type AuditSshHost } from '@segmentra/executor';
 
 import { pool } from '../db/pool.js';
 import { ACTIVE_TEST_SESSION_STATUSES, acquireHostLock, deploymentSucceededSince, tryAcquireHostLock, type HostLockRelease } from '../services/host-lock.js';
@@ -47,7 +47,7 @@ export async function markRestoreFailed(sessionId: string, error: string, extra:
 }
 
 export type RestoreAndCollectResult =
-  | { ok: true; entryCount: number; flowCount: number; startFailed: boolean }
+  | { ok: true; entryCount: number; flowCount: number; startFailed: boolean; logSource?: AuditLogSource }
   /** notActive: another run (Stop, expiry, recovery) already restored it; busy: lockMode 'try' and the host lock is taken. */
   | { ok: false; error: string; notActive?: boolean; busy?: boolean; status?: string };
 
@@ -128,10 +128,12 @@ async function restoreLocked(session: any, expect: string[], onCred: (c: Materia
   const startFailed = Boolean(session.raw_log_data?.start_failed);
 
   let logContent = '';
+  let logSource: AuditLogSource | undefined;
   if (session.log_file_path && !startFailed) {
     const localLogPath = path.join(os.tmpdir(), `policy_test_log_${session.id}_${Date.now()}.log`);
     try {
       const retrieveResult = await retrieveAuditLogs(auditHost, session.log_file_path, localLogPath);
+      logSource = retrieveResult.logSource;
       if (retrieveResult.success && fs.existsSync(localLogPath)) {
         logContent = fs.readFileSync(localLogPath, 'utf8');
       }
@@ -159,9 +161,9 @@ async function restoreLocked(session: any, expect: string[], onCred: (c: Materia
     `UPDATE policy_test_sessions
        SET status = 'COLLECTING', completed_at = now(), raw_log_data = $2
      WHERE id = $1 AND status = ANY($3::text[])`,
-    [session.id, JSON.stringify({ entries: parsedEntries, flows }), expect]
+    [session.id, JSON.stringify({ entries: parsedEntries, flows, ...(logSource ? { log_source: logSource } : {}) }), expect]
   );
-  return { ok: true, entryCount: parsedEntries.length, flowCount: flows.length, startFailed: false };
+  return { ok: true, entryCount: parsedEntries.length, flowCount: flows.length, startFailed: false, logSource };
 }
 
 export type InterruptedRecovery =

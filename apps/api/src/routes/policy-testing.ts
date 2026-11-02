@@ -11,7 +11,7 @@ import { compileHostPolicy, type RuleDirection } from '@segmentra/compiler';
 import { addDestinationSets, compilerDestination, getProtectedDestinations } from '../services/forward-rules.js';
 import { getDockerCompileInput } from '../services/swarm.js';
 import { acquireHostLock, activeFirewallSession } from '../services/host-lock.js';
-import { startAuditSession, deployLogOnlyPolicy, restoreAuditSession, retrieveAuditLogs } from '@segmentra/executor';
+import { startAuditSession, deployLogOnlyPolicy, noLogSourceMessage, restoreAuditSession, retrieveAuditLogs, type AuditLogSource } from '@segmentra/executor';
 import { parseFirewallLogs, groupCommunicationFlows } from '../services/log-parser.js';
 import { getSshCredentialForHost, type MaterializedSshCredential } from '../services/ssh-credentials.js';
 import { createAuditEvent } from '../services/audit.js';
@@ -168,6 +168,7 @@ policyTestingRouter.post('/start', requireRole('operator', 'approver', 'admin'),
   const logFilePath = `/var/log/segmentra-test-${host.hostname}-${Date.now()}.log`;
   let cred: MaterializedSshCredential | null = null;
   let backupPath: string | null = null;
+  let logSource: AuditLogSource | null = null;
   let policyFilePath: string | null = null;
 
   try {
@@ -181,6 +182,7 @@ policyTestingRouter.post('/start', requireRole('operator', 'approver', 'admin'),
       throw new Error(`Failed to backup rules on ${host.hostname}: ${startResult.stderr}`);
     }
     backupPath = startResult.backupPath ?? null;
+    logSource = startResult.logSource ?? null;
 
     // Persist the backup location immediately so a later failure (or a crash) can still restore.
     await pool.query(
@@ -322,7 +324,8 @@ policyTestingRouter.post('/start', requireRole('operator', 'approver', 'admin'),
 
     res.status(201).json({
       session: { ...session, status: 'RUNNING', backup_path: backupPath, log_file_path: logFilePath },
-      message: `Log-only policy deployed to ${host.hostname}. Traffic is being captured for ${b.durationMinutes} minutes. Original rules will be restored automatically when the test ends.`,
+      message: `Log-only policy deployed to ${host.hostname}. Traffic is being captured for ${b.durationMinutes} minutes. Original rules will be restored automatically when the test ends.${logSource === 'none' ? ` Warning: ${noLogSourceMessage(host.hostname)}` : ''}`,
+      logSource,
       compiled: { backend: compiled.backend, sha256: compiled.sha256, rulesCount: compiledRules.length }
     });
   } catch (e: any) {
@@ -450,7 +453,7 @@ policyTestingRouter.post('/sessions/:id/stop', requireRole('operator', 'approver
 
   res.json({
     session: { ...session, status: 'COLLECTING' },
-    message: `Original rules restored on ${session.hostname}. ${result.entryCount} log entries collected, ${result.flowCount} unique flows identified. Click "Analyze" to compare against policy rules.`,
+    message: `Original rules restored on ${session.hostname}. ${result.entryCount} log entries collected, ${result.flowCount} unique flows identified. ${result.entryCount === 0 && result.logSource === 'none' ? noLogSourceMessage(session.hostname) : 'Click "Analyze" to compare against policy rules.'}`,
     flowCount: result.flowCount,
     entryCount: result.entryCount
   });
@@ -480,10 +483,12 @@ policyTestingRouter.post('/sessions/:id/collect-logs', requireRole('operator', '
 
     // Retrieve logs without restoring rules (test keeps running)
     let logContent = '';
+    let logSource: AuditLogSource | undefined;
     if (session.log_file_path) {
       const localLogPath = path.join(os.tmpdir(), `policy_test_peek_${session.id}_${Date.now()}.log`);
       try {
         const retrieveResult = await retrieveAuditLogs(auditHost, session.log_file_path, localLogPath);
+        logSource = retrieveResult.logSource;
         if (retrieveResult.success && fs.existsSync(localLogPath)) {
           logContent = fs.readFileSync(localLogPath, 'utf8');
         }
@@ -505,7 +510,8 @@ policyTestingRouter.post('/sessions/:id/collect-logs', requireRole('operator', '
     );
 
     res.json({
-      message: `Collected ${parsedEntries.length} log entries, ${flows.length} unique flows from ${session.hostname}. Test is still running.`,
+      message: `Collected ${parsedEntries.length} log entries, ${flows.length} unique flows from ${session.hostname}. Test is still running.${parsedEntries.length === 0 && logSource === 'none' ? ` ${noLogSourceMessage(session.hostname)}` : ''}`,
+      logSource,
       flowCount: flows.length,
       entryCount: parsedEntries.length,
       flows
@@ -527,9 +533,17 @@ policyTestingRouter.post('/sessions/:id/analyze', requireRole('operator', 'appro
   }
   try {
     const result = await analyzePolicyTest(req.params.id);
+    const stored = await pool.query(
+      `SELECT h.hostname, pts.raw_log_data->>'log_source' AS log_source FROM policy_test_sessions pts JOIN hosts h ON h.id = pts.host_id WHERE pts.id = $1`,
+      [req.params.id]
+    );
+    const noSource = result.summary.totalFlows === 0 && stored.rows[0]?.log_source === 'none';
     res.json({
       analysis: result,
-      message: result.summary.totalFlows === 0
+      logSource: stored.rows[0]?.log_source ?? null,
+      message: noSource
+        ? `Analysis complete, but no traffic was captured, so the policy could not be validated. ${noLogSourceMessage(stored.rows[0].hostname)}`
+        : result.summary.totalFlows === 0
         ? 'Analysis complete, but no traffic was captured during the test, so the policy could not be validated. Check that the host logs kernel firewall messages (rsyslog/journald) and that traffic occurred during the test window.'
         : `Analysis complete. Coverage: ${result.summary.coveragePercent}%. ${result.summary.matched} flows matched, ${result.summary.unexpectedAllows} would be blocked by default-deny, ${result.summary.unexpectedBlocks} hit DENY rules.`
     });

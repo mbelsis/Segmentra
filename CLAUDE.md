@@ -33,6 +33,7 @@ npm run lint            # Lint all workspaces (only apps/web has a real ESLint c
 npm run db:migrate      # Run database migrations (packages/db/scripts/migrate.js -> node-pg-migrate)
 npm run db:seed         # Seed RBAC roles, system tags and the initial admin user
 npm run db:demo         # Load the sample dataset (packages/db/demo/demo-data.sql; idempotent, defaults to the dev DATABASE_URL; refuses NODE_ENV=production, a non-localhost DATABASE_URL or a database with non-demo users/hosts unless `-- --force`; -- --remove deletes it)
+python3 scripts/demo-lab.py up        # Test environment against a running Segmentra: Docker machines test-a/b/c (infra/demo-lab), inventory, sample policy approved and deployed, ping/ssh/telnet/curl checked against it (`traffic`, `status`, `down`)
 npm run test:integration:ssh-docker   # Docker-based SSH deployment integration test
 npm run test:integration:ot-gateway   # Docker lab: Debian IoT/OT gateway between an IT and an OT network, FORWARD rules, real traffic (tests/ot-gateway-lab)
 
@@ -103,7 +104,7 @@ Hosts can be Swarm nodes (`hosts.swarm_cluster/swarm_role/swarm_addr/swarm_encry
 
 ### Compiler
 
-`packages/compiler/src/compile.ts` takes host config + policy rules and outputs nftables or iptables rulesets with a SHA256 hash. nftables output replaces only `table inet segmentra`; iptables output only manages Segmentra's `SEGMENTRA-IN` / `SEGMENTRA-OUT` (and `SEGMENTRA-FWD` for FORWARD rules on gateways) chains, jumped to from `INPUT` / `OUTPUT` / `FORWARD`. "Allow" in those chains is `RETURN`, so the rest of the built-in chain and its policy still apply; other tools' rules (Docker, fail2ban) are left alone. Supports `logOnlyMode` for firewall learning (traffic discovery without blocking) and FORWARD rules with an explicit destination (IoT/OT gateways, protected devices).
+`packages/compiler/src/compile.ts` takes host config + policy rules and outputs nftables or iptables rulesets with a SHA256 hash. nftables output replaces only `table inet segmentra`; iptables output only manages Segmentra's `SEGMENTRA-IN` / `SEGMENTRA-OUT` (and `SEGMENTRA-FWD` for FORWARD rules on gateways) chains, jumped to from `INPUT` / `OUTPUT` / `FORWARD`. "Allow" in those chains is `RETURN`, so the rest of the built-in chain and its policy still apply; other tools' rules (Docker, fail2ban) are left alone. Enforced iptables/nftables rulesets log what the default deny drops (input, protected devices, Docker-published ports) with a rate-limited `SEGMENTRA: DENY default|protected|published` rule in front of the drop; UFW and firewalld follow their own logging settings. Supports `logOnlyMode` for firewall learning (traffic discovery without blocking) and FORWARD rules with an explicit destination (IoT/OT gateways, protected devices).
 
 ### Executor
 
@@ -112,7 +113,8 @@ Hosts can be Swarm nodes (`hosts.swarm_cluster/swarm_role/swarm_addr/swarm_encry
 - `run-ssh.ts` — Direct SSH rule application
 - `read-rules.ts` — Read current host rules via SSH
 - `check-host-readiness.ts` — Verify host capabilities before deployment
-- `audit-ssh.ts` — Firewall learning / policy test sessions: deploy log-only rules, restore, collect logs. Logging goes through an rsyslog drop-in matching `FW-AUDIT`; `seg_reload_rsyslog` tries systemctl/service/rc-service and otherwise restarts `rsyslogd` directly (SIGHUP does not reload rsyslog 8 config), a `logger` self-test records whether the drop-in is active in `<logfile>.offsets` (plus kernel-log file sizes and a journald cursor), and `retrieveAuditLogs` falls back to `journalctl -k` / `kern.log` / `messages` / `syslog` from those markers when it is not
+- `firewall-logs.ts` — `readHostFirewallLogs`: newest kernel firewall lines of a host, read-only (Inventory → Peek at Logs, `GET /api/compliance/hosts/:id/firewall-logs`). Rules with logging on, the default deny and log-only sessions produce lines
+- `audit-ssh.ts` — Firewall learning / policy test sessions: deploy log-only rules, restore, collect logs. Logging goes through an rsyslog drop-in matching `FW-AUDIT`; `seg_reload_rsyslog` tries systemctl/service/rc-service and otherwise restarts `rsyslogd` directly (SIGHUP does not reload rsyslog 8 config), a `logger` self-test records whether the drop-in is active in `<logfile>.offsets` (plus kernel-log file sizes and a journald cursor), and `retrieveAuditLogs` falls back to `journalctl -k` / `kern.log` / `messages` / `syslog` / `dmesg` from those markers when it is not, or when rsyslog never received a kernel line. Both report `logSource`; `none` (typical in containers) is explained to the user through `noLogSourceMessage`
 - `firewall-backup.ts`, `nft-scripts.ts`, `iptables-scripts.ts` — backup/restore and apply scripts scoped to Segmentra's table/chains
 - `remove-policy.ts` — remove Segmentra's rules from a host (policy expiry `REMOVE`)
 - `discover-host.ts` — read-only host facts for inventory discovery

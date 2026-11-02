@@ -162,3 +162,41 @@ test('api ip-utils: destination addresses keep CIDRs, IoT validation is strict',
   for (const good of ['192.168.50.10', '192.168.50.0/24', '2001:db8::1', '2001:db8::/48']) assert.ok(strict(good), good);
   for (const bad of ['fe80::1%eth0', 'host.example', '1.2.3.4/x', '1.2.3']) assert.ok(!strict(bad), bad);
 });
+
+// --- default deny is logged on enforced rulesets, rate limited, in front of the drop ---
+{
+  const defaults = {
+    host: { hostname: 'h1', firewallBackend: 'iptables', interfaces: [{ name: 'eth0', ip: '10.0.0.1' }] },
+    rules: [],
+    sets: {},
+    management: { sshPort: 22 }
+  };
+  const logRule = /limit[^\n]*"SEGMENTRA: DENY default: "/;
+
+  test('iptables: rate-limited default deny LOG directly before the final DROP, both families', () => {
+    const out = compileHostPolicy({ ...defaults });
+    for (const text of [out.text, out.ip6tablesRules]) {
+      const lines = text.split('\n').filter((l) => l.startsWith('-A SEGMENTRA-IN'));
+      assert.match(lines.at(-2), logRule);
+      assert.match(lines.at(-1), /-j DROP$/);
+    }
+    const prefix = /--log-prefix "(SEGMENTRA: DENY default: )"/.exec(out.text)[1];
+    assert.ok(Buffer.byteLength(prefix) <= 29);
+  });
+
+  test('nftables: rate-limited default deny log closes the input chain; the drop policy stays', () => {
+    const { text } = compileHostPolicy({ ...defaults, host: { ...defaults.host, firewallBackend: 'nftables' } });
+    const input = text.slice(text.indexOf('chain input'), text.indexOf('chain output')).split('\n').map((l) => l.trim()).filter(Boolean);
+    assert.match(input[1], /policy drop/);
+    assert.match(input.at(-2), logRule);
+  });
+
+  test('no default deny log with default ACCEPT, in log-only mode, or on UFW', () => {
+    for (const firewallBackend of ['iptables', 'nftables']) {
+      const host = { ...defaults.host, firewallBackend };
+      assert.doesNotMatch(compileHostPolicy({ ...defaults, host, defaultInputAction: 'ACCEPT' }).text, /SEGMENTRA: DENY/);
+      assert.doesNotMatch(compileHostPolicy({ ...defaults, host, logOnlyMode: true }).text, /SEGMENTRA: DENY/);
+    }
+    assert.doesNotMatch(compileHostPolicy({ ...defaults, host: { ...defaults.host, firewallBackend: 'ufw' } }).text, /SEGMENTRA: DENY/);
+  });
+}

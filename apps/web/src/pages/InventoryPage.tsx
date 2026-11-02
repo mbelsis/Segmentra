@@ -16,6 +16,8 @@ function effectiveCredentialLabel(ec: any): string {
 import { Pagination } from '../components/Pagination';
 import { HostPolicyVisualization } from '../components/HostPolicyVisualization';
 import { HostActiveRulesPanel } from '../components/HostActiveRulesPanel';
+import { HostFirewallLogsPanel } from '../components/HostFirewallLogsPanel';
+import { RowActionsMenu } from '../components/RowActionsMenu';
 import { ReadinessSummary } from '../components/ReadinessSummary';
 import { DiscoveryTab } from '../components/DiscoveryTab';
 
@@ -86,6 +88,7 @@ export function InventoryPage() {
 
   // Active rules panel state (which policy/rules are enforced on a host right now)
   const [activeRulesHost, setActiveRulesHost] = useState<{ id: string; hostname: string } | null>(null);
+  const [logsHost, setLogsHost] = useState<{ id: string; hostname: string } | null>(null);
   
   // Tags state
   const [tags, setTags] = useState<any[]>([]);
@@ -1156,8 +1159,10 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                       )}
                     </td>
                     <td><code>{h.firewall_backend || 'auto'}</code></td>
-                    <td style={{ fontSize: '0.85em', color: h.effective_credential ? undefined : '#c62828' }}>
-                      {effectiveCredentialLabel(h.effective_credential)}
+                    <td style={{ color: h.effective_credential ? undefined : '#c62828' }}>
+                      <div className="host-credential-cell" title={effectiveCredentialLabel(h.effective_credential)}>
+                        {effectiveCredentialLabel(h.effective_credential)}
+                      </div>
                     </td>
                     <td>
                       {complianceStatuses.has(h.id) ? (
@@ -1180,54 +1185,43 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                     </td>
                     <td>{h.enabled ? '✓' : '✗'}</td>
                     <td>
-                      <div className="host-actions">
-                        {canEdit && <button onClick={() => editHost(h)} className="btn-small btn-secondary">Edit</button>}
-                        {canEdit && (<>
-                        <div className="tooltip-wrapper">
-                          <button 
-                            onClick={() => checkHostCompliance(h.id)} 
-                            className="btn-small btn-action"
-                            disabled={checkingCompliance.has(h.id) || !h.enabled}
-                          >
-                            Check Compliance
-                          </button>
-                          <div className="tooltip">
-                            Compare current firewall rules on this host to the last successfully deployed policy. Detects configuration drift, manual changes, or failed deployments.
-                          </div>
-                        </div>
-                        <div className="tooltip-wrapper">
-                          <button 
-                            onClick={() => checkHostReadiness(h.id)} 
-                            className="btn-small btn-action"
-                            disabled={checkingReadiness.has(h.id) || !h.enabled}
-                          >
-                            Check Readiness
-                          </button>
-                          <div className="tooltip">
-                            Verify this host is ready for deployments. Checks for firewall tools (nft/iptables), sudo access with the credential's privilege escalation setting (passwordless or with a sudo password), kernel support, and auto-detects firewall backend.
-                          </div>
-                        </div>
-                        </>)}
-                        <div className="tooltip-wrapper">
-                          <button
-                            onClick={() => setActiveRulesHost({ id: h.id, hostname: h.hostname })}
-                            className="btn-small btn-action"
-                          >
-                            Active Rules
-                          </button>
-                          <div className="tooltip">
-                            Show the policy set, version and access-control rules currently enforced on this host, its drift status, and (operators) the live ruleset read from the host next to the expected one.
-                          </div>
-                        </div>
-                        <button 
-                          onClick={() => setVisualizationHost({ id: h.id, hostname: h.hostname })} 
-                          className="btn-small btn-action"
-                          disabled={!h.enabled}
-                          title="View visual diagram of firewall policies"
-                        >
-                          View Visualization
-                        </button>
-                      </div>
+                      <RowActionsMenu
+                        label={`Actions for ${h.hostname}`}
+                        items={[
+                          ...(canEdit ? [
+                            { label: 'Edit', onClick: () => editHost(h) },
+                            {
+                              label: checkingCompliance.has(h.id) ? 'Checking compliance...' : 'Check Compliance',
+                              onClick: () => checkHostCompliance(h.id),
+                              disabled: checkingCompliance.has(h.id) || !h.enabled,
+                              description: 'Compare current firewall rules on this host to the last successfully deployed policy. Detects configuration drift, manual changes, or failed deployments.'
+                            },
+                            {
+                              label: checkingReadiness.has(h.id) ? 'Checking readiness...' : 'Check Readiness',
+                              onClick: () => checkHostReadiness(h.id),
+                              disabled: checkingReadiness.has(h.id) || !h.enabled,
+                              description: "Verify this host is ready for deployments. Checks for firewall tools (nft/iptables), sudo access with the credential's privilege escalation setting (passwordless or with a sudo password), kernel support, and auto-detects firewall backend."
+                            }
+                          ] : []),
+                          {
+                            label: 'Active Rules',
+                            onClick: () => setActiveRulesHost({ id: h.id, hostname: h.hostname }),
+                            description: 'Show the policy set, version and access-control rules currently enforced on this host, its drift status, and (operators) the live ruleset read from the host next to the expected one.'
+                          },
+                          ...(canEdit ? [{
+                            label: 'Peek at Logs',
+                            onClick: () => setLogsHost({ id: h.id, hostname: h.hostname }),
+                            disabled: !h.enabled,
+                            description: "Show this host's recent firewall log entries (accepted and denied)"
+                          }] : []),
+                          {
+                            label: 'View Visualization',
+                            onClick: () => setVisualizationHost({ id: h.id, hostname: h.hostname }),
+                            disabled: !h.enabled,
+                            description: 'View visual diagram of firewall policies'
+                          }
+                        ]}
+                      />
                       {readinessResults.has(h.id) && <ReadinessSummary result={readinessResults.get(h.id)} />}
                     </td>
                   </tr>
@@ -1661,6 +1655,14 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
           hostId={visualizationHost.id}
           hostname={visualizationHost.hostname}
           onClose={() => setVisualizationHost(null)}
+        />
+      )}
+
+      {logsHost && (
+        <HostFirewallLogsPanel
+          hostId={logsHost.id}
+          hostname={logsHost.hostname}
+          onClose={() => setLogsHost(null)}
         />
       )}
 

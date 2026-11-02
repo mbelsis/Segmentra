@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { LIVE_HASH_VERSION_PREFIX, checkHostPersistence, readHostFirewallRules, type SshHostInfo } from '@segmentra/executor';
+import { LIVE_HASH_VERSION_PREFIX, checkHostPersistence, readHostFirewallLogs, readHostFirewallRules, type SshHostInfo } from '@segmentra/executor';
+import { activeFirewallSession } from '../services/host-lock.js';
+import { parseFirewallLogs, parseLogTimestamp } from '../services/log-parser.js';
 import { pool } from '../db/pool.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { getSshCredentialForHost, sshAuthFields, type MaterializedSshCredential } from '../services/ssh-credentials.js';
@@ -245,6 +247,69 @@ complianceRouter.get('/hosts/:hostId/live-rules', async (req, res) => {
     const msg = error?.message ?? String(error);
     return res.status(502).json({
       error: 'live_read_failed',
+      message: msg === 'missing_ssh_credential' ? 'No SSH credential configured for this host' : msg
+    });
+  } finally {
+    cred?.cleanup();
+  }
+});
+
+/**
+ * GET /compliance/hosts/:hostId/firewall-logs?limit=
+ * The newest firewall log lines of a host, read over SSH (read-only), newest first. Only rules with
+ * logging on and log-only sessions produce lines. Inventory -> Peek at Logs.
+ */
+complianceRouter.get('/hosts/:hostId/firewall-logs', async (req, res) => {
+  const parsedId = z.string().uuid().safeParse(req.params.hostId);
+  if (!parsedId.success) return res.status(400).json({ error: 'invalid_host_id' });
+  const limit = z.coerce.number().int().min(1).max(1000).catch(200).parse(req.query.limit ?? 200);
+  const hostRes = await pool.query(
+    `SELECT id, hostname, mgmt_ip, ssh_port, firewall_backend FROM hosts WHERE id=$1 AND enabled=true`,
+    [parsedId.data]
+  );
+  const host = hostRes.rows[0];
+  if (!host) return res.status(404).json({ error: 'host_not_found' });
+  if (!host.mgmt_ip) return res.status(400).json({ error: 'host_without_mgmt_ip', message: 'host has no management IP' });
+
+  let cred: MaterializedSshCredential | null = null;
+  try {
+    cred = await getSshCredentialForHost(host.id);
+    const read = await readHostFirewallLogs(sshHostInfo(host, cred), limit);
+    const active = await activeFirewallSession(host.id);
+    const entries = parseFirewallLogs(read.lines.join('\n'))
+      .filter((e) => !e.loopback)
+      .map((e) => ({
+        at: parseLogTimestamp(e.timestamp),
+        timestamp: e.timestamp,
+        action: e.action,
+        // Log-only sessions never block. Native firewalld rules also use the FW-AUDIT prefix, and those do enforce.
+        logOnly: e.rawLine.includes('FW-AUDIT') && !['firewalld', 'ufw'].includes(host.firewall_backend),
+        direction: e.direction,
+        sourceIp: e.sourceIp,
+        destinationIp: e.destinationIp,
+        protocol: e.protocol,
+        sourcePort: e.sourcePort ?? null,
+        destinationPort: e.destinationPort ?? null,
+        rule: e.ruleLabel ?? null,
+        inInterface: e.inInterface ?? null,
+        outInterface: e.outInterface ?? null
+      }))
+      .sort((a, b) => (b.at ?? 0) - (a.at ?? 0))
+      .slice(0, limit);
+    return res.json({
+      hostId: host.id,
+      hostname: host.hostname,
+      success: read.success,
+      source: read.source,
+      activeSession: active?.kind ?? null,
+      entries,
+      error: read.success ? null : (read.error ?? 'read failed'),
+      readAt: new Date().toISOString()
+    });
+  } catch (error: any) {
+    const msg = error?.message ?? String(error);
+    return res.status(502).json({
+      error: 'log_read_failed',
       message: msg === 'missing_ssh_credential' ? 'No SSH credential configured for this host' : msg
     });
   } finally {

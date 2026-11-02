@@ -154,10 +154,15 @@ test('backup file names include a random nonce (run-ssh, audit-ssh, playbook)', 
 });
 
 // --- 6. no GNU-only BRE alternation in the kernel-log fallback ---
-test('audit-ssh.ts uses grep -E for SRC=|saddr (busybox grep has no \\| in BRE)', () => {
+test('audit-ssh.ts finds kernel lines with grep -E and an exact pattern (busybox has no \\| in BRE; sudo logs our script text)', () => {
   const src = read('packages/executor/src/audit-ssh.ts');
   assert.doesNotMatch(src, /SRC=\\\\\\\\\|saddr/);
-  assert.equal((src.match(/grep -E[qc] \\'SRC=\|saddr\\'/g) ?? []).length, 2);
+  assert.doesNotMatch(src, /SRC=\|saddr/);
+  assert.match(src, /KERNEL_LINE = "'SRC=\[0-9a-fA-F\.:\]\+ DST='"/);
+  const re = /SRC=[0-9a-fA-F.:]+ DST=/;
+  assert.match('kernel: FW-AUDIT: ALLOW: catch-all: IN=eth0 OUT= SRC=10.0.0.1 DST=10.0.0.2 LEN=84', re);
+  assert.match('FW-AUDIT: ALLOW: catch-all: IN=eth0 OUT= SRC=fe80::1 DST=ff02::1 LEN=84', re);
+  assert.doesNotMatch(`sudo: segmentra : (command continued) grep -Eq 'SRC=[0-9a-fA-F.:]+ DST=' /var/log/x FW-AUDIT`, re);
 });
 
 // --- 5. timeouts kill the process group and do not hang on inherited pipes ---

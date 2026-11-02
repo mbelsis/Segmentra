@@ -44,6 +44,21 @@ export interface AuditSessionResult {
   logFilePath?: string;
   /** Reboot persistence after the restore (the boot configuration follows the restored state). */
   persistence?: PersistenceResult;
+  /** Where this host's FW-AUDIT lines can be read from; 'none' means they cannot be collected at all. */
+  logSource?: AuditLogSource;
+}
+
+export type AuditLogSource = 'rsyslog' | 'journald' | 'kernel-log-file' | 'dmesg' | 'none';
+const LOG_SOURCE_MARKER = 'segmentra-log-source:';
+
+function parseLogSource(stdout: string): AuditLogSource | undefined {
+  const m = new RegExp(`^${LOG_SOURCE_MARKER} (\\S+)$`, 'm').exec(stdout);
+  return m ? (m[1] as AuditLogSource) : undefined;
+}
+
+/** Shown when a host offers Segmentra no way to read kernel firewall log lines. */
+export function noLogSourceMessage(hostname: string): string {
+  return `${hostname} has no kernel log Segmentra can read (no rsyslog, journald, kernel log file or permitted dmesg), so traffic cannot be captured here even though the firewall sees it. Install rsyslog on the host, or test on a full VM: containers normally cannot read the kernel log.`;
 }
 
 const BACKUP_DIR = SEGMENTRA_BACKUP_DIR;
@@ -78,12 +93,41 @@ const RSYSLOG_RESTART = `${RSYSLOG_RELOAD_FN}\nseg_reload_rsyslog || true`;
 const offsetsPath = (logFilePath: string) => `${logFilePath}.offsets`;
 const KERNEL_LOG_FILES = ['/var/log/kern.log', '/var/log/messages', '/var/log/syslog'];
 
+/**
+ * A real kernel firewall line. Stricter than "contains SRC=": sudo logs the scripts Segmentra runs,
+ * so their text (with the FW-AUDIT marker and these patterns) ends up in the same log files.
+ */
+export const KERNEL_LINE = "'SRC=[0-9a-fA-F.:]+ DST='";
+
+/** dmesg can read the kernel ring buffer and awk can turn its uptime stamps into wall-clock time. */
+const DMESG_USABLE = `dmesg >/dev/null 2>&1 && awk 'BEGIN{strftime("%s",0)}' >/dev/null 2>&1`;
+
+/**
+ * Read stdin as `dmesg` output and print the lines newer than uptime $1 with an ISO timestamp
+ * instead of the "[uptime]" prefix (log-parser.ts needs a real time).
+ */
+export const DMESG_STAMP_AWK = String.raw`awk -v s="$1" -v n="$(cut -d' ' -f1 /proc/uptime)" -v e="$(date +%s)" '{ t=$0; sub(/^\[ */,"",t); sub(/\].*/,"",t); if (t+0 > s+0) { l=$0; sub(/^\[[^]]*\] */,"",l); print strftime("%Y-%m-%dT%H:%M:%S%z", e-n+t) " " l } }'`;
+
+/** Prints the marker line naming the best source; the argument is the rsyslog drop-in state. */
+const REPORT_LOG_SOURCE_FN = [
+  'seg_report_source() {',
+  '  seg_src=none',
+  '  if [ "$1" = active ]; then seg_src=rsyslog',
+  '  elif command -v journalctl >/dev/null 2>&1 && [ -n "$(journalctl -k -q --no-pager -n 1 2>/dev/null)" ]; then seg_src=journald',
+  `  elif [ -n "$(ls ${KERNEL_LOG_FILES.join(' ')} 2>/dev/null)" ]; then seg_src=kernel-log-file`,
+  `  elif ${DMESG_USABLE}; then seg_src=dmesg`,
+  '  fi',
+  `  echo "${LOG_SOURCE_MARKER} $seg_src"`,
+  '}'
+].join('\n');
+
 function recordKernelLogOffsetsSnippet(logFilePath: string, rsyslogState: string): string {
   const off = shq(offsetsPath(logFilePath));
   return [
     `umask 077; : > ${off}`,
     `echo "since $(date +%s)" >> ${off}`,
     `echo "rsyslog ${rsyslogState}" >> ${off}`,
+    `echo "uptime $(cut -d' ' -f1 /proc/uptime 2>/dev/null)" >> ${off}`,
     'if command -v journalctl >/dev/null 2>&1; then',
     `  seg_cur=$(journalctl -k -q --no-pager -n 0 --show-cursor 2>/dev/null | sed -n 's/^-- cursor: //p'); [ -n "$seg_cur" ] && echo "cursor $seg_cur" >> ${off}`,
     'fi',
@@ -93,21 +137,25 @@ function recordKernelLogOffsetsSnippet(logFilePath: string, rsyslogState: string
 }
 
 /**
- * Hosts without rsyslog, or where the drop-in could not be activated: append this session's
- * FW-AUDIT lines from journald (kernel stream, by cursor) or from the kernel log files (from the
- * recorded offsets) to the audit log file, then move the markers so a later collection does not
- * read the same lines again.
+ * Hosts without rsyslog, where the drop-in could not be activated, or where rsyslog works but no
+ * kernel line ever reached the file (the self-test goes through the syslog socket, so it passes
+ * without imklog): append this session's FW-AUDIT lines from journald (kernel stream, by cursor),
+ * the kernel log files (from the recorded offsets) or dmesg (from the recorded uptime) to the audit
+ * log file, then move the markers so a later collection does not read the same lines again.
  */
 function collectKernelLogFallbackSnippet(logFilePath: string): string {
   const log = shq(logFilePath);
   const off = shq(offsetsPath(logFilePath));
   return [
-    `if [ -f ${off} ] && ! grep -q '^rsyslog active' ${off}; then`,
-    `  seg_since=$(sed -n 's/^since //p' ${off}); seg_cur=$(sed -n 's/^cursor //p' ${off})`,
+    REPORT_LOG_SOURCE_FN,
+    `seg_dmesg_new() { ${DMESG_STAMP_AWK}; }`,
+    `if [ -f ${off} ] && { ! grep -q '^rsyslog active' ${off} || ! grep -Eq ${KERNEL_LINE} ${log}; }; then`,
+    `  seg_since=$(sed -n 's/^since //p' ${off}); seg_cur=$(sed -n 's/^cursor //p' ${off}); seg_up=$(sed -n 's/^uptime //p' ${off})`,
     '  seg_tmp=$(mktemp) || exit 1',
     '  seg_new=$(mktemp) || exit 1',
-    `  grep -v '^since \\|^cursor \\|^file ' ${off} > "$seg_new"`,
+    `  grep -v '^since \\|^cursor \\|^file \\|^uptime ' ${off} > "$seg_new"`,
     '  echo "since $(date +%s)" >> "$seg_new"',
+    `  echo "uptime $(cut -d' ' -f1 /proc/uptime 2>/dev/null)" >> "$seg_new"`,
     '  if command -v journalctl >/dev/null 2>&1; then',
     '    if [ -n "$seg_cur" ]; then journalctl -k -q --no-pager -o short-iso --show-cursor --after-cursor="$seg_cur" > "$seg_tmp" 2>/dev/null || true;',
     '    else journalctl -k -q --no-pager -o short-iso --show-cursor --since="@${seg_since:-0}" > "$seg_tmp" 2>/dev/null || true; fi',
@@ -120,18 +168,25 @@ function collectKernelLogFallbackSnippet(logFilePath: string): string {
     '      [ -f "$seg_f" ] || continue',
     '      seg_size=$(wc -c < "$seg_f")',
     '      if [ "$seg_size" -ge "${seg_off:-0}" ]; then tail -c +$((${seg_off:-0}+1)) "$seg_f"; else cat "$seg_f"; fi | grep -F FW-AUDIT >> "$seg_tmp" || true',
-    '      if grep -Eq \'SRC=|saddr\' "$seg_tmp" 2>/dev/null; then break; fi',
+    '      if grep -Eq \'SRC=[0-9a-fA-F.:]+ DST=\' "$seg_tmp" 2>/dev/null; then break; fi',
     '    done',
+    `    if ! grep -Eq ${KERNEL_LINE} "$seg_tmp" 2>/dev/null && [ -n "$seg_up" ] && ${DMESG_USABLE}; then`,
+    '      dmesg 2>/dev/null | grep -F FW-AUDIT | seg_dmesg_new "$seg_up" >> "$seg_tmp" || true',
+    '    fi',
     '  fi',
     `  for seg_f in ${KERNEL_LOG_FILES.join(' ')}; do if [ -f "$seg_f" ]; then echo "file $seg_f $(wc -c < "$seg_f")" >> "$seg_new"; fi; done`,
-    '  seg_n=$(grep -F FW-AUDIT "$seg_tmp" | grep -Ec \'SRC=|saddr\' || true)',
+    '  seg_n=$(grep -F FW-AUDIT "$seg_tmp" | grep -Ec \'SRC=[0-9a-fA-F.:]+ DST=\' || true)',
     '  if [ "$seg_n" -gt 0 ]; then',
-    `    grep -F FW-AUDIT "$seg_tmp" >> ${log}`,
+    `    grep -F FW-AUDIT "$seg_tmp" | grep -E ${KERNEL_LINE} >> ${log}`,
     `    echo "collected $seg_n FW-AUDIT lines from the kernel log (rsyslog drop-in inactive)"`,
+    // rsyslog did not deliver them: keep using the fallback, or the next collection would stop at these lines.
+    `    sed -i 's/^rsyslog active$/rsyslog nokernel/' "$seg_new"`,
     '  fi',
     `  cat "$seg_new" > ${off}`,
     '  rm -f "$seg_tmp" "$seg_new"',
     'fi',
+    `seg_state=$(sed -n 's/^rsyslog //p' ${off} 2>/dev/null)`,
+    `if grep -Eq ${KERNEL_LINE} ${log} 2>/dev/null; then seg_report_source active; else seg_report_source "$seg_state"; fi`,
     'true'
   ].join('\n');
 }
@@ -211,7 +266,7 @@ export async function startAuditSession(
       return c.result(false, logResult.exitCode, { backupPath });
     }
 
-    return c.result(true, 0, { backupPath, logFilePath });
+    return c.result(true, 0, { backupPath, logFilePath, logSource: parseLogSource(logResult.stdout) });
   } catch (error: any) {
     c.err(`\nException: ${error.message}\n`);
     return c.result(false, 1);
@@ -234,8 +289,10 @@ async function configureLogging(host: AuditSshHost, logFilePath: string, opts: S
     // rsyslog drops privileges to "syslog" on Debian/Ubuntu; let it write the file
     `if id syslog >/dev/null 2>&1; then chown syslog ${shq(logFilePath)} || true; fi`,
     'if ! command -v rsyslogd >/dev/null 2>&1; then',
-    '  echo "warning: rsyslogd not found; FW-AUDIT lines will be collected from journald or the kernel log file instead" >&2',
+    '  echo "warning: rsyslogd not found; FW-AUDIT lines will be collected from journald, the kernel log file or dmesg instead" >&2',
     recordKernelLogOffsetsSnippet(logFilePath, 'missing'),
+    REPORT_LOG_SOURCE_FN,
+    '  seg_report_source missing',
     '  exit 0',
     'fi',
     `mkdir -p "$(dirname ${shq(RSYSLOG_CONF)})"`,
@@ -256,7 +313,9 @@ async function configureLogging(host: AuditSshHost, logFilePath: string, opts: S
     'else',
     `  echo "warning: rsyslog did not pick up ${RSYSLOG_CONF}; FW-AUDIT lines will be collected from journald or the kernel log file instead" >&2`,
     'fi',
-    recordKernelLogOffsetsSnippet(logFilePath, '$seg_state')
+    recordKernelLogOffsetsSnippet(logFilePath, '$seg_state'),
+    REPORT_LOG_SOURCE_FN,
+    'seg_report_source "$seg_state"'
   ].join('\n');
   return runSshSudo(host, script, opts);
 }
@@ -403,7 +462,7 @@ export async function retrieveAuditLogs(
       const content = await readFile(localLogPath, 'utf8');
       c.out(`\nRetrieved ${content.length} bytes from ${remoteLogPath}\n`);
     }
-    return c.result(scpResult.exitCode === 0, scpResult.exitCode);
+    return c.result(scpResult.exitCode === 0, scpResult.exitCode, { logSource: parseLogSource(fallback.stdout) });
   } catch (error: any) {
     c.err(`\nException: ${error.message}\n`);
     return c.result(false, 1);

@@ -610,7 +610,7 @@ function assertCapturedFlows(flows, context) {
 async function assertEnforcedRulesRestored(context) {
   const { stdout } = await execInService(debianTarget.service, 'iptables-save');
   const inChain = stdout.split('\n').filter((l) => l.startsWith('-A SEGMENTRA-IN '));
-  if (inChain.some((l) => /-j LOG/.test(l))) throw new Error(`${context}: log-only rules are still active on target-d`);
+  if (inChain.some((l) => /FW-AUDIT/.test(l))) throw new Error(`${context}: log-only rules are still active on target-d`);
   if (!/-j DROP$/.test(inChain[inChain.length - 1] ?? '')) throw new Error(`${context}: SEGMENTRA-IN does not end with the enforced DROP on target-d`);
   if (!/-A SEGMENTRA-IN -s 172\.29\.0\.32\/32 -p tcp -m tcp --dport 8080 [^\n]*-j RETURN/.test(stdout)) throw new Error(`${context}: the enforced tcp/8080 rule was not restored on target-d`);
 }
@@ -672,6 +672,56 @@ async function verifyPolicyTestSession(operatorToken, policy) {
   await verifyDebianTraffic();
 }
 
+/**
+ * The cases behind "pinged the host, firewall saw it, 0 logs": a host with nothing readable must say so,
+ * rsyslog without kernel input must fall back, and Peek at Logs must show accepted and denied lines.
+ */
+async function verifyLogSources(operatorToken, policies, debianPolicy) {
+  log('Log sources: host without any readable kernel log');
+  const alpine = policies.find((p) => p.hostname === 'target-b') ?? policies[1];
+  const start = await apiRequest('POST', '/policy-test/start', { token: operatorToken, body: { policyVersionId: alpine.versionId, hostId: alpine.hostId, durationMinutes: 5 } });
+  if (start.logSource !== 'none' || !/no kernel log Segmentra can read/.test(start.message)) throw new Error(`Log sources: the start did not warn: ${JSON.stringify(start).slice(0, 300)}`);
+  const empty = await apiRequest('POST', `/policy-test/sessions/${start.session.id}/collect-logs`, { token: operatorToken, body: {} });
+  if (!/no kernel log Segmentra can read/.test(empty.message)) throw new Error(`Log sources: the collection did not explain 0 entries: ${empty.message}`);
+  const stoppedEmpty = await apiRequest('POST', `/policy-test/sessions/${start.session.id}/stop`, { token: operatorToken, body: {} });
+  if (!/no kernel log Segmentra can read/.test(stoppedEmpty.message)) throw new Error(`Log sources: stop did not explain 0 entries: ${stoppedEmpty.message}`);
+  const none = await apiRequest('GET', `/compliance/hosts/${alpine.hostId}/firewall-logs`, { token: operatorToken });
+  if (none.source !== 'none') throw new Error(`Log sources: Peek at Logs reported ${none.source} on a host with no kernel log`);
+
+  log('Log sources: rsyslog running without kernel input (dmesg fallback)');
+  await execInService(debianTarget.service, 'sh', '-c', 'sed -i "/imklog/s/^/#/" /etc/rsyslog.conf; pkill -x rsyslogd; sleep 1; rm -f /run/rsyslogd.pid; rsyslogd');
+  try {
+    const started = await apiRequest('POST', '/policy-test/start', { token: operatorToken, body: { policyVersionId: debianPolicy.versionId, hostId: debianPolicy.hostId, durationMinutes: 5 } });
+    await generateLearningTraffic();
+    const peek = await apiRequest('POST', `/policy-test/sessions/${started.session.id}/collect-logs`, { token: operatorToken, body: {} });
+    if (!(peek.entryCount > 0)) throw new Error('Log sources: nothing collected from dmesg while the test runs');
+    await generateLearningTraffic();
+    const stopped = await apiRequest('POST', `/policy-test/sessions/${started.session.id}/stop`, { token: operatorToken, body: {} });
+    if (!(stopped.entryCount > peek.entryCount)) throw new Error(`Log sources: the second collection stopped at ${stopped.entryCount} entries (first: ${peek.entryCount})`);
+    await apiRequest('POST', `/policy-test/sessions/${started.session.id}/analyze`, { token: operatorToken, body: {} });
+  } finally {
+    await execInServiceAllowFailure(debianTarget.service, 'sh', '-c', 'sed -i "/imklog/s/^#//" /etc/rsyslog.conf; pkill -x rsyslogd; sleep 1; rm -f /run/rsyslogd.pid; rsyslogd');
+  }
+
+  log('Peek at Logs: an accepted line and the real default deny of the enforced policy');
+  const { stdout: enforced } = await execInService(debianTarget.service, 'iptables-save');
+  if (!/-A SEGMENTRA-IN [^\n]*limit[^\n]*--log-prefix "SEGMENTRA: DENY default: "/.test(enforced)) throw new Error('Default deny logging: the rate-limited LOG rule is not deployed on target-d');
+  await execInService(debianTarget.service, 'sh', '-c', 'iptables -I SEGMENTRA-IN 1 -s 172.29.0.31 -p icmp -j LOG --log-prefix "SEGMENTRA: ALLOW it-ping: "');
+  try {
+    await execInServiceAllowFailure('target-c', 'ping', '-c', '1', '-W', '1', debianTarget.ip);
+    await execInServiceAllowFailure('target-a', 'ping', '-c', '1', '-W', '1', debianTarget.ip);
+    await new Promise((r) => setTimeout(r, 1500));
+    const logs = await apiRequest('GET', `/compliance/hosts/${debianPolicy.hostId}/firewall-logs?limit=1000`, { token: operatorToken });
+    const find = (rule) => logs.entries.find((e) => e.rule === rule && e.sourceIp === (rule === 'default' ? '172.29.0.33' : '172.29.0.31'));
+    if (find('default')?.action !== 'DENY' || find('default')?.logOnly) throw new Error(`Peek at Logs: default deny line wrong: ${JSON.stringify(find('default'))}`);
+    if (await execInServiceAllowFailure('target-c', 'ping', '-c', '1', '-W', '1', debianTarget.ip).then((r) => r.code === 0)) throw new Error('Default deny logging: the ping from target-c must still be dropped');
+    if (find('it-ping')?.action !== 'ALLOW' || find('it-ping')?.logOnly) throw new Error(`Peek at Logs: accepted line wrong: ${JSON.stringify(find('it-ping'))}`);
+    if (!logs.entries.some((e) => e.logOnly)) throw new Error('Peek at Logs: earlier log-only lines are not marked');
+  } finally {
+    await execInServiceAllowFailure(debianTarget.service, 'sh', '-c', 'iptables -D SEGMENTRA-IN -s 172.29.0.31 -p icmp -j LOG --log-prefix "SEGMENTRA: ALLOW it-ping: "');
+  }
+}
+
 async function cleanup() {
   if (keepStack) {
     log('Leaving the integration stack running because --keep was passed');
@@ -712,6 +762,7 @@ async function main() {
     await verifyLearningSession(operatorToken, debianPolicy);
     await verifyLearningSession(operatorToken, debianPolicy, { rsyslogDropInDisabled: true });
     await verifyPolicyTestSession(operatorToken, debianPolicy);
+    await verifyLogSources(operatorToken, policies, debianPolicy);
 
     log('Docker SSH integration test completed successfully');
   } finally {

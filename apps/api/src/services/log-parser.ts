@@ -137,7 +137,8 @@ function lastMatch(text: string, re: RegExp): RegExpExecArray | null {
  * IN set + OUT empty → inbound, IN empty + OUT set → outbound, both set → forwarded.
  */
 function parseLogLine(line: string): ParsedLogEntry | null {
-  const prefixIdx = line.indexOf('FW-AUDIT');
+  // FW-AUDIT: log-only sessions. SEGMENTRA: enforced rules with logging on.
+  const prefixIdx = line.search(/FW-AUDIT|SEGMENTRA:/);
   if (prefixIdx < 0) return null;
 
   // Extract timestamp (format varies by system). Keep the zone offset of RFC 3339 stamps
@@ -149,11 +150,11 @@ function parseLogLine(line: string): ParsedLogEntry | null {
   const afterPrefix = line.slice(prefixIdx);
   let action = 'ALLOW';
   let ruleLabel: string | undefined;
-  const prefixMatch = afterPrefix.match(/^FW-AUDIT:\s*(ALLOW|ACCEPT|DENY|DROP)\b:?\s*(.*?):\s*(?=IN=|$)/);
+  const prefixMatch = afterPrefix.match(/^(?:FW-AUDIT|SEGMENTRA):\s*(ALLOW|ACCEPT|DENY|DROP)\b:?\s*(.*?):\s*(?=IN=|$)/);
   if (prefixMatch) {
     action = prefixMatch[1] === 'DENY' || prefixMatch[1] === 'DROP' ? 'DENY' : 'ALLOW';
     ruleLabel = prefixMatch[2]?.trim() || undefined;
-  } else if (/^FW-AUDIT:\s*(DENY|DROP)\b/.test(afterPrefix)) {
+  } else if (/^(?:FW-AUDIT|SEGMENTRA):\s*(DENY|DROP)\b/.test(afterPrefix)) {
     action = 'DENY';
   }
 
