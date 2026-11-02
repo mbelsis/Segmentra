@@ -1,16 +1,21 @@
-param(
-    [Parameter(Position=0)]
-    [ValidateSet("--development", "--production", "--dev", "--prod", "-d", "-p")]
-    [string]$Mode = "--development"
-)
-
+# No param() block on purpose: the mode is read from $args. A declared parameter with
+# [Parameter()] makes this an advanced script, and PowerShell then claims -d for -Debug and
+# rejects -p as ambiguous (-ProgressAction, -PipelineVariable) before any of this code runs.
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-# Normalize
-switch ($Mode) {
-    { $_ -in "--development", "--dev", "-d" } { $Mode = "development" }
-    { $_ -in "--production", "--prod", "-p" } { $Mode = "production" }
+$Mode = $null
+if ($args.Count -eq 0) { $Mode = "development" }
+elseif ($args.Count -eq 1) {
+    if ("$($args[0])" -match '^-{0,2}(d|dev|development)$') { $Mode = "development" }
+    elseif ("$($args[0])" -match '^-{0,2}(p|prod|production)$') { $Mode = "production" }
+}
+if (-not $Mode) {
+    Write-Host "Usage: .\install.ps1 [--development | --production]"
+    Write-Host ""
+    Write-Host "  --development, --dev, -d   Local dev: Node.js + PostgreSQL in Docker (default)"
+    Write-Host "  --production, --prod, -p   Everything in Docker, secrets generated into .env"
+    exit 1
 }
 
 Write-Host "========================================"

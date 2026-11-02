@@ -496,6 +496,32 @@ Typical lifecycle of a version: `DRAFT` → `PENDING_APPROVAL` → `APPROVED` (o
 
 ## Installation & Quick Start
 
+### Development or production mode?
+
+**Development mode runs the app directly on your machine so you can work on the code. Production mode runs everything in Docker with generated secrets.** It's the same application either way, but it's built, run and secured differently.
+
+| | Development | Production |
+|---|---|---|
+| **Where it runs** | API and UI run on the machine with Node; only PostgreSQL is in Docker | Everything is in Docker: database, API, nginx web server and Ansible runner |
+| **What you need** | Docker and Node.js 20+ | Docker only |
+| **UI address** | `http://localhost:5173` (Vite dev server) | `http://localhost` on port 80 (nginx) |
+| **API address** | `localhost:8080` | `127.0.0.1:8080`; browsers reach it through nginx at `/api` |
+| **Admin login** | `admin` / `admin123` by default | Random password, printed once and saved in `.env` |
+| **Secrets** | Generated JWT secret in `.dev-jwt-secret`; the encryption key is derived from it unless you set one | Random JWT secret and encryption key in `.env`; the API won't start without them |
+| **Database password** | `segmentra` | Random on a new install |
+| **Migrations and seed** | Run by the install and run scripts | Run by the API container each time it starts |
+| **`NODE_ENV`** | Not set to `production` | `production`, which turns on stricter checks such as refusing default JWT secrets |
+| **Lifetime** | Stops with the terminal session; `./run.sh --start --development` (Windows: `.\run.ps1 -start -development`) rebuilds and starts it again | Containers run in the background until stopped |
+
+**Which one to use:**
+
+- **Development:** only if you're changing Segmentra's code.
+- **Production:** for trying or actually using the app, even on a laptop.
+
+"Production" doesn't mean hardened: the UI is plain HTTP and the API container mounts the Docker socket by default. Before exposing it, read [Security hardening](#security-hardening).
+
+**On Windows, use `.\install.ps1 --production`.** In development mode, the code that deploys firewall rules runs directly on Windows. It needs tools like `sshpass`, which Windows doesn't normally have, so password-based SSH logins would probably fail. The Ansible runner container isn't started in development mode either. Production mode has `sshpass` in the API image and starts the runner. This comes from reading the code and hasn't been tested on Windows.
+
 ### Automated Installation
 
 **Linux/macOS:**
