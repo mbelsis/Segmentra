@@ -194,10 +194,11 @@ UI listens on **http://localhost:5173**.
 ### Step 8 (Optional): Import Demo Data
 
 ```bash
-node demo-data/seed-demo-data.js
+npm run db:demo                 # load the sample dataset
+npm run db:demo -- --remove     # delete it again
 ```
 
-This creates 27 hosts, 6 VLANs, 15 tags, 4 firewall policies, 3 SSH credentials, 13 IoT assets, 2 K8s clusters, and 2 topology views. See `demo-data/README.md` for details.
+It uses the local development database, including the password from `.env` if there is one. What the dataset contains and when the loader refuses to run is in [Demo data](../README.md#demo-data-optional).
 
 ### Step 9 (Optional): Start Ansible Runner
 
@@ -322,8 +323,11 @@ The nginx container proxies `/api/*` requests to the backend automatically.
 ### Step 4 (Optional): Import Demo Data
 
 ```bash
-docker compose exec -T segmentra-app node demo-data/seed-demo-data.js
+docker compose exec -T segmentra-db psql -U segmentra -d segmentra < packages/db/demo/demo-data.sql
+docker compose exec -T segmentra-db psql -U segmentra -d segmentra < packages/db/demo/demo-remove.sql   # to remove it
 ```
+
+The dataset includes demo users with a well-known password, so only load it into an installation you use for evaluation. See [Demo data](../README.md#demo-data-optional).
 
 ### Building the Docker Images
 

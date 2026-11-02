@@ -39,7 +39,7 @@ export function devDatabaseUrl(env, dotenv) {
   return `postgres://${encode(user)}:${encode(password)}@127.0.0.1:${port}/${encode(name)}`;
 }
 
-function loadDotEnv() {
+export function loadDotEnv() {
   try {
     return parseDotEnv(fs.readFileSync(path.join(ROOT, '.env'), 'utf8'));
   } catch {

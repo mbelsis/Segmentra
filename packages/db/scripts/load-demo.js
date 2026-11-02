@@ -17,16 +17,18 @@ import { fileURLToPath } from 'node:url';
 
 import pg from 'pg';
 
-// Outside production the local development database (start.sh / run.sh) is the default.
-const DEV_DATABASE_URL = 'postgres://segmentra:segmentra@127.0.0.1:15432/segmentra';
+import { devDatabaseUrl, loadDotEnv } from './dev-env.js';
+
+// Outside production the local development database (start.sh / run.sh) is the default. Its
+// password can come from .env, like for docker compose, so the URL is not printed.
 let databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
   if (process.env.NODE_ENV === 'production') {
     console.error('DATABASE_URL is required');
     process.exit(1);
   }
-  databaseUrl = DEV_DATABASE_URL;
-  console.log(`DATABASE_URL not set; using the local development database ${DEV_DATABASE_URL}`);
+  databaseUrl = devDatabaseUrl(process.env, loadDotEnv());
+  console.log('DATABASE_URL not set; using the local development database');
 }
 
 const remove = process.argv.includes('--remove');

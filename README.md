@@ -507,11 +507,11 @@ Typical lifecycle of a version: `DRAFT` → `PENDING_APPROVAL` → `APPROVED` (o
 | **UI address** | `http://localhost:5173` (Vite dev server) | `http://localhost` on port 80 (nginx) |
 | **API address** | `localhost:8080` | `127.0.0.1:8080`; browsers reach it through nginx at `/api` |
 | **Admin login** | `admin` / `admin123` by default | Random password, printed once and saved in `.env` |
-| **Secrets** | Generated JWT secret in `.dev-jwt-secret`; the encryption key is derived from it unless you set one | Random JWT secret and encryption key in `.env`; the API won't start without them |
-| **Database password** | `segmentra` | Random on a new install |
+| **Secrets** | Generated JWT secret in `.dev-jwt-secret`; the encryption key is derived from it, unless you set one or `.env` has one | Random JWT secret and encryption key in `.env`; the API won't start without them |
+| **Database password** | `segmentra`, or the one in `.env` if a production install wrote one | Random on a new install |
 | **Migrations and seed** | Run by the install and run scripts | Run by the API container each time it starts |
 | **`NODE_ENV`** | Not set to `production` | `production`, which turns on stricter checks such as refusing default JWT secrets |
-| **Lifetime** | Stops with the terminal session; `./run.sh --start --development` (Windows: `.\run.ps1 -start -development`) rebuilds and starts it again | Containers run in the background until stopped |
+| **Lifetime** | Stops with the terminal session; `./run.sh --start --development` (Windows: `.\run.ps1 --start --development`) rebuilds and starts it again | Containers run in the background until stopped |
 
 **Which one to use:**
 
@@ -528,6 +528,7 @@ Typical lifecycle of a version: `DRAFT` → `PENDING_APPROVAL` → `APPROVED` (o
 ```bash
 ./install.sh --development    # Local dev environment
 ./install.sh --production     # Docker production deployment
+./install.sh --production --hardened   # Production with the hardened override (see Security hardening)
 ```
 
 **Windows (PowerShell):**
@@ -537,13 +538,17 @@ Typical lifecycle of a version: `DRAFT` → `PENDING_APPROVAL` → `APPROVED` (o
 .\run.ps1 --start --development
 ```
 
+`--hardened` is not available in `install.ps1` yet. The Windows scripts have not been run on real Windows yet, so please report anything that goes wrong.
+
 **Prerequisites are checked first.** The installer lists everything that is missing for the chosen mode, then asks before changing anything:
 
-- **Docker** is never installed for you, because it needs admin rights, may need a reboot, and Docker Desktop has licence terms. If it is installed but not running, the installer offers to start it. If Docker or the Compose plugin is missing, the installer says where to get it and stops without changing anything.
+- **Docker** is never installed for you, because it needs admin rights, may need a reboot, and Docker Desktop has licence terms. If it is installed but not running, the installer offers to start it. If Docker or the Compose plugin is missing, the installer says where to get it and stops without changing anything. If Docker can't be reached, you see Docker's own error message. On Windows the installer also finds Docker Desktop when `docker` isn't on `PATH`, waits if its engine is still starting, and stops if it is in Windows containers mode.
 - **Node.js 20+** (development mode only) can be installed with Homebrew, apt, dnf/yum or winget. If your Linux distribution only offers an older version, the installer asks separately before adding the third-party NodeSource repository.
 - **`ssh` and `sshpass`** (development mode only) are optional. The installer offers them on Linux and warns if they stay missing. Production mode includes them in the API image.
 
 Add `--yes` to accept every offer, which scripted installs need because without a terminal the installer can't ask and declines. Add `--check` to only see the report; it changes nothing and exits with 1 if something required is missing.
+
+If the API does not become healthy within 2 minutes, `--production` shows its last log lines and exits with an error instead of reporting success.
 
 **Windows: if PowerShell says scripts are disabled or "not digitally signed"**, allow them for this window only and unblock the downloaded files, then run the installer again:
 
@@ -552,7 +557,9 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 Get-ChildItem -Recurse -Include *.ps1 | Unblock-File
 ```
 
-**Reinstalling:** a database belongs to the `.env` that created it, and Docker Compose names the database after the folder, so a fresh copy in a folder with the same name finds the old database. `--production` then stops without changing anything. Copy your earlier `.env` into the new folder to keep the data, or run `docker compose down -v` to delete it and start over.
+**Reinstalling and switching modes:** a database belongs to the `.env` that created it, and Docker Compose names the database after the folder, so a fresh copy in a folder with the same name finds the old database. `--production` then stops without changing anything, and development mode reports the password mismatch. Copy your earlier `.env` into the new folder to keep the data, or run `docker compose down -v` to delete it and start over.
+
+Going from production to development in the same folder works once the production stack is stopped, because both use the same ports. A development install has no `.env`, so going the other way needs [a few extra steps](docs/installation.md#moving-from-development-to-production).
 
 `--production` generates `JWT_SECRET`, `SEGMENTRA_KEK_B64`, `POSTGRES_PASSWORD` and `SEGMENTRA_ADMIN_PASSWORD` into `.env` (kept if already present) and prints the initial admin password. Back up `.env` — losing `SEGMENTRA_KEK_B64` makes stored SSH/LDAP secrets unrecoverable.
 
@@ -564,6 +571,8 @@ Get-ChildItem -Recurse -Include *.ps1 | Unblock-File
 ./run.sh --start --production     # Start production (all Docker containers; the API runs migrations on start)
 ./run.sh --stop --production      # Stop production
 ```
+
+On Windows use `.\run.ps1` with the same options. `--stop --development` only stops this folder's API and UI, not other projects' processes.
 
 ### Default Login
 
@@ -604,7 +613,7 @@ Then open `http://<host>` (port 80). To upgrade: `git pull && docker compose up 
 
 Segmentra can change the firewall of every managed host and stores SSH credentials with `sudo` rights on all of them, so a compromised Segmentra means compromised hosts. Before going to production:
 
-- **Use the hardened override:** `docker compose -f docker-compose.yml -f docker-compose.hardened.yml up -d --build`. This removes the Docker socket, makes the containers read-only, drops Linux capabilities, sets resource limits and publishes only nginx. It requires the SSH Direct executor.
+- **Use the hardened override:** `./install.sh --production --hardened`, which records it in `.env` so later `docker compose` commands keep using it. By hand: `docker compose -f docker-compose.yml -f docker-compose.hardened.yml up -d --build`. This removes the Docker socket, makes the containers read-only, drops Linux capabilities, sets resource limits and publishes only nginx. It requires the SSH Direct executor.
 - **Network:** serve the UI over TLS (reverse proxy) and make it reachable only from a management network or VPN.
 - **Managed hosts:** use a dedicated SSH user with keys, restricted to logins from the Segmentra host, and set a management VLAN.
 - **Secrets:** `chmod 600 .env` and back it up separately from database backups.
@@ -629,6 +638,8 @@ npm run test:integration:ssh-docker
 ```
 
 This builds the current code, starts a temporary API + PostgreSQL + 3 target-container environment, deploys sample firewall ACLs through the real API using both SSH password and SSH key authentication, verifies the resulting `iptables` state, and runs live `ping` checks between the targets. For full details, see [tests/README.md](tests/README.md).
+
+`npm run test:installers` unit-tests how the installers' development database settings are worked out from `.env` (no Docker needed).
 
 Other integration tests need a running Segmentra API: `npm run test:integration:policy-code` (policy as code: export, import, validation, CLI) and `npm run test:integration:compliance` (compliance reports; the tamper check uses `docker exec` on the database container and is skipped without it), neither of which needs a lab, `npm run test:integration:review-fixes` (troubleshoot's effective policy, the per-host lock and the restore guard) and `npm run test:integration:race` (a real deployment racing a real learning-session restore in Docker) and `npm run test:review-fixes` (unit tests: unresolved interface scopes and drift hooks, no API needed), and, with Docker Desktop or Docker, `npm run test:integration:k8s -- <kindnet|calico|cilium>` (Kubernetes enforcement on kind clusters) and `npm run test:integration:swarm` (a 3-node Docker Swarm lab). They create their own lab and remove it afterwards; run them against a development stack, because they leave users, hosts and archived policy sets behind.
 
