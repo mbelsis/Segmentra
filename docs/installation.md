@@ -30,6 +30,25 @@
 .\install.ps1 --production
 ```
 
+### Prerequisite checks
+
+Both installers check the prerequisites for the chosen mode first and report everything that is missing. Anything that changes the machine is offered, not done silently.
+
+| Prerequisite | Needed for | If it is missing |
+|---|---|---|
+| Docker and the Compose plugin | Both modes | Never installed. The installer prints where to get them and stops before changing anything. |
+| Docker not running | Both modes | Offers to start it (Docker Desktop, or `systemctl start docker`) and waits up to 2 minutes. |
+| No permission to use Docker | Both modes | Explains the group to join and stops before changing anything. |
+| Node.js 20+ and npm | Development | Offers to install with Homebrew, apt, dnf/yum or winget. If the distribution only has an older version, it asks separately before adding the third-party NodeSource repository (Node.js 22). |
+| `ssh`, `sshpass` | Development, optional | Offered on Linux; otherwise a warning. Password-based SSH credentials need `sshpass`. Production mode includes both in the API image. |
+
+Options for `install.sh` and `install.ps1`:
+
+- `--yes` (`-y`) accepts every offer. Without it, and without a terminal to ask on, the installer declines and stops if something required is still missing.
+- `--check` only prints the report and changes nothing. It exits with 0 if everything required is in place and 1 otherwise.
+
+If Node.js comes from a version manager such as `nvm`, an install can't replace the version your shell uses. The installer then stops and asks you to switch to Node.js 20 or newer yourself.
+
 ### Running the Application
 
 **Linux/macOS:**

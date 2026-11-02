@@ -6,16 +6,20 @@ cd "$ROOT_DIR"
 
 MODE=""
 HARDENED=0
+ASSUME_YES=0
+CHECK_ONLY=0
 HARDENED_COMPOSE_FILE="docker-compose.yml:docker-compose.hardened.yml"
 
 install_usage() {
-  echo "Usage: ./install.sh --development | --production [--hardened]"
+  echo "Usage: ./install.sh --development | --production [--hardened] [--yes] [--check]"
   echo "  --development  Install for local development (Node.js + Docker DB)"
   echo "  --production   Install for production (all Docker containers)"
   echo "  --hardened     With --production: use docker-compose.hardened.yml too (no Docker socket,"
   echo "                 read-only containers, only nginx published; requires the SSH Direct executor)."
   echo "                 Recorded as COMPOSE_FILE in .env, so every later 'docker compose' command,"
   echo "                 ./run.sh and scripts/segmentra-backup.sh keep using the hardened override."
+  echo "  --yes, -y      Accept every offer to start Docker or install a missing prerequisite"
+  echo "  --check        Only report the prerequisites for the chosen mode; change nothing"
   exit 1
 }
 
@@ -25,6 +29,8 @@ for arg in "${@:---development}"; do
     --development|--dev|-d) MODE="development" ;;
     --production|--prod|-p) MODE="production" ;;
     --hardened) HARDENED=1 ;;
+    --yes|-y) ASSUME_YES=1 ;;
+    --check) CHECK_ONLY=1 ;;
     *) install_usage ;;
   esac
 done
@@ -39,34 +45,275 @@ echo " Segmentra Installer ($MODE)"
 echo "========================================"
 echo
 
-# Check Docker
-echo "[1/6] Checking Docker..."
-if ! docker info >/dev/null 2>&1; then
-  echo "ERROR: Docker is not running. Please start Docker Desktop and try again."
-  exit 1
+# ---------------------------------------------------------------------------------------------
+# Prerequisites: report everything first, then fix what can be fixed, asking before each change.
+# Docker itself is never installed from here (licensing, admin rights, reboots), only started.
+# Written for bash 3.2, which is what macOS ships.
+# ---------------------------------------------------------------------------------------------
+OS="$(uname -s)"
+PKG=""
+if [ "$OS" = "Darwin" ]; then
+  if command -v brew >/dev/null 2>&1; then PKG="brew"; fi
+else
+  for candidate in apt-get dnf yum brew; do
+    if command -v "$candidate" >/dev/null 2>&1; then PKG="$candidate"; break; fi
+  done
 fi
-echo "  Docker OK"
+
+confirm() {
+  if [ "$ASSUME_YES" = "1" ]; then echo "  $1 [Y/n] y (--yes)"; return 0; fi
+  if [ ! -t 0 ]; then echo "  $1 Skipped: no terminal to ask on (use --yes to accept)."; return 1; fi
+  local reply=""
+  read -r -p "  $1 [Y/n] " reply || return 1
+  case "$reply" in ""|[Yy]*) return 0 ;; *) return 1 ;; esac
+}
+
+run_root() {
+  if [ "$(id -u)" = "0" ]; then "$@"
+  elif command -v sudo >/dev/null 2>&1; then sudo "$@"
+  else echo "  ERROR: this step needs root and sudo is not installed: $*"; return 1
+  fi
+}
+
+node_major() {
+  local v
+  v="$(node -v 2>/dev/null)" || v=""
+  v="${v#v}"; v="${v%%.*}"
+  case "$v" in ''|*[!0-9]*) echo 0 ;; *) echo "$v" ;; esac
+}
+node_ok() {
+  command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && [ "$(node_major)" -ge 20 ]
+}
+
+docker_state() {
+  command -v docker >/dev/null 2>&1 || { echo missing; return 0; }
+  local out
+  if out="$(docker info 2>&1)"; then echo ok; return 0; fi
+  case "$out" in
+    *[Pp]ermission\ denied*) echo denied ;;
+    *) echo stopped ;;
+  esac
+}
+compose_ok() { docker compose version >/dev/null 2>&1; }
+
+docker_install_hint() {
+  if [ "$OS" = "Darwin" ]; then echo "         Install Docker Desktop: https://docs.docker.com/desktop/"
+  else echo "         Install Docker Engine and the compose plugin: https://docs.docker.com/engine/install/"
+  fi
+}
+
+start_docker() {
+  if [ -n "${DOCKER_HOST:-}" ]; then
+    echo "  ERROR: the Docker daemon at DOCKER_HOST=$DOCKER_HOST is not reachable."
+    return 1
+  fi
+  if ! confirm "Docker is not running. Start it?"; then return 1; fi
+  if [ "$OS" = "Darwin" ]; then
+    open -a Docker || return 1
+  elif command -v systemctl >/dev/null 2>&1; then
+    run_root systemctl start docker || return 1
+  elif command -v service >/dev/null 2>&1; then
+    run_root service docker start || return 1
+  else
+    echo "  ERROR: no systemctl or service command to start Docker with."
+    return 1
+  fi
+  echo "  Waiting for Docker (up to 2 minutes)..."
+  local i
+  for i in $(seq 1 60); do
+    if [ "$(docker_state)" = "ok" ]; then return 0; fi
+    sleep 2
+  done
+  echo "  ERROR: Docker did not become ready in time."
+  return 1
+}
+
+# Newest nodejs major version the system's package sources offer (0 if unknown).
+node_candidate_major() {
+  local v=""
+  case "$PKG" in
+    apt-get) v="$(apt-cache policy nodejs 2>/dev/null | awk '/Candidate:/ {print $2}')" ;;
+    # --whatprovides: Fedora ships it as nodejs22 etc., which only provide "nodejs".
+    dnf|yum) v="$("$PKG" -q repoquery --latest-limit=1 --whatprovides nodejs --qf '%{version}\n' 2>/dev/null | sort -V | tail -n1)" ;;
+  esac
+  v="${v#*:}"; v="${v%%.*}"
+  case "$v" in ''|*[!0-9]*) echo 0 ;; *) echo "$v" ;; esac
+}
+
+# The distribution's Node.js is too old: use NodeSource, which is a third party, so ask separately.
+install_node_nodesource() {
+  local family="$1" script
+  if ! confirm "This system only offers an older Node.js. Add the third-party NodeSource repository for Node.js 22?"; then return 1; fi
+  if ! command -v curl >/dev/null 2>&1; then
+    if [ "$family" = "deb" ]; then
+      run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates gnupg || return 1
+    else
+      run_root "$PKG" install -y curl || return 1
+    fi
+  fi
+  script="$(mktemp)"
+  if ! curl -fsSL "https://$family.nodesource.com/setup_22.x" -o "$script"; then
+    rm -f "$script"
+    echo "  ERROR: could not download the NodeSource setup script (no internet access?)."
+    return 1
+  fi
+  if ! run_root bash "$script"; then rm -f "$script"; return 1; fi
+  rm -f "$script"
+  if [ "$family" = "deb" ]; then
+    run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+  else
+    run_root "$PKG" install -y nodejs
+  fi
+}
+
+install_node() {
+  case "$PKG" in
+    brew)
+      confirm "Install Node.js with Homebrew?" || return 1
+      brew install node
+      ;;
+    apt-get)
+      confirm "Install Node.js with apt?" || return 1
+      run_root apt-get update -qq || return 1
+      if [ "$(node_candidate_major)" -ge 20 ]; then
+        run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs npm
+      else
+        install_node_nodesource deb
+      fi
+      ;;
+    dnf|yum)
+      confirm "Install Node.js with $PKG?" || return 1
+      if [ "$(node_candidate_major)" -ge 20 ]; then
+        run_root "$PKG" install -y nodejs npm
+      else
+        install_node_nodesource rpm
+      fi
+      ;;
+    *)
+      echo "  No supported package manager found (Homebrew, apt, dnf, yum)."
+      return 1
+      ;;
+  esac
+}
+
+# Only needed by the SSH executor when the API runs on this machine (development mode), and
+# only for some credentials, so a tool that stays missing is a warning and not a failure.
+install_optional_tool() {
+  local tool="$1" why="$2" package=""
+  command -v "$tool" >/dev/null 2>&1 && return 0
+  case "$tool:$PKG" in
+    ssh:apt-get) package="openssh-client" ;;
+    ssh:dnf|ssh:yum) package="openssh-clients" ;;
+    sshpass:apt-get|sshpass:dnf|sshpass:yum) package="sshpass" ;;
+  esac
+  if [ -n "$package" ] && confirm "$tool not found ($why). Install $package with $PKG?"; then
+    if [ "$PKG" = "apt-get" ]; then
+      run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y "$package" || true
+    else
+      run_root "$PKG" install -y "$package" || true
+    fi
+  fi
+  hash -r
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "  WARNING: $tool is still missing: $why. Production mode includes it in the API image."
+  fi
+}
+
+check_prerequisites() {
+  local state compose="ok" node="ok" blocked=0 failed=0 tool
+  state="$(docker_state)"
+  case "$state" in
+    ok)      echo "  [ok]      Docker is running" ;;
+    stopped) echo "  [stopped] Docker is installed but not running"; failed=1 ;;
+    denied)
+      echo "  [blocked] Docker is running but this user may not use it"
+      echo "            Add the user to the docker group (sudo usermod -aG docker \$USER), then log in again."
+      blocked=1; failed=1
+      ;;
+    missing)
+      echo "  [missing] Docker"
+      docker_install_hint
+      blocked=1; failed=1
+      ;;
+  esac
+  if [ "$state" != "missing" ]; then
+    if compose_ok; then
+      echo "  [ok]      Docker Compose"
+    else
+      compose="missing"
+      echo "  [missing] Docker Compose plugin"
+      docker_install_hint
+      blocked=1; failed=1
+    fi
+  fi
+
+  if [ "$MODE" = "development" ]; then
+    if node_ok; then
+      echo "  [ok]      Node.js $(node -v), npm $(npm -v)"
+    else
+      node="missing"; failed=1
+      if command -v node >/dev/null 2>&1; then
+        echo "  [old]     Node.js 20+ and npm are required. Found: $(node -v), npm: $(command -v npm >/dev/null 2>&1 && echo yes || echo no)"
+      else
+        echo "  [missing] Node.js 20+"
+      fi
+    fi
+    for tool in ssh sshpass; do
+      if command -v "$tool" >/dev/null 2>&1; then echo "  [ok]      $tool"
+      else echo "  [note]    $tool not found (optional)"
+      fi
+    done
+  fi
+
+  if [ "$CHECK_ONLY" = "1" ]; then
+    echo
+    if [ "$failed" = "1" ]; then echo "Some prerequisites are missing."; exit 1; fi
+    echo "All required prerequisites are in place."
+    exit 0
+  fi
+
+  # Stop before changing anything if a problem cannot be fixed from here.
+  if [ "$blocked" = "1" ]; then
+    echo
+    echo "ERROR: fix the problems above and run the installer again. Nothing was changed."
+    exit 1
+  fi
+
+  if [ "$state" = "stopped" ] && ! start_docker; then
+    echo "ERROR: Docker is not running. Start it and run the installer again."
+    exit 1
+  fi
+
+  if [ "$node" = "missing" ]; then
+    if ! install_node; then
+      echo "  Node.js was not installed."
+    fi
+    hash -r
+    if ! node_ok; then
+      echo "ERROR: Node.js 20+ and npm are required. Install them from https://nodejs.org and run the installer again."
+      echo "       If you use a version manager such as nvm, switch to Node.js 20 or newer in this shell."
+      exit 1
+    fi
+    echo "  Node.js $(node -v), npm $(npm -v) OK"
+  fi
+
+  if [ "$MODE" = "development" ]; then
+    install_optional_tool ssh "deployments over SSH will not work"
+    install_optional_tool sshpass "password-based SSH credentials will not work; SSH keys are fine"
+  fi
+}
+
+if [ "$MODE" = "development" ]; then STEPS=5; else STEPS=6; fi
+echo "[1/$STEPS] Checking prerequisites..."
+check_prerequisites
 
 if [ "$MODE" = "development" ]; then
-  # Check Node.js
-  echo "[2/6] Checking Node.js..."
-  if ! command -v node >/dev/null 2>&1; then
-    echo "ERROR: Node.js is not installed. Install Node.js 20+ from https://nodejs.org"
-    exit 1
-  fi
-  NODE_VERSION=$(node -v | sed 's/v//' | cut -d. -f1)
-  if [ "$NODE_VERSION" -lt 20 ]; then
-    echo "ERROR: Node.js 20+ required. Found: $(node -v)"
-    exit 1
-  fi
-  echo "  Node.js $(node -v) OK"
-
   # Install npm dependencies
-  echo "[3/6] Installing npm dependencies..."
+  echo "[2/5] Installing npm dependencies..."
   npm install
 
   # Start PostgreSQL container
-  echo "[4/6] Starting PostgreSQL..."
+  echo "[3/5] Starting PostgreSQL..."
   docker compose up -d segmentra-db
   echo "  Waiting for PostgreSQL to be ready..."
   sleep 3
@@ -79,11 +326,11 @@ if [ "$MODE" = "development" ]; then
   echo "  PostgreSQL ready on port 15432"
 
   # Build workspaces
-  echo "[5/6] Building workspaces..."
+  echo "[4/5] Building workspaces..."
   npm run build
 
   # Run migrations and seed
-  echo "[6/6] Setting up database..."
+  echo "[5/5] Setting up database..."
   export DATABASE_URL="postgres://segmentra:segmentra@127.0.0.1:15432/segmentra"
   npm run db:migrate
   npm run db:seed

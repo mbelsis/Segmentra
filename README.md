@@ -537,6 +537,14 @@ Typical lifecycle of a version: `DRAFT` → `PENDING_APPROVAL` → `APPROVED` (o
 .\run.ps1 -start -development     # note: run.ps1 uses single-dash switches
 ```
 
+**Prerequisites are checked first.** The installer lists everything that is missing for the chosen mode, then asks before changing anything:
+
+- **Docker** is never installed for you, because it needs admin rights, may need a reboot, and Docker Desktop has licence terms. If it is installed but not running, the installer offers to start it. If Docker or the Compose plugin is missing, the installer says where to get it and stops without changing anything.
+- **Node.js 20+** (development mode only) can be installed with Homebrew, apt, dnf/yum or winget. If your Linux distribution only offers an older version, the installer asks separately before adding the third-party NodeSource repository.
+- **`ssh` and `sshpass`** (development mode only) are optional. The installer offers them on Linux and warns if they stay missing. Production mode includes them in the API image.
+
+Add `--yes` to accept every offer, which scripted installs need because without a terminal the installer can't ask and declines. Add `--check` to only see the report; it changes nothing and exits with 1 if something required is missing.
+
 `--production` generates `JWT_SECRET`, `SEGMENTRA_KEK_B64`, `POSTGRES_PASSWORD` and `SEGMENTRA_ADMIN_PASSWORD` into `.env` (kept if already present) and prints the initial admin password. Back up `.env` — losing `SEGMENTRA_KEK_B64` makes stored SSH/LDAP secrets unrecoverable.
 
 ### Running
