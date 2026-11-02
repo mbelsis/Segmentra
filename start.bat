@@ -25,11 +25,14 @@ echo [segmentra] Checking Docker...
 REM Docker Desktop can be running while docker.exe is not on this window's PATH.
 where docker >nul 2>&1
 if not errorlevel 1 goto docker_on_path
-if exist "%ProgramFiles%\Docker\Docker\resources\bin\docker.exe" goto docker_add_path
-goto docker_on_path
-:docker_add_path
-set "PATH=%ProgramFiles%\Docker\Docker\resources\bin;%PATH%"
-echo [segmentra] docker was not on PATH; using the Docker Desktop folder for this run.
+REM Install locations differ per machine; install.ps1 searches more thoroughly than this.
+for %%D in ("%ProgramFiles%\Docker\Docker" "%LOCALAPPDATA%\Programs\DockerDesktop" "%LOCALAPPDATA%\Programs\Docker\Docker") do (
+    if exist "%%~D\resources\bin\docker.exe" (
+        set "PATH=%%~D\resources\bin;!PATH!"
+        echo [segmentra] docker was not on PATH; using %%~D\resources\bin for this run.
+        goto docker_on_path
+    )
+)
 :docker_on_path
 set "DOCKER_ERR=%TEMP%\segmentra-docker-check.txt"
 docker version --format "{{.Server.Os}}" >nul 2>"%DOCKER_ERR%"

@@ -90,16 +90,6 @@ function Test-NodeOk {
     return ((Get-NodeMajor) -ge 20) -and [bool](Get-Command npm -ErrorAction SilentlyContinue)
 }
 
-# Programs installed by winget are not on this session's PATH until it is re-read.
-function Update-SessionPath {
-    $parts = @(
-        [Environment]::GetEnvironmentVariable("Path", "Machine"),
-        [Environment]::GetEnvironmentVariable("Path", "User"),
-        $env:PATH
-    ) | Where-Object { $_ }
-    $env:PATH = $parts -join [IO.Path]::PathSeparator
-}
-
 function Install-NodeWithWinget {
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         Write-Host "  winget is not available on this machine."
@@ -121,13 +111,7 @@ function Start-DockerDesktop {
         return $false
     }
     if (-not (Confirm-Step "Docker is not running. Start Docker Desktop?")) { return $false }
-    $roots = @()
-    if ($env:ProgramFiles) { $roots += $env:ProgramFiles }
-    if ($env:LOCALAPPDATA) { $roots += (Join-Path $env:LOCALAPPDATA "Programs") }
-    $exe = $roots |
-        ForEach-Object { Join-Path (Join-Path (Join-Path $_ "Docker") "Docker") "Docker Desktop.exe" } |
-        Where-Object { Test-Path -LiteralPath $_ } |
-        Select-Object -First 1
+    $exe = Find-InDockerInstallDirs "Docker Desktop.exe"
     if (-not $exe) {
         Write-Host "  ERROR: could not find Docker Desktop. Start it yourself." -ForegroundColor Red
         return $false
@@ -164,8 +148,7 @@ function Invoke-PrerequisiteCheck {
             $blocked = $true; $failed = $true
         }
         "missing" {
-            Write-Host "  [missing] Docker"
-            Write-Host $dockerHint
+            Write-DockerMissing
             $blocked = $true; $failed = $true
         }
     }
