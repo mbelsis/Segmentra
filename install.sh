@@ -88,7 +88,8 @@ node_ok() {
 docker_state() {
   command -v docker >/dev/null 2>&1 || { echo missing; return 0; }
   local out
-  if out="$(docker info 2>&1)"; then echo ok; return 0; fi
+  # --format: only the server's version, so client warnings cannot be taken for the failure.
+  if out="$(docker version --format '{{.Server.Version}}' 2>&1)"; then echo ok; return 0; fi
   case "$out" in
     *[Pp]ermission\ denied*) echo denied ;;
     *) echo stopped ;;
@@ -224,7 +225,11 @@ check_prerequisites() {
   state="$(docker_state)"
   case "$state" in
     ok)      echo "  [ok]      Docker is running" ;;
-    stopped) echo "  [stopped] Docker is installed but not running"; failed=1 ;;
+    stopped)
+      echo "  [stopped] Docker is installed but not running"
+      echo "            Docker says: $(docker version --format '{{.Server.Version}}' 2>&1 | sed -n '1p' || true)"
+      failed=1
+      ;;
     denied)
       echo "  [blocked] Docker is running but this user may not use it"
       echo "            Add the user to the docker group (sudo usermod -aG docker \$USER), then log in again."
@@ -316,14 +321,19 @@ if [ "$MODE" = "development" ]; then
   echo "[3/5] Starting PostgreSQL..."
   docker compose up -d segmentra-db
   echo "  Waiting for PostgreSQL to be ready..."
-  sleep 3
-  for i in $(seq 1 20); do
+  DB_READY=0
+  for _ in $(seq 1 30); do
     if docker compose exec -T segmentra-db pg_isready -U segmentra >/dev/null 2>&1; then
+      DB_READY=1
       break
     fi
     sleep 1
   done
-  echo "  PostgreSQL ready on port 15432"
+  if [ "$DB_READY" != "1" ]; then
+    echo "ERROR: PostgreSQL did not become ready in time. Check: docker compose logs segmentra-db"
+    exit 1
+  fi
+  echo "  PostgreSQL ready"
 
   # Build workspaces
   echo "[4/5] Building workspaces..."
@@ -331,7 +341,10 @@ if [ "$MODE" = "development" ]; then
 
   # Run migrations and seed
   echo "[5/5] Setting up database..."
-  export DATABASE_URL="postgres://segmentra:segmentra@127.0.0.1:15432/segmentra"
+  # The database takes its password from .env, which a production install may have written.
+  DATABASE_URL="$(node packages/db/scripts/dev-env.js database-url)"
+  export DATABASE_URL
+  node packages/db/scripts/dev-env.js check-db
   npm run db:migrate
   npm run db:seed
 
@@ -345,16 +358,44 @@ if [ "$MODE" = "development" ]; then
   echo
   echo " Default credentials (development only):"
   echo "   Username: admin"
-  echo "   Password: admin123 (or SEGMENTRA_ADMIN_PASSWORD if it was set during seeding)"
+  echo "   Password: admin123, unless SEGMENTRA_ADMIN_PASSWORD or an earlier install set another one"
   echo
   echo " Optional: import demo data:"
-  echo "   node demo-data/seed-demo-data.js"
+  echo "   npm run db:demo"
   echo "========================================"
 
 elif [ "$MODE" = "production" ]; then
   # Generate secrets into .env (read automatically by docker compose; never commit it).
   # Existing values are kept, so re-running the installer is safe.
   echo "[2/6] Preparing .env secrets..."
+  # A value the way docker compose resolves it: environment, then .env, then the default.
+  env_value() {
+    local value=""
+    eval "value=\${$1:-}"
+    if [ -z "$value" ] && [ -f .env ]; then
+      value="$(sed -n "s/^$1=//p" .env | tail -n1 | tr -d "\r\"'")"
+    fi
+    echo "${value:-$2}"
+  }
+  # The name docker compose really uses: it strips characters from the folder name
+  # ("Segmentra-main (1)" becomes "segmentra-main1") and honours COMPOSE_PROJECT_NAME in .env.
+  PROJECT="$(docker compose config 2>/dev/null | sed -n 's/^name: //p')" || PROJECT=""
+  if [ -z "$PROJECT" ]; then
+    PROJECT="$(basename "$ROOT_DIR" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-' | sed 's/^[-_]*//')"
+  fi
+  PG_VOLUME="${PROJECT}_segmentra_pgdata"
+  DB_EXISTS=0
+  if docker volume inspect "$PG_VOLUME" >/dev/null 2>&1; then DB_EXISTS=1; fi
+  # An existing database only works with the .env it was created with: new secrets would not
+  # match its password or the credentials stored in it. Stop before writing anything.
+  if [ "$DB_EXISTS" = "1" ] && [ -z "$(env_value SEGMENTRA_KEK_B64 "")" ]; then
+    echo "ERROR: found an existing Segmentra database (Docker volume $PG_VOLUME), but no .env that goes with it."
+    echo "  New secrets would not match its password or the credentials stored in it. Nothing was changed."
+    echo "  Keep the data:  copy .env from the earlier install into this folder, then run this again."
+    echo "  Start over:     docker compose down -v     (DELETES all Segmentra data in that database)"
+    echo "  A development install has no .env; see 'Moving from development to production' in docs/installation.md."
+    exit 1
+  fi
   touch .env
   chmod 600 .env
   # make sure appended lines start on a new line
@@ -367,16 +408,17 @@ elif [ "$MODE" = "production" ]; then
   # Must be set BEFORE any secret is stored; changing it later makes stored secrets undecryptable.
   env_has SEGMENTRA_KEK_B64 || echo "SEGMENTRA_KEK_B64=$(rand_b64 32)" >> .env
   if ! env_has POSTGRES_PASSWORD && ! env_has DB_PASSWORD; then
-    PROJECT="${COMPOSE_PROJECT_NAME:-$(basename "$ROOT_DIR" | tr '[:upper:]' '[:lower:]')}"
-    if docker volume inspect "${PROJECT}_segmentra_pgdata" >/dev/null 2>&1; then
+    if [ "$DB_EXISTS" = "1" ]; then
       echo "  Existing database volume found - keeping its current password (set POSTGRES_PASSWORD in .env to match it)."
     else
       echo "POSTGRES_PASSWORD=$(rand_hex 16)" >> .env
     fi
   fi
   if ! env_has SEGMENTRA_ADMIN_PASSWORD; then
-    NEW_ADMIN_PASSWORD="$(rand_hex 12)"
-    echo "SEGMENTRA_ADMIN_PASSWORD=$NEW_ADMIN_PASSWORD" >> .env
+    GENERATED_PASSWORD="$(rand_hex 12)"
+    echo "SEGMENTRA_ADMIN_PASSWORD=$GENERATED_PASSWORD" >> .env
+    # It is only used when the admin user is first created, so don't announce it otherwise.
+    if [ "$DB_EXISTS" = "0" ]; then NEW_ADMIN_PASSWORD="$GENERATED_PASSWORD"; fi
   fi
   # Group that owns the Docker socket, so the non-root API user can run `docker exec`
   # for the Ansible executor. On Docker Desktop (macOS/Windows) the socket inside the
@@ -414,25 +456,31 @@ elif [ "$MODE" = "production" ]; then
   docker compose up -d
 
   echo "[5/6] Waiting for the API (migrations run on container start)..."
+  # Asked from inside the nginx container, so it covers nginx, the API and the migrations, in
+  # hardened mode too, and does not depend on the published ports or a proxy on this machine.
   API_OK=0
-  # The hardened override does not publish the API; check it through nginx then.
-  if [ "$HARDENED" = "1" ]; then
-    HEALTH_URL="http://127.0.0.1:${WEB_PORT:-80}/api/health"
-  else
-    HEALTH_URL="http://127.0.0.1:${API_PORT:-8080}/api/health"
-  fi
-  for i in $(seq 1 60); do
-    if curl -sf "$HEALTH_URL" >/dev/null 2>&1; then
+  for _ in $(seq 1 60); do
+    if docker compose exec -T segmentra-web wget -q -O /dev/null http://127.0.0.1/api/health >/dev/null 2>&1; then
       API_OK=1
       break
     fi
     sleep 2
   done
   if [ "$API_OK" != "1" ]; then
-    echo "  WARNING: API not healthy yet. Check: docker compose logs segmentra-app"
-  else
-    echo "  API ready"
+    echo "ERROR: the API did not become healthy in 2 minutes. Last log lines:"
+    # Search more than is shown: a stack trace can push the actual error out of the last lines.
+    API_LOGS="$(docker compose logs --tail 200 segmentra-app 2>&1 || true)"
+    echo "$API_LOGS" | tail -n 20
+    case "$API_LOGS" in
+      *"password authentication failed"*)
+        echo "The database was created with a different password than the one in .env."
+        echo "  Keep the data:  put the earlier install's .env in this folder, then run this again."
+        echo "  Start over:     docker compose down -v     (DELETES all Segmentra data in that database)"
+        ;;
+    esac
+    exit 1
   fi
+  echo "  API ready"
 
   echo "[6/6] Done."
   echo
@@ -441,19 +489,21 @@ elif [ "$MODE" = "production" ]; then
   echo "========================================"
   echo
   echo " Services running:"
-  echo "   UI:  http://localhost:${WEB_PORT:-80}  (plain HTTP: put a TLS reverse proxy in front, see docs/installation.md)"
+  echo "   UI:  http://localhost:$(env_value WEB_PORT 80)  (plain HTTP: put a TLS reverse proxy in front, see docs/installation.md)"
   if [ "$HARDENED" = "1" ]; then
     echo "   API: not published (hardened); reached through the UI's /api proxy"
     echo "   DB:  not published (hardened)"
   else
-    echo "   API: http://127.0.0.1:${API_PORT:-8080} (localhost only; browsers use the UI's /api proxy)"
-    echo "   DB:  127.0.0.1:${DB_PORT:-15432}"
+    echo "   API: http://127.0.0.1:$(env_value API_PORT 8080) (localhost only; browsers use the UI's /api proxy)"
+    echo "   DB:  127.0.0.1:$(env_value DB_PORT 15432)"
   fi
   echo
   echo " Admin login:"
   echo "   Username: admin"
   if [ -n "$NEW_ADMIN_PASSWORD" ]; then
     echo "   Password: $NEW_ADMIN_PASSWORD   (stored in .env as SEGMENTRA_ADMIN_PASSWORD - change it after first login)"
+  elif [ "$DB_EXISTS" = "1" ]; then
+    echo "   Password: unchanged, this database already existed"
   else
     echo "   Password: SEGMENTRA_ADMIN_PASSWORD from .env (used only when the admin user is first created)"
   fi

@@ -534,7 +534,7 @@ Typical lifecycle of a version: `DRAFT` → `PENDING_APPROVAL` → `APPROVED` (o
 ```powershell
 .\install.ps1 --development
 .\install.ps1 --production
-.\run.ps1 -start -development     # note: run.ps1 uses single-dash switches
+.\run.ps1 --start --development
 ```
 
 **Prerequisites are checked first.** The installer lists everything that is missing for the chosen mode, then asks before changing anything:
@@ -544,6 +544,15 @@ Typical lifecycle of a version: `DRAFT` → `PENDING_APPROVAL` → `APPROVED` (o
 - **`ssh` and `sshpass`** (development mode only) are optional. The installer offers them on Linux and warns if they stay missing. Production mode includes them in the API image.
 
 Add `--yes` to accept every offer, which scripted installs need because without a terminal the installer can't ask and declines. Add `--check` to only see the report; it changes nothing and exits with 1 if something required is missing.
+
+**Windows: if PowerShell says scripts are disabled or "not digitally signed"**, allow them for this window only and unblock the downloaded files, then run the installer again:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+Get-ChildItem -Recurse -Include *.ps1 | Unblock-File
+```
+
+**Reinstalling:** a database belongs to the `.env` that created it, and Docker Compose names the database after the folder, so a fresh copy in a folder with the same name finds the old database. `--production` then stops without changing anything. Copy your earlier `.env` into the new folder to keep the data, or run `docker compose down -v` to delete it and start over.
 
 `--production` generates `JWT_SECRET`, `SEGMENTRA_KEK_B64`, `POSTGRES_PASSWORD` and `SEGMENTRA_ADMIN_PASSWORD` into `.env` (kept if already present) and prints the initial admin password. Back up `.env` — losing `SEGMENTRA_KEK_B64` makes stored SSH/LDAP secrets unrecoverable.
 

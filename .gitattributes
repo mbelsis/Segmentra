@@ -1,2 +1,6 @@
 # Shell scripts run inside Linux containers, so they must stay LF even on a Windows checkout.
 *.sh text eol=lf
+
+# cmd.exe can misread goto labels in files with LF line endings. Stored as CRLF, never converted,
+# so source ZIPs from GitHub keep them too.
+*.bat -text

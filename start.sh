@@ -36,9 +36,14 @@ echo ""
 echo "[segmentra] Checking prerequisites..."
 
 # Check Docker
-if ! docker info >/dev/null 2>&1; then
-  echo "[segmentra] ERROR: Docker is not running!"
-  echo "[segmentra] Please start Docker and try again."
+if ! DOCKER_OUT="$(docker version --format '{{.Server.Version}}' 2>&1)"; then
+  echo "[segmentra] ERROR: cannot use Docker. Start it (or install it) and try again."
+  echo "[segmentra]   Docker says: $(echo "$DOCKER_OUT" | sed -n '1p')"
+  exit 1
+fi
+if [[ -n "$(docker compose ps -q segmentra-app 2>/dev/null || true)" ]]; then
+  echo "[segmentra] ERROR: the production stack is running and uses the same ports."
+  echo "[segmentra] Stop it first: docker compose stop"
   exit 1
 fi
 echo "[segmentra]   Docker ......... OK"
@@ -51,10 +56,10 @@ if ! command -v node >/dev/null 2>&1; then
 fi
 NODE_VERSION=$(node -v | sed 's/v//' | cut -d. -f1)
 if [[ "$NODE_VERSION" -lt 20 ]]; then
-  echo "[segmentra] WARNING: Node.js $(node -v) detected. Version 20+ recommended."
-else
-  echo "[segmentra]   Node.js ........ OK ($(node -v))"
+  echo "[segmentra] ERROR: Node.js 20+ is required. Found: $(node -v)"
+  exit 1
 fi
+echo "[segmentra]   Node.js ........ OK ($(node -v))"
 
 # Check npm
 if ! command -v npm >/dev/null 2>&1; then
@@ -110,7 +115,13 @@ echo " OK"
 echo ""
 
 # ── Environment variables ──────────────────────────────
-export DATABASE_URL="${SEGMENTRA_DATABASE_URL:-postgres://segmentra:segmentra@127.0.0.1:15432/segmentra}"
+# The database takes its password from .env, which a production install may have written.
+DATABASE_URL="$(node packages/db/scripts/dev-env.js database-url)"
+export DATABASE_URL
+if [[ -z "${SEGMENTRA_KEK_B64:-}" ]]; then
+  SEGMENTRA_KEK_B64="$(node packages/db/scripts/dev-env.js get SEGMENTRA_KEK_B64)"
+  if [[ -n "$SEGMENTRA_KEK_B64" ]]; then export SEGMENTRA_KEK_B64; else unset SEGMENTRA_KEK_B64; fi
+fi
 if [[ "$MODE" == "prod" ]]; then
   export NODE_ENV=production
   if [[ -z "${JWT_SECRET:-}" ]]; then
@@ -135,7 +146,7 @@ export BUNDLES_DIR="${BUNDLES_DIR:-./data/bundles}"
 export ANSIBLE_RUNNER_CONTAINER="${ANSIBLE_RUNNER_CONTAINER:-segmentra-ansible-runner}"
 
 echo "[segmentra] Configuration:"
-echo "[segmentra]   DATABASE_URL = $DATABASE_URL"
+echo "[segmentra]   DATABASE_URL = $(echo "$DATABASE_URL" | sed -E 's#://[^@/]*@#://***@#')"
 echo "[segmentra]   PORT         = $PORT"
 echo "[segmentra]   BUNDLES_DIR  = $BUNDLES_DIR"
 echo "[segmentra]   MODE         = $MODE"
@@ -146,6 +157,7 @@ mkdir -p "$BUNDLES_DIR"
 
 # ── Run migrations ─────────────────────────────────────
 echo "[segmentra] Running database migrations..."
+node packages/db/scripts/dev-env.js check-db
 npm run db:migrate
 echo "[segmentra] Migrations complete - OK"
 echo ""
@@ -216,6 +228,8 @@ echo "[segmentra] ========================================"
 echo "[segmentra]   Username: admin"
 if [[ -n "${SEGMENTRA_ADMIN_PASSWORD:-}" ]]; then
   echo "[segmentra]   Password: (value of SEGMENTRA_ADMIN_PASSWORD when the admin user was first created)"
+elif [[ "$MODE" == "prod" ]]; then
+  echo "[segmentra]   Password: none created by default in prod mode; set SEGMENTRA_ADMIN_PASSWORD before the first start"
 else
   echo "[segmentra]   Password: admin123 (dev default, unless the admin user already existed)"
   echo ""
@@ -227,14 +241,14 @@ echo "[segmentra]   tail -f $API_LOG"
 echo "[segmentra]   tail -f $UI_LOG"
 echo ""
 echo "[segmentra] To stop all services:"
-echo "[segmentra]   kill \$(cat $PID_FILE) && docker compose down"
+echo "[segmentra]   ./run.sh --stop --development"
 echo ""
 
 # ── Trap Ctrl+C to clean up ───────────────────────────
 cleanup() {
   echo ""
   echo "[segmentra] Shutting down..."
-  kill "$API_PID" "$UI_PID" 2>/dev/null || true
+  bash "$ROOT_DIR/scripts/stop-dev-processes.sh"
   wait "$API_PID" "$UI_PID" 2>/dev/null || true
   rm -f "$PID_FILE"
   echo "[segmentra] Services stopped."

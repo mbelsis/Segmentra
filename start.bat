@@ -22,13 +22,50 @@ echo.
 
 REM Check if Docker is running
 echo [segmentra] Checking Docker...
-docker info >nul 2>&1
-if errorlevel 1 (
-    echo [segmentra] ERROR: Docker is not running!
-    echo [segmentra] Please start Docker Desktop and try again.
-    exit /b 1
-)
+REM Docker Desktop can be running while docker.exe is not on this window's PATH.
+where docker >nul 2>&1
+if not errorlevel 1 goto docker_on_path
+if exist "%ProgramFiles%\Docker\Docker\resources\bin\docker.exe" goto docker_add_path
+goto docker_on_path
+:docker_add_path
+set "PATH=%ProgramFiles%\Docker\Docker\resources\bin;%PATH%"
+echo [segmentra] docker was not on PATH; using the Docker Desktop folder for this run.
+:docker_on_path
+set "DOCKER_ERR=%TEMP%\segmentra-docker-check.txt"
+docker version --format "{{.Server.Os}}" >nul 2>"%DOCKER_ERR%"
+if not errorlevel 1 goto docker_ok
+echo [segmentra] ERROR: cannot use Docker. Check that Docker Desktop shows "Engine running".
+echo [segmentra] Docker says:
+type "%DOCKER_ERR%"
+del "%DOCKER_ERR%" >nul 2>&1
+exit /b 1
+:docker_ok
+del "%DOCKER_ERR%" >nul 2>&1
 echo [segmentra] Docker check passed
+echo.
+
+REM The production stack uses the same ports as the API started below.
+for /f "delims=" %%C in ('docker compose ps -q segmentra-app 2^>nul') do goto prod_running
+goto prod_not_running
+:prod_running
+echo [segmentra] ERROR: the production stack is running and uses the same ports.
+echo [segmentra] Stop it first: docker compose stop
+exit /b 1
+:prod_not_running
+
+REM Check Node.js and npm
+where node >nul 2>&1
+if not errorlevel 1 goto node_found
+echo [segmentra] ERROR: Node.js was not found. Install Node.js 20+ from https://nodejs.org
+exit /b 1
+:node_found
+node -e "process.exit(Number(process.versions.node.split('.')[0])>=20?0:1)"
+if not errorlevel 1 goto node_ok
+echo [segmentra] ERROR: Node.js 20+ is required. Install it from https://nodejs.org
+node -v
+exit /b 1
+:node_ok
+echo [segmentra] Node.js check passed
 echo.
 
 REM Install / refresh dependencies:
@@ -88,13 +125,12 @@ echo [segmentra] PostgreSQL is ready - OK
 echo.
 
 REM Set up environment variables
-REM Use SEGMENTRA_DATABASE_URL if provided, otherwise use the local compose DB.
-if not "%SEGMENTRA_DATABASE_URL%"=="" goto use_custom_db
-set "DATABASE_URL=postgres://segmentra:segmentra@127.0.0.1:15432/segmentra"
-goto db_url_set
-:use_custom_db
-set "DATABASE_URL=%SEGMENTRA_DATABASE_URL%"
-:db_url_set
+REM SEGMENTRA_DATABASE_URL if provided, otherwise the local compose DB, whose password
+REM may come from a production install's .env.
+for /f "delims=" %%U in ('node packages\db\scripts\dev-env.js database-url') do set "DATABASE_URL=%%U"
+if not "%SEGMENTRA_KEK_B64%"=="" goto kek_done
+for /f "delims=" %%K in ('node packages\db\scripts\dev-env.js get SEGMENTRA_KEK_B64') do set "SEGMENTRA_KEK_B64=%%K"
+:kek_done
 
 REM JWT secret: prod requires an explicit JWT_SECRET; dev generates a random one once
 REM and keeps it in the untracked file .dev-jwt-secret.
@@ -119,13 +155,14 @@ if "%BUNDLES_DIR%"=="" set "BUNDLES_DIR=./data/bundles"
 if "%ANSIBLE_RUNNER_CONTAINER%"=="" set "ANSIBLE_RUNNER_CONTAINER=segmentra-ansible-runner"
 
 echo [segmentra] Configuration:
-echo [segmentra]   DATABASE_URL=%DATABASE_URL%
 echo [segmentra]   PORT=%PORT%
 echo [segmentra]   MODE=%MODE%
 echo.
 
 REM Run migrations
 echo [segmentra] Running database migrations...
+node packages\db\scripts\dev-env.js check-db
+if errorlevel 1 exit /b 1
 call npm run db:migrate
 if errorlevel 1 (
     echo [segmentra] ERROR: Database migrations failed
@@ -156,11 +193,12 @@ echo.
 
 REM Launch API in new window with all environment variables
 echo [segmentra] Launching API (new window)...
-start "Segmentra API" cmd /k "cd /d ""%~dp0"" && set ""DATABASE_URL=%DATABASE_URL%"" && set ""JWT_SECRET=%JWT_SECRET%"" && set ""PORT=%PORT%"" && set ""BUNDLES_DIR=%BUNDLES_DIR%"" && set ""ANSIBLE_RUNNER_CONTAINER=%ANSIBLE_RUNNER_CONTAINER%"" && set ""NODE_ENV=%NODE_ENV%"" && set ""SEGMENTRA_KEK_B64=%SEGMENTRA_KEK_B64%"" && echo [API] Starting on port %PORT%... && npm run dev -w apps/api"
+REM The new window inherits this environment, so the variables need no quoting games.
+start "Segmentra API" /D "%~dp0." cmd /k "echo [API] Starting on port %PORT%... && npm run dev -w apps/api"
 
 REM Launch UI in new window
 echo [segmentra] Launching UI (new window)...
-start "Segmentra UI" cmd /k "cd /d ""%~dp0apps\web"" && echo [UI] Starting Vite dev server... && npm run dev"
+start "Segmentra UI" /D "%~dp0apps\web" cmd /k "echo [UI] Starting Vite dev server... && npm run dev"
 
 echo.
 echo [segmentra] ========================================
@@ -176,13 +214,18 @@ echo [segmentra] ========================================
 echo [segmentra] Default Login Credentials
 echo [segmentra] ========================================
 echo [segmentra] Username: admin
-if not "%SEGMENTRA_ADMIN_PASSWORD%"=="" (
-    echo [segmentra] Password: value of SEGMENTRA_ADMIN_PASSWORD when the admin user was first created
-) else (
-    echo [segmentra] Password: admin123 - dev default, unless the admin user already existed
-    echo.
-    echo [segmentra] IMPORTANT: Change the default password after first login!
-)
+if not "%SEGMENTRA_ADMIN_PASSWORD%"=="" goto admin_from_env
+if /I "%MODE%"=="prod" goto admin_prod
+echo [segmentra] Password: admin123 - dev default, unless the admin user already existed
+echo.
+echo [segmentra] IMPORTANT: Change the default password after first login!
+goto admin_done
+:admin_prod
+echo [segmentra] Password: none created by default in prod mode; set SEGMENTRA_ADMIN_PASSWORD before the first start
+goto admin_done
+:admin_from_env
+echo [segmentra] Password: value of SEGMENTRA_ADMIN_PASSWORD when the admin user was first created
+:admin_done
 echo [segmentra] You can change it in the UI or via API endpoint.
 echo.
 

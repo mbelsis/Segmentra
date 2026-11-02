@@ -43,6 +43,26 @@ if [ -z "$ACTION" ] || [ -z "$MODE" ]; then
   exit 1
 fi
 
+# Stops with what docker itself said, instead of a generic "not running".
+require_docker() {
+  local out
+  if ! out="$(docker version --format '{{.Server.Version}}' 2>&1)"; then
+    echo "ERROR: cannot use Docker. Start it (or install it) and try again."
+    echo "  Docker says: $(echo "$out" | sed -n '1p')"
+    exit 1
+  fi
+}
+
+# A value the way docker compose resolves it: environment, then .env, then the default.
+env_value() {
+  local value=""
+  eval "value=\${$1:-}"
+  if [ -z "$value" ] && [ -f .env ]; then
+    value="$(sed -n "s/^$1=//p" .env | tail -n1 | tr -d "\r\"'")"
+  fi
+  echo "${value:-$2}"
+}
+
 # Install deps when missing, refresh when a manifest is newer than the last install.
 ensure_deps() {
   local marker="node_modules/.package-lock.json"
@@ -74,24 +94,44 @@ if [ "$MODE" = "development" ]; then
       echo "[segmentra] Starting development environment..."
       echo
 
+      require_docker
+      if [ -n "$(docker compose ps -q segmentra-app 2>/dev/null || true)" ]; then
+        echo "ERROR: the production stack is running and uses the same ports."
+        echo "  Stop it first: ./run.sh --stop --production"
+        exit 1
+      fi
+
       echo "[1/4] Checking dependencies..."
       ensure_deps
 
       # Start DB if not running
       echo "[2/4] Starting PostgreSQL..."
       docker compose up -d segmentra-db
+      DB_READY=0
       for _ in $(seq 1 30); do
-        docker compose exec -T segmentra-db pg_isready -U segmentra >/dev/null 2>&1 && break
+        if docker compose exec -T segmentra-db pg_isready -U segmentra >/dev/null 2>&1; then
+          DB_READY=1
+          break
+        fi
         sleep 1
       done
+      if [ "$DB_READY" != "1" ]; then
+        echo "ERROR: PostgreSQL did not become ready in time. Check: docker compose logs segmentra-db"
+        exit 1
+      fi
 
-      export DATABASE_URL="${SEGMENTRA_DATABASE_URL:-postgres://segmentra:segmentra@127.0.0.1:15432/segmentra}"
+      # The database password and the secret key may come from a production install's .env.
+      DATABASE_URL="$(node packages/db/scripts/dev-env.js database-url)"
+      export DATABASE_URL
+      SEGMENTRA_KEK_B64="$(node packages/db/scripts/dev-env.js get SEGMENTRA_KEK_B64)"
+      if [ -n "$SEGMENTRA_KEK_B64" ]; then export SEGMENTRA_KEK_B64; else unset SEGMENTRA_KEK_B64; fi
       export BUNDLES_DIR="${BUNDLES_DIR:-./data/bundles}"
       load_dev_jwt_secret
       mkdir -p "$BUNDLES_DIR"
 
       # Build first: the API dev server runs apps/api/dist
       echo "[3/4] Migrating database and building..."
+      node packages/db/scripts/dev-env.js check-db
       npm run db:migrate
       npm run db:seed
       npm run build
@@ -112,22 +152,21 @@ if [ "$MODE" = "development" ]; then
       echo
       echo "  API: http://localhost:8080"
       echo "  UI:  http://localhost:5173"
-      echo "  DB:  localhost:15432"
+      echo "  DB:  localhost:$(env_value DB_PORT 15432)"
       echo
-      echo "  Login: admin / admin123 (dev default unless SEGMENTRA_ADMIN_PASSWORD was set on first seed)"
+      echo "  Login: admin / admin123, unless SEGMENTRA_ADMIN_PASSWORD or an earlier install set another one"
       echo
       echo "  Press Ctrl+C to stop all services"
 
       # Wait for either to exit, then clean up
-      trap "kill $API_PID $WEB_PID 2>/dev/null; exit 0" INT TERM
+      trap 'bash "$ROOT_DIR/scripts/stop-dev-processes.sh"; exit 0' INT TERM
       wait $API_PID $WEB_PID
       ;;
 
     stop)
       echo "[segmentra] Stopping development environment..."
-      # Stop Node processes
-      pkill -f "apps/api" 2>/dev/null || true
-      pkill -f "vite" 2>/dev/null || true
+      # Only this checkout's API and UI; other projects may run vite or node too.
+      bash "$ROOT_DIR/scripts/stop-dev-processes.sh"
       # Stop Docker DB
       docker compose stop segmentra-db
       echo "  All services stopped"
@@ -189,6 +228,7 @@ elif [ "$MODE" = "production" ]; then
   case "$ACTION" in
     start)
       echo "[segmentra] Starting production environment..."
+      require_docker
       if [ ! -f .env ] || ! grep -q '^JWT_SECRET=.' .env || ! grep -q '^SEGMENTRA_KEK_B64=.' .env; then
         if [ -z "${JWT_SECRET:-}" ] || [ -z "${SEGMENTRA_KEK_B64:-}" ]; then
           echo "  WARNING: JWT_SECRET and/or SEGMENTRA_KEK_B64 are not set (in the environment or .env)."
@@ -199,13 +239,13 @@ elif [ "$MODE" = "production" ]; then
       docker compose up -d
       echo
       echo "  Services started (the API runs migrations on startup: docker compose logs -f segmentra-app):"
-      echo "    UI:  http://localhost:${WEB_PORT:-80}"
+      echo "    UI:  http://localhost:$(env_value WEB_PORT 80)"
       if [ "$HARDENED" = "1" ]; then
         echo "    API: not published (hardened); use the UI's /api proxy"
         echo "    DB:  not published (hardened)"
       else
-        echo "    API: http://127.0.0.1:${API_PORT:-8080}"
-        echo "    DB:  127.0.0.1:${DB_PORT:-15432}"
+        echo "    API: http://127.0.0.1:$(env_value API_PORT 8080)"
+        echo "    DB:  127.0.0.1:$(env_value DB_PORT 15432)"
       fi
       echo
       docker compose ps

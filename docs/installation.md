@@ -30,6 +30,13 @@
 .\install.ps1 --production
 ```
 
+If PowerShell says scripts are disabled or "not digitally signed", allow them for this window only and unblock the downloaded files, then run the installer again:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+Get-ChildItem -Recurse -Include *.ps1 | Unblock-File
+```
+
 ### Prerequisite checks
 
 Both installers check the prerequisites for the chosen mode first and report everything that is missing. Anything that changes the machine is offered, not done silently.
@@ -48,6 +55,26 @@ Options for `install.sh` and `install.ps1`:
 - `--check` only prints the report and changes nothing. It exits with 0 if everything required is in place and 1 otherwise.
 
 If Node.js comes from a version manager such as `nvm`, an install can't replace the version your shell uses. The installer then stops and asks you to switch to Node.js 20 or newer yourself.
+
+### Reinstalling and switching modes
+
+A database belongs to the `.env` that created it: that file holds its password and the key that encrypts the credentials stored in it. Docker Compose names the database volume after the folder, so a fresh copy in a folder with the same name finds the old database.
+
+- **`--production` with an existing database and no matching `.env`** stops without changing anything. Copy your earlier `.env` into this folder to keep the data, or run `docker compose down -v` to delete the data and start over.
+- **If the API does not become healthy**, the installer shows its last log lines and exits with an error instead of reporting success.
+- **Production, then development in the same folder** works: the development scripts use the database password and the secret key from `.env`. Stop the production stack first, because both use the same ports.
+
+#### Moving from development to production
+
+A development install has no `.env`, so `--production` stops. Starting over with `docker compose down -v` is the simple way. To keep the data, write these to `.env` first, then run `--production`:
+
+```
+POSTGRES_PASSWORD=segmentra
+JWT_SECRET=<openssl rand -hex 32>
+SEGMENTRA_KEK_B64=<openssl rand -base64 32>
+```
+
+Be aware that the database then keeps its development password, the `admin` user keeps its password (`admin123` unless you changed it), and SSH and LDAP secrets stored during development become unreadable, so enter them again. Change the admin and database passwords before using it for real.
 
 ### Running the Application
 
