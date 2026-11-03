@@ -65,7 +65,7 @@ Segmentra backs up each host, applies the rules over SSH or Ansible, checks it c
 
 ## Screenshots
 
-Click an image to open it full size. The screenshots show the sample dataset that ships with the repository: load it with `npm run db:demo` after the migrations and the seed (see [Demo data](#demo-data-optional)) to get the same hosts, policies, OT devices and deployments on your own installation. You can also use the ready-made [test lab](#test-lab-optional), which uses Docker to set up a live network with three hosts and a syslog collector, so you can see the application working on real firewalls. Screenshots 13 to 19 were taken with the lab.
+Click an image to open it full size. The screenshots show the sample dataset that ships with the repository: load it with `npm run db:demo` after the migrations and the seed (see [Demo data](#demo-data-optional)) to get the same hosts, policies, OT devices and deployments on your own installation. You can also use the ready-made [test labs](#test-labs-optional), which uses Docker to set up a live network with three hosts and a syslog collector, so you can see the application working on real firewalls. Screenshots 13 to 19 were taken with the lab.
 
 <table>
   <tr>
@@ -638,23 +638,40 @@ On Windows use `.\run.ps1` with the same options. `--stop --development` only st
 - **Development**: `admin` / `admin123` (created by the seed when `SEGMENTRA_ADMIN_PASSWORD` is not set — change it after first login)
 - **Production** (`NODE_ENV=production`): `admin` / the value of `SEGMENTRA_ADMIN_PASSWORD` (min. 12 chars). Without it the seed refuses to create the default admin; use `SEGMENTRA_BOOTSTRAP_TOKEN` instead if you only use LDAP.
 
-### Test lab (optional)
+### Test labs (optional)
 
-To try Segmentra on real firewalls without real servers, first start Segmentra in development mode, from the repository folder:
+To try Segmentra on real firewalls without real servers, build a lab with one command. Each one adds itself to the inventory, deploys a sample policy, and checks real traffic against it.
+
+| Lab | Command | What it builds | What it is for |
+|---|---|---|---|
+| Base | `up` | Three machines (`test-a`, `test-b`, `test-c`) and a syslog collector | Host firewalls, the sample SIEM, Peek at Logs, Policy Impact Analysis |
+| IoT | `up --lab iot` | A gateway between an IT and an OT network, three clients, and a simulated PLC, RTU, sensor, camera and printer | Devices that cannot run a firewall: FORWARD rules, coverage, discovery |
+| Swarm | `up --lab swarm` | A real Docker Swarm: three managers, two workers, two published services, two outside clients | Published ports, cluster ports, cluster health |
+
+First start Segmentra in development mode, from the repository folder:
 
 ```bash
 ./start.sh dev      # macOS or Linux: keeps running, so use a second terminal for the next step
 start.bat dev       # Windows: opens the API and UI in their own windows (PowerShell: .\start.bat dev)
 ```
 
-When http://localhost:8080/api/health answers, start the lab, also from the repository folder:
+When http://localhost:8080/api/health answers, start a lab, also from the repository folder:
 
 ```bash
-python3 scripts/demo-lab.py up --set-executor-ssh     # macOS or Linux
-python scripts\demo-lab.py up --set-executor-ssh      # Windows (or: py scripts\demo-lab.py ...)
+# macOS or Linux
+python3 scripts/demo-lab.py up --set-executor-ssh               # base lab
+python3 scripts/demo-lab.py up --lab iot --set-executor-ssh     # IoT lab
+python3 scripts/demo-lab.py up --lab swarm --set-executor-ssh   # Swarm lab
+
+# Windows (or: py scripts\demo-lab.py ...)
+python scripts\demo-lab.py up --set-executor-ssh
+python scripts\demo-lab.py up --lab iot --set-executor-ssh
+python scripts\demo-lab.py up --lab swarm --set-executor-ssh
 ```
 
 `--set-executor-ssh` is needed because the API runs outside Docker, so Ansible cannot reach the machines. It changes the deployment setting for all deployments on this install, and `down` does not undo it. If the setting is already SSH, the flag changes nothing. On a production install (`--production`), Segmentra is already running and you can leave the flag out.
+
+#### Base lab
 
 In about a minute this creates three Docker machines (images and containers `test-a`, `test-b`, `test-c`) and a syslog collector (`test-syslog`), adds the machines to the inventory with the tag `demo-lab`, connects the collector as a SIEM under **Integrations**, and creates, approves and deploys the policy `Demo lab policy`. It then tries ping, ssh, telnet and curl between the machines with real clients, and checks each result against the policy:
 
@@ -667,7 +684,7 @@ In about a minute this creates three Docker machines (images and containers `tes
 
 Then try **Inventory > Actions > Peek at Logs** on a machine, or start a test in **Policy Impact Analysis** while the traffic runs.
 
-The full guide, with the architecture and things to try, is in [docs/lab.md](docs/lab.md).
+The full guide for all three labs is in [docs/lab.md](docs/lab.md).
 
 ```bash
 python3 scripts/demo-lab.py traffic                # send the traffic again (--repeat 10 --interval 30 to keep it going)
@@ -676,25 +693,64 @@ python3 scripts/demo-lab.py status                 # what exists right now
 python3 scripts/demo-lab.py down                   # remove it (--remove-images removes the images too)
 ```
 
-A second lab covers devices that cannot run a firewall: `python3 scripts/demo-lab.py up --lab iot` builds a Linux gateway between an IT and an OT network, with simulated PLC, RTU, sensor, camera and printer behind it. Every command takes `--lab iot`, and `check --lab iot` tests coverage, discovery, logs, drift and Policy Impact Analysis against it. See [the IoT lab](docs/lab.md#the-iot-lab).
-
-A third lab is a real Docker Swarm: `python3 scripts/demo-lab.py up --lab swarm` builds three managers and two workers with published services, and `check --lab swarm` tests published-port enforcement, cluster health, logs, drift and losing a manager. See [the Swarm lab](docs/lab.md#the-swarm-lab).
-
 On Windows, write these as `python scripts\demo-lab.py traffic`, and so on.
+
+#### IoT lab
+
+A Linux gateway, `iot-gw`, sits between an IT network with three clients (HMI, engineering, office) and an OT network with simulated devices that answer real Modbus, S7, DNP3, MQTT, RTSP and HTTP requests. The gateway is the host in the inventory, and the devices are IoT assets assigned to it. The printer is left unregistered on purpose.
+
+| Device and service | HMI | Engineering | Office |
+|---|---|---|---|
+| PLC: Modbus | allowed | blocked | blocked |
+| PLC: S7 | blocked | allowed | blocked |
+| RTU: DNP3 | allowed | blocked | blocked |
+| RTU: Modbus | blocked by an explicit rule | same | same |
+| Sensor: MQTT | allowed | allowed | blocked |
+| Camera: RTSP | allowed | blocked | blocked |
+| Camera: HTTP | blocked | blocked | allowed |
+| Printer: JetDirect (not registered) | open | open | open |
+
+Then look at **OT/IoT > Coverage** and **OT/IoT > Discovery**, and **Inventory > Actions > Peek at Logs** on `iot-gw`. See [the IoT lab](docs/lab.md#the-iot-lab).
+
+#### Swarm lab
+
+Three managers and two workers, each with its own Docker daemon and firewall, run the services `web` (port 8080) and `admin` (port 8081). `swarm-client-a` may use only `web` and `swarm-client-b` only `admin`, on every node. The policy never mentions the cluster's own ports, because Segmentra adds them for the nodes of a swarm. It needs about 500 MB of memory for Docker.
+
+Then look at **Docker Swarm**, and **Inventory > Actions > Peek at Logs** on a node. See [the Swarm lab](docs/lab.md#the-swarm-lab).
+
+#### Test Segmentra with a lab
+
+```bash
+python3 scripts/demo-lab.py traffic --lab iot     # send real traffic and compare it with the policy
+python3 scripts/demo-lab.py check --lab iot       # test Segmentra's features against the lab: PASS or FAIL for each
+python3 scripts/demo-lab.py status --lab iot      # what exists right now
+python3 scripts/demo-lab.py down --lab iot        # remove it
+```
+
+Use `--lab swarm` for the Swarm lab. `check` is available for these two labs and runs real scenarios:
+
+- **IoT lab (29 checks):** coverage, discovery, firewall logs, drift, Policy Impact Analysis, and taking a device off the gateway.
+- **Swarm lab (33 checks, about six minutes):** published-port enforcement, cluster health, firewall logs, drift, what breaks without the Swarm settings, and losing a manager.
+
+`check` changes the lab while it runs and then restores it. If it is stopped halfway, run `up` for that lab again.
+
+To test on a disposable Segmentra instead of yours, run `npm run test:lab:iot`, `npm run test:lab:swarm` or `npm run test:lab:base`. Each builds its own database and API, runs the lab from start to finish, and fails if `down` leaves anything behind. Remove the same lab first if it is already up, because the container names are fixed.
 
 Good to know:
 
+- **Windows:** the labs are written to work there, but so far they have only been run on macOS.
+- **Side by side:** the labs can run at the same time, and each has its own networks, tag, credential and policy.
 - **Login:** the script uses `admin` and the password from `--password`, `SEGMENTRA_ADMIN_PASSWORD` or `.env`, and otherwise tries the development default and then asks.
 - **Not the same as the demo data:** the [demo data](#demo-data-optional) fills the UI with sample records and needs no servers, but nothing behind it is real. The lab has real firewalls and real traffic. To have both, load the demo data first, because its loader refuses a database that already has other hosts.
-- **What the collector receives:** Segmentra's Audit Log, over TCP and UDP. Firewall log lines stay on each host and are not forwarded. While the lab is up, every Audit Log entry on that Segmentra also goes to the collector, including entries from the past hour that were never forwarded.
-- **SSH uses port 2222:** with no management network configured, Segmentra keeps port 22 open from everywhere so a host can never be locked out, so a policy could not block it.
+- **Base lab, what the collector receives:** Segmentra's Audit Log, over TCP and UDP. Firewall log lines stay on each host and are not forwarded. While the lab is up, every Audit Log entry on that Segmentra also goes to the collector, including entries from the past hour that were never forwarded.
+- **Base lab, SSH uses port 2222:** with no management network configured, Segmentra keeps port 22 open from everywhere so a host can never be locked out, so a policy could not block it.
 - **What stays after `down`:** Segmentra keeps deployment history, so the hosts stay disabled, the policy stays archived and the switched-off user `demo-lab-approver` stays. Running `up` again reuses them. Approvals need a second person, which is why that user exists.
 - **What else it touches:** it connects the API and Ansible runner containers to the lab network, and turns on `net.netfilter.nf_log_all_netns` on the Docker host's kernel so that containers can log firewall lines (`down` puts the old value back). In development mode, the machines' host keys are added to your `known_hosts`.
-- **Testing only:** these are privileged containers with a known user password. Do not run this on a production Segmentra, because it adds hosts, a policy and a user to it.
+- **Testing only:** some machines are privileged containers, and the base lab has a known user password. Do not run this on a production Segmentra, because it adds hosts, a policy and a user to it.
 
 ### Demo data (optional)
 
-To see real firewalls and traffic instead, use the [test lab](#test-lab-optional). To explore the UI without real servers, load the sample dataset after the migrations and the seed. In the local development setup (`./run.sh --start --development`) the database runs on `127.0.0.1:15432` and the loader uses that connection when `DATABASE_URL` is not set:
+To see real firewalls and traffic instead, use the [test labs](#test-labs-optional). To explore the UI without real servers, load the sample dataset after the migrations and the seed. In the local development setup (`./run.sh --start --development`) the database runs on `127.0.0.1:15432` and the loader uses that connection when `DATABASE_URL` is not set:
 
 ```bash
 npm run db:demo                 # local dev; set DATABASE_URL for another database
@@ -753,6 +809,8 @@ npm run test:integration:ssh-docker
 This builds the current code, starts a temporary API + PostgreSQL + 3 target-container environment, deploys sample firewall ACLs through the real API using both SSH password and SSH key authentication, verifies the resulting `iptables` state, and runs live `ping` checks between the targets. For full details, see [tests/README.md](tests/README.md).
 
 `npm run test:installers` unit-tests how the installers' development database settings are worked out from `.env` (no Docker needed).
+
+`npm run test:lab:iot`, `npm run test:lab:swarm` and `npm run test:lab:base` run the [test labs](#test-labs-optional) from start to finish on a disposable Segmentra.
 
 Other integration tests need a running Segmentra API: `npm run test:integration:policy-code` (policy as code: export, import, validation, CLI) and `npm run test:integration:compliance` (compliance reports; the tamper check uses `docker exec` on the database container and is skipped without it), neither of which needs a lab, `npm run test:integration:review-fixes` (troubleshoot's effective policy, the per-host lock and the restore guard) and `npm run test:integration:race` (a real deployment racing a real learning-session restore in Docker) and `npm run test:review-fixes` (unit tests: unresolved interface scopes and drift hooks, no API needed), and, with Docker Desktop or Docker, `npm run test:integration:k8s -- <kindnet|calico|cilium>` (Kubernetes enforcement on kind clusters) and `npm run test:integration:swarm` (a 3-node Docker Swarm lab). They create their own lab and remove it afterwards; run them against a development stack, because they leave users, hosts and archived policy sets behind.
 

@@ -248,7 +248,23 @@ export const api = {
   submitApproval: (versionId: string, reason?: string) =>
     request<{ version: any }>(`/policy-versions/${versionId}/submit-approval`, { method: 'POST', body: JSON.stringify(reason?.trim() ? { reason: reason.trim() } : {}) }),
   deploymentCreators: () => request<{ creators: Array<{ username: string; display_name: string | null; deployments: number }> }>(`/deployments/creators`),
-  myApprovalRequests: () => request<{ requests: any[] }>(`/policy-versions/my-requests`),
+  myApprovalRequests: () => request<{
+    requests: Array<{
+      id: string;
+      version_number: number;
+      status: string;
+      policy_set_id: string;
+      policy_set_name: string;
+      submitted_at: string | null;
+      submission_note: string | null;
+      approved_by_username: string | null;
+      approved_at: string | null;
+      rejected_by_username: string | null;
+      rejected_at: string | null;
+      rejection_reason: string | null;
+      superseded: boolean;
+    }>;
+  }>(`/policy-versions/my-requests`),
   pendingApprovals: () => request<{ versions: any[] }>(`/policy-versions/pending-approval`),
   approve: (versionId: string) => request<{ version: any }>(`/policy-versions/${versionId}/approve`, { method: 'POST' }),
   reject: (versionId: string, reason: string) =>

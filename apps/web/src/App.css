@@ -964,6 +964,40 @@ small {
   margin-bottom: 12px;
 }
 
+.firewall-logs-fields {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.firewall-logs-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #5c4633;
+}
+
+.firewall-logs-fields select,
+.firewall-logs-fields input {
+  width: 150px;
+  padding: 5px 8px;
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.firewall-logs-fields select {
+  width: 110px;
+}
+
+.firewall-logs-lines {
+  margin-left: auto !important;
+}
+
 .firewall-logs-table {
   width: 100%;
   font-size: 13px;
@@ -986,6 +1020,91 @@ small {
 .firewall-logs-footnote {
   margin-top: 12px;
 }
+
+/* Dashboard: the author's approval requests as small cards */
+.approval-requests-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.approval-requests-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.approval-requests-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+button.approval-request {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  min-width: 0;
+  padding: 9px 11px;
+  font: inherit;
+  font-weight: 400;
+  color: #5c4633;
+  text-align: left;
+  cursor: pointer;
+  border: 1px solid #e6dfd2;
+  border-radius: 8px;
+  box-shadow: none;
+  transform: none;
+}
+
+.approval-request-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13.5px;
+  color: #3d2e20;
+}
+
+.approval-request-title strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.approval-request-status {
+  flex-shrink: 0;
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+/* Long rejection reasons are cut here; the card's tooltip and the policy set show all of it. */
+.approval-request-detail,
+.approval-request-note {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.approval-request-note {
+  color: #78644e;
+}
+
+button.approval-request-pending { background: #f7f4ef; }
+button.approval-request-approved { background: #f3f6ec; }
+button.approval-request-deployed { background: #eef4e8; }
+button.approval-request-rejected { background: #faf0ee; border-color: #e8c4bf; }
+.approval-request-pending .approval-request-status { color: #8b6914; }
+.approval-request-approved .approval-request-status { color: #5a7a3a; }
+.approval-request-deployed .approval-request-status { color: #3f6b2a; }
+.approval-request-rejected .approval-request-status { color: #a63d2f; }
 
 /* Readiness check refused a deployment's start */
 .readiness-dialog {

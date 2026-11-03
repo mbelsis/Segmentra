@@ -1,8 +1,20 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api';
+import { Pagination } from './Pagination';
 
 type Logs = Awaited<ReturnType<typeof api.hostFirewallLogs>>;
-type Filter = 'ALL' | 'ALLOW' | 'DENY';
+type Entry = Logs['entries'][number];
+type ActionFilter = 'ALL' | 'ALLOW' | 'DENY';
+
+/** How many of the newest log lines to read from the host. The page is filtered and paged here, so this is what the filters can search. */
+const LINE_COUNTS = [100, 200, 300, 500, 1000];
+const DEFAULT_LINES = 200;
+const PAGE_SIZES = [25, 50, 100, 250];
+const NO_FILTERS = { direction: '', protocol: '', source: '', destination: '' };
+
+const endpoint = (ip: string, port: number | null) => `${ip}${port ? `:${port}` : ''}`;
+const includes = (value: string, search: string) => value.toLowerCase().includes(search.trim().toLowerCase());
+const uniqueSorted = (values: string[]) => [...new Set(values.filter(Boolean))].sort();
 
 interface Props {
   hostId: string;
@@ -18,25 +30,57 @@ export function HostFirewallLogsPanel({ hostId, hostname, onClose }: Props) {
   const [logs, setLogs] = useState<Logs | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<Filter>('ALL');
+  const [action, setAction] = useState<ActionFilter>('ALL');
+  const [filters, setFilters] = useState(NO_FILTERS);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(PAGE_SIZES[0]);
+  const [lines, setLines] = useState(DEFAULT_LINES);
+  const latestRead = useRef(0);
 
   const load = useCallback(async () => {
+    // Changing the line count while a read is running must not let the older, slower answer win.
+    const read = ++latestRead.current;
     setBusy(true);
     setError(null);
     try {
-      setLogs(await api.hostFirewallLogs(hostId));
+      const result = await api.hostFirewallLogs(hostId, lines);
+      if (read === latestRead.current) setLogs(result);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not read the firewall logs');
+      if (read === latestRead.current) setError(e instanceof Error ? e.message : 'Could not read the firewall logs');
     } finally {
-      setBusy(false);
+      if (read === latestRead.current) setBusy(false);
     }
-  }, [hostId]);
+  }, [hostId, lines]);
 
   useEffect(() => { void load(); }, [load]);
 
   const entries = useMemo(() => logs?.entries ?? [], [logs]);
-  const shown = useMemo(() => (filter === 'ALL' ? entries : entries.filter((e) => e.action === filter)), [entries, filter]);
-  const denied = entries.filter((e) => e.action === 'DENY').length;
+  const directions = useMemo(() => uniqueSorted(entries.map((e) => e.direction)), [entries]);
+  const protocols = useMemo(() => uniqueSorted(entries.map((e) => e.protocol)), [entries]);
+  // The action buttons count what the other filters leave, so they say what a click will show.
+  const matching = useMemo(() => entries.filter((e: Entry) => (
+    (!filters.direction || e.direction === filters.direction)
+    && (!filters.protocol || e.protocol === filters.protocol)
+    && includes(endpoint(e.sourceIp, e.sourcePort), filters.source)
+    && includes(endpoint(e.destinationIp, e.destinationPort), filters.destination)
+  )), [entries, filters]);
+  const shown = useMemo(() => (action === 'ALL' ? matching : matching.filter((e) => e.action === action)), [matching, action]);
+  const denied = matching.filter((e) => e.action === 'DENY').length;
+  // A refresh or a narrower filter can leave fewer pages than the one being viewed.
+  const lastPage = Math.max(1, Math.ceil(shown.length / pageSize));
+  const currentPage = Math.min(page, lastPage);
+  const pageEntries = shown.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const filtered = action !== 'ALL' || Object.values(filters).some(Boolean);
+
+  const changeFilter = (name: keyof typeof NO_FILTERS, value: string) => {
+    setFilters((current) => ({ ...current, [name]: value }));
+    setPage(1);
+  };
+  const clearFilters = () => {
+    setAction('ALL');
+    setFilters(NO_FILTERS);
+    setPage(1);
+  };
   const logOnly = logs?.activeSession != null;
 
   return (
@@ -74,28 +118,59 @@ export function HostFirewallLogsPanel({ hostId, hostname, onClose }: Props) {
           {logs?.success && logs.source !== 'none' && (
             <>
               <div className="firewall-logs-filter" role="group" aria-label="Filter by action">
-                {(['ALL', 'ALLOW', 'DENY'] as Filter[]).map((f) => (
-                  <button key={f} onClick={() => setFilter(f)} className={filter === f ? 'btn-small btn-primary' : 'btn-small btn-secondary'} aria-pressed={filter === f}>
-                    {f === 'ALL' ? `All (${entries.length})` : f === 'ALLOW' ? `Accepted (${entries.length - denied})` : `Denied (${denied})`}
+                {(['ALL', 'ALLOW', 'DENY'] as ActionFilter[]).map((f) => (
+                  <button key={f} onClick={() => { setAction(f); setPage(1); }} className={action === f ? 'btn-small btn-primary' : 'btn-small btn-secondary'} aria-pressed={action === f}>
+                    {f === 'ALL' ? `All (${matching.length})` : f === 'ALLOW' ? `Accepted (${matching.length - denied})` : `Denied (${denied})`}
                   </button>
                 ))}
               </div>
+              <div className="firewall-logs-fields">
+                <label>
+                  Direction
+                  <select value={filters.direction} onChange={(e) => changeFilter('direction', e.target.value)}>
+                    <option value="">All</option>
+                    {directions.map((d) => <option key={d} value={d}>{d}</option>)}
+                  </select>
+                </label>
+                <label>
+                  Protocol
+                  <select value={filters.protocol} onChange={(e) => changeFilter('protocol', e.target.value)}>
+                    <option value="">All</option>
+                    {protocols.map((p) => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                </label>
+                <label>
+                  Source
+                  <input type="search" value={filters.source} onChange={(e) => changeFilter('source', e.target.value)} placeholder="IP or port" />
+                </label>
+                <label>
+                  Destination
+                  <input type="search" value={filters.destination} onChange={(e) => changeFilter('destination', e.target.value)} placeholder="IP or port" />
+                </label>
+                <button type="button" className="btn-small btn-secondary" onClick={clearFilters} disabled={!filtered}>Clear filters</button>
+                <label className="firewall-logs-lines">
+                  Lines to read
+                  <select value={lines} onChange={(e) => { setLines(Number(e.target.value)); setPage(1); }} disabled={busy}>
+                    {LINE_COUNTS.map((n) => <option key={n} value={n}>{n}</option>)}
+                  </select>
+                </label>
+              </div>
 
               {shown.length === 0 ? (
-                <p className="active-rules-muted">No {filter === 'ALL' ? '' : filter === 'ALLOW' ? 'accepted ' : 'denied '}entries found.</p>
+                <p className="active-rules-muted">{entries.length === 0 ? 'No entries found.' : 'No entries match these filters.'}</p>
               ) : (
                 <table className="firewall-logs-table">
                   <thead>
                     <tr><th>Time</th><th>Action</th><th>Dir</th><th>Source</th><th>Destination</th><th>Protocol</th><th>Rule</th></tr>
                   </thead>
                   <tbody>
-                    {shown.map((e, i) => (
+                    {pageEntries.map((e, i) => (
                       <tr key={i}>
                         <td>{formatTime(e.at, e.timestamp)}</td>
                         <td className={e.action === 'DENY' ? 'firewall-logs-deny' : 'firewall-logs-allow'}>{e.logOnly ? (e.action === 'DENY' ? 'Would deny' : 'Logged') : e.action === 'DENY' ? 'Denied' : 'Accepted'}</td>
                         <td>{e.direction}</td>
-                        <td>{e.sourceIp}{e.sourcePort ? `:${e.sourcePort}` : ''}</td>
-                        <td>{e.destinationIp}{e.destinationPort ? `:${e.destinationPort}` : ''}</td>
+                        <td>{endpoint(e.sourceIp, e.sourcePort)}</td>
+                        <td>{endpoint(e.destinationIp, e.destinationPort)}</td>
                         <td>{e.protocol}</td>
                         <td>{e.rule ?? ''}</td>
                       </tr>
@@ -103,8 +178,11 @@ export function HostFirewallLogsPanel({ hostId, hostname, onClose }: Props) {
                   </tbody>
                 </table>
               )}
+              {shown.length > 0 && (
+                <Pagination page={currentPage} pageSize={pageSize} total={shown.length} onPage={setPage} onPageSize={(size) => { setPageSize(size); setPage(1); }} noun="entries" sizes={PAGE_SIZES} />
+              )}
               <p className="active-rules-muted firewall-logs-footnote">
-                Shows rules with logging turned on, and traffic stopped by the default deny (at most 5 lines per second per rule, so not every packet; hosts need a redeployment after upgrading to log it). Hosts using native firewalld or UFW follow their own logging settings instead. "Logged" and "Would deny" come from log-only tests, where nothing was blocked. Shows up to the newest 200 entries.
+                Shows rules with logging turned on, and traffic stopped by the default deny (at most 5 lines per second per rule, so not every packet; hosts need a redeployment after upgrading to log it). Hosts using native firewalld or UFW follow their own logging settings instead. "Logged" and "Would deny" come from log-only tests, where nothing was blocked. Reads the newest {lines} lines of the log, and the filters search those. To search further back, read more lines.
               </p>
             </>
           )}
