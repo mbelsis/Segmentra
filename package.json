@@ -24,6 +24,8 @@
     "test:integration:compliance": "node tests/compliance-report/run.mjs",
     "test:integration:iot": "node tests/iot/run.mjs",
     "test:integration:ot-gateway": "node tests/ot-gateway-lab/run.mjs",
+    "test:lab:base": "node tests/labs/run.mjs base",
+    "test:lab:iot": "node tests/labs/run.mjs iot",
     "test:unit:iot": "node --test tests/iot-helpers.test.mjs",
     "test:installers": "node --test tests/installers.test.mjs",
     "test:audit-r4": "npm run build && node --test tests/audit-r4-compiler.test.mjs tests/audit-r4-deployments.test.mjs tests/audit-r4-executor.test.mjs tests/audit-r4-security.test.mjs tests/audit-r4-sessions.test.mjs",

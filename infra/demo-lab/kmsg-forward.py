@@ -4,14 +4,38 @@
 Containers share one kernel. rsyslog's usual kernel input reads /proc/kmsg, which gives each line to
 only ONE reader, so several machines would steal each other's lines at random. /dev/kmsg gives every
 reader every line. It also holds the other machines' lines, so keep what a real machine would log for
-itself: packets arriving for it, and packets it sends.
+itself: packets arriving for it, packets it sends and, on a gateway (DEMO_GATEWAY=1), packets it routes
+between its own networks.
 """
+import ipaddress
 import os
 import re
-import socket
+import subprocess
 import syslog
 
-self_ip = socket.gethostbyname(socket.gethostname())
+is_gateway = os.environ.get("DEMO_GATEWAY") == "1"
+own_interfaces = [
+    ipaddress.ip_interface(line.split()[3])
+    for line in subprocess.run(["ip", "-o", "-4", "addr"], stdout=subprocess.PIPE, check=True).stdout.decode().splitlines()
+    if line.split()[1] != "lo"
+]
+own_addresses = {str(i.ip) for i in own_interfaces}
+own_networks = [i.network for i in own_interfaces]
+
+
+def on_own_network(address):
+    try:
+        return any(ipaddress.ip_address(address) in network for network in own_networks)
+    except ValueError:  # IPv6: these labs filter IPv4 only
+        return False
+
+
+def is_mine(arriving, leaving, source, destination):
+    if arriving and leaving:
+        return is_gateway and on_own_network(source) and on_own_network(destination)
+    return (arriving and destination in own_addresses) or (not arriving and source in own_addresses)
+
+
 syslog.openlog("kernel", 0, syslog.LOG_KERN)
 
 fd = os.open("/dev/kmsg", os.O_RDONLY)
@@ -22,9 +46,6 @@ while True:
     except BrokenPipeError:  # the kernel overwrote lines before we read them; carry on with the next
         continue
     message = record.split(";", 1)[-1].strip()
-    fields = re.search(r"\bIN=(\S*) .*\bSRC=(\S+) DST=(\S+)", message)
-    if not fields:
-        continue
-    arriving, source, destination = fields.groups()
-    if (arriving and destination == self_ip) or (not arriving and source == self_ip):
+    fields = re.search(r"\bIN=(\S*) OUT=(\S*) .*\bSRC=(\S+) DST=(\S+)", message)
+    if fields and is_mine(*fields.groups()):
         syslog.syslog(syslog.LOG_WARNING, message)

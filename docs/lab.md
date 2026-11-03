@@ -20,6 +20,7 @@ Segmentra has to be running first. The [quick start](#quick-start) gives the exa
 - [The sample SIEM](#the-sample-siem)
 - [Things to try](#things-to-try)
 - [What the lab changes](#what-the-lab-changes)
+- [The IoT lab](#the-iot-lab)
 - [Limits of the lab](#limits-of-the-lab)
 - [Troubleshooting](#troubleshooting)
 - [Where the files are](#where-the-files-are)
@@ -374,11 +375,81 @@ Also useful: **Inventory > Actions > Active Rules** shows the rules a host shoul
 
 Running `up` again reuses the hosts and creates a new policy version. Nothing else changes: not the management network, and not the executor unless you pass `--set-executor-ssh`, which `down` does not undo.
 
+## The IoT lab
+
+A second lab, for what cannot run a firewall of its own: a Linux gateway between an IT and an OT network, with simulated industrial devices behind it. The gateway filters what it routes to them. It can run next to the base lab.
+
+```bash
+python3 scripts/demo-lab.py up --lab iot          # add --set-executor-ssh when the API runs outside Docker
+python3 scripts/demo-lab.py traffic --lab iot     # real requests, compared with the policy
+python3 scripts/demo-lab.py check --lab iot       # test Segmentra's IoT features against the lab
+python3 scripts/demo-lab.py status --lab iot
+python3 scripts/demo-lab.py down --lab iot        # --remove-images also removes the image
+```
+
+On Windows, write these as `python scripts\demo-lab.py up --lab iot`, and so on.
+
+```
+ IT network 172.28.78.0/24                               OT network 172.28.79.0/24
+ iot-hmi     .50                 iot-gw                  iot-plc      .11  Modbus 502, S7 102
+ iot-eng     .51  <--------->  .2      .2  <--------->   iot-rtu      .12  DNP3 20000, Modbus 502
+ iot-office  .52               routes and filters        iot-sensor   .13  MQTT 1883
+                                                         iot-camera   .14  RTSP 554, HTTP 80
+                                                         iot-printer  .15  JetDirect 9100, not registered
+```
+
+The clients reach the OT network through the gateway, and the devices use it as their default route, so all traffic between the networks crosses its firewall. A passing test means a device answered a real protocol request, not just that a port was open.
+
+Only `iot-gw` joins the inventory as a host, with the system tag `iot-gateway`. Four devices are registered as IoT assets assigned to it. The printer is left out on purpose.
+
+### The sample policy
+
+| Device and service | hmi | eng | office |
+|---|---|---|---|
+| plc, Modbus | allowed | blocked | blocked |
+| plc, S7 | blocked | allowed | blocked |
+| rtu, DNP3 | allowed | blocked | blocked |
+| rtu, Modbus | blocked by an explicit rule | same | same |
+| sensor, MQTT | allowed | allowed | blocked |
+| camera, RTSP | allowed | blocked | blocked |
+| camera, HTTP | blocked | blocked | allowed |
+| printer, JetDirect | open | open | open |
+
+Three more flows are checked. Ping from the HMI to the PLC is blocked. A PLC calling into the IT network is blocked by an explicit rule, because the default deny only covers traffic *to* a protected device. PLC to RTU works, for the reason below.
+
+### What it shows
+
+- **Registering is what protects a device.** The printer stays open to everyone, because a gateway only default-denies devices assigned to it.
+- **A gateway only filters what it routes.** PLC to RTU stays on the OT network and never reaches `iot-gw`. Separating devices on one network takes VLANs or a switch.
+- **Discovery lists both sides of the gateway.** On **OT/IoT > Discovery**, the printer appears as new, and so do the IT clients and, when the API runs in Docker, the API container, because all of them are in the gateway's neighbour table.
+
+### What `check` tests
+
+`check` changes the lab for about two minutes and restores it. It covers:
+
+- traffic against the policy, the readiness check and compliance
+- **Coverage**, including cleartext protocols and the explicit deny
+- **Discovery**, with registered devices recognised and the printer found
+- **Peek at Logs**, with allowed, default-deny and explicit-deny lines for routed traffic
+- **Drift**: it removes a rule by hand, confirms the HMI really lost access, then redeploys
+- **Policy Impact Analysis** in log-only mode, on routed flows
+- taking a device off the gateway, redeploying, and putting it back
+
+`npm run test:lab:iot` runs `up`, `check`, `traffic` and `down` on a disposable Segmentra (API on port 18083), then verifies that nothing is left behind. It refuses to run while the same lab is up from this folder, because the container names are fixed. It has passed on macOS with the API in Docker using SSH, with the API outside Docker using SSH, and on a production install using Ansible.
+
+### What it adds and leaves behind
+
+It uses the networks `segmentra-iot-it` and `segmentra-iot-ot` (`--subnet` and `--ot-subnet` choose other free ranges), the image `segmentra-lab-machine`, the tag `demo-lab-iot`, a credential scoped to that tag, the state file `.demo-lab-iot.json`, and port 22211 on 127.0.0.1 when the API runs outside Docker. After `down`, Segmentra keeps its history, so `iot-gw` stays disabled and `IoT lab policy` stays archived; `up` reuses them. The assets and the credential are removed.
+
+### Limits
+
+The devices are small simulators that answer one request. They test firewall rules, not how real equipment behaves, and they do not run the protocols' full logic. All machines share one kernel, and the gateway uses iptables only.
+
 ## Limits of the lab
 
 - **Not a real server.** Containers share a kernel and have no boot process, so a policy surviving a reboot, for example, is not tested here.
 - **iptables only.** The machines use the iptables backend. nftables, firewalld and UFW are not part of the lab.
-- **Hosts only.** Traffic is judged by the rules on the receiving host. Gateways and FORWARD rules have their own lab in `tests/ot-gateway-lab`.
+- **Hosts only.** Traffic is judged by the rules on the receiving host. Gateways and FORWARD rules are in [the IoT lab](#the-iot-lab).
 - **Segmentra must be on the same computer** as Docker, because the containers need to reach it directly.
 - **Audit Log only.** The sample SIEM shows that the Audit Log is forwarded. Firewall log lines are not forwarded at all.
 - **Windows** has not been tested yet. The script is written to work there, but it has only been run on macOS.
@@ -401,6 +472,7 @@ Running `up` again reuses the hosts and creates a new policy version. Nothing el
 | `Host key verification failed` | The image was rebuilt from scratch, so a machine has a new host key | Remove the old entry from the `known_hosts` of the user running the API, then run `up` again |
 | A deployment fails with `ansible_failed` and the API cannot use Docker | The API has no access to the Docker socket | Check `DOCKER_GID` in `.env`. The installer normally sets it |
 | Results marked `(!)` in `traffic` | A result differs from the sample policy | Expected during a log-only test or after you change the policy. Otherwise, check the host's **Active Rules** |
+| `traffic` shows results marked `(!)` after Docker restarted | Containers have no boot process: each machine clears its firewall when it starts, and the kernel logging setting is reset | Run `up` again (with the same `--lab`) to deploy the policy and turn logging back on |
 | Peek at Logs is empty | The traffic has not run yet, or the policy was deployed before default-deny logging existed | Run `traffic`, then **Refresh**. Otherwise run `up` to deploy again |
 | `could not turn on container firewall logging` | The kernel setting could not be changed | The policy still works, but logs may stay empty. Check that Docker can run privileged containers |
 | `down` warns that Segmentra was not cleaned up | Segmentra could not be reached | The machines are still removed. Disable the hosts and archive the policy by hand |
@@ -409,9 +481,12 @@ Running `up` again reuses the hosts and creates a new policy version. Nothing el
 
 | File | Purpose |
 |---|---|
-| `scripts/demo-lab.py` | The script |
+| `scripts/demo-lab.py` | The command line |
+| `scripts/demolab/` | The labs: `common.py` is shared, `base.py` and `iot.py` are one lab each |
+| `tests/labs/` | Runs a lab from start to finish on a disposable Segmentra |
+| `infra/demo-lab/iot-device.py` | The simulated devices and the client that probes them |
 | `infra/demo-lab/Dockerfile` | The machines' image |
 | `infra/demo-lab/entrypoint.sh` | What starts inside each machine: accounts and services |
 | `infra/demo-lab/kmsg-forward.py` | Passes each machine's own firewall lines to rsyslog |
 | `infra/demo-lab/syslog-receiver.sh` | Runs the sample SIEM in `test-syslog` |
-| `.demo-lab.json` | The running lab's state, not in git |
+| `.demo-lab.json`, `.demo-lab-iot.json` | Each running lab's state, not in git |

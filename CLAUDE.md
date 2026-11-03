@@ -34,6 +34,8 @@ npm run db:migrate      # Run database migrations (packages/db/scripts/migrate.j
 npm run db:seed         # Seed RBAC roles, system tags and the initial admin user
 npm run db:demo         # Load the sample dataset (packages/db/demo/demo-data.sql; idempotent, defaults to the dev DATABASE_URL; refuses NODE_ENV=production, a non-localhost DATABASE_URL or a database with non-demo users/hosts unless `-- --force`; -- --remove deletes it)
 python3 scripts/demo-lab.py up        # Test environment against a running Segmentra: Docker machines test-a/b/c (infra/demo-lab), inventory, sample policy approved and deployed, ping/ssh/telnet/curl checked against it, syslog collector test-syslog as a sample SIEM (`traffic`, `siem`, `status`, `down`)
+python3 scripts/demo-lab.py up --lab iot   # IoT lab (scripts/demolab/iot.py): gateway iot-gw between an IT and an OT network, simulated devices, FORWARD policy; `check --lab iot` tests coverage, discovery, logs, drift, Policy Impact Analysis
+npm run test:lab:iot                  # Runs a lab start to finish on a disposable Segmentra (tests/labs, API on 18083) and verifies down leaves nothing behind
 npm run test:integration:ssh-docker   # Docker-based SSH deployment integration test
 npm run test:integration:ot-gateway   # Docker lab: Debian IoT/OT gateway between an IT and an OT network, FORWARD rules, real traffic (tests/ot-gateway-lab)
 

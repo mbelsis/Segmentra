@@ -12,7 +12,7 @@ RUN apt-get update \
  && mkdir -p /run/sshd /srv/www \
  && ssh-keygen -A
 
-COPY entrypoint.sh kmsg-forward.py syslog-receiver.sh /
+COPY entrypoint.sh iot-device.py kmsg-forward.py syslog-receiver.sh /
 RUN chmod +x /entrypoint.sh /syslog-receiver.sh
 
 ENTRYPOINT ["/entrypoint.sh"]

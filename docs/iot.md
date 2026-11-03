@@ -150,6 +150,8 @@ Also verified:
 
 ## 5. Step by step in the UI
 
+To try all of this without equipment, [the IoT lab](lab.md#the-iot-lab) builds a gateway, IT clients and simulated devices with one command.
+
 1. **Prepare the gateway** (Linux): IP forwarding, routing, firewall tool, SSH user with sudo. See the [Gateway Setup Guide](gateway-setup-guide.md).
 2. **Store credentials:** **Admin → SSH Credentials**, a key or password for the gateway's SSH user. Use a global credential, or scope one to the gateway (tag `iot-gateway`, its VLAN or the host itself). Credentials are encrypted at rest; see [security.md](security.md).
 3. **Inventory → Hosts:** add the gateway (management IP, SSH port, firewall backend `auto`, `nftables`, `iptables`, `firewalld`, or `ufw`) and give it the tag **`iot-gateway`**. Native-manager prerequisites and limits are in [firewall-managers.md](firewall-managers.md). Optionally create VLANs for your OT zones (**Inventory → VLANs**). Run **Check Readiness**.

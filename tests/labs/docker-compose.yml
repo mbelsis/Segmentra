@@ -1,0 +1,36 @@
+# A disposable Segmentra (database and API only) for tests/labs/run.mjs. The labs add everything else.
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: segmentra
+      POSTGRES_PASSWORD: segmentra
+      POSTGRES_DB: segmentra
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U segmentra -d segmentra"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build:
+      context: ../..
+      dockerfile: infra/app/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgres://segmentra:segmentra@db:5432/segmentra
+      JWT_SECRET: labs-test-secret-1234567890-abcdefgh
+      SEGMENTRA_KEK_B64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      BUNDLES_DIR: /bundles
+      ANSIBLE_RUNNER_CONTAINER: segmentra-unused
+      PORT: 8080
+    ports:
+      - "127.0.0.1:18083:8080"
+    volumes:
+      - lab_bundles:/bundles
+
+volumes:
+  lab_bundles:

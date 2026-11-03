@@ -676,6 +676,8 @@ python3 scripts/demo-lab.py status                 # what exists right now
 python3 scripts/demo-lab.py down                   # remove it (--remove-images removes the images too)
 ```
 
+A second lab covers devices that cannot run a firewall: `python3 scripts/demo-lab.py up --lab iot` builds a Linux gateway between an IT and an OT network, with simulated PLC, RTU, sensor, camera and printer behind it. Every command takes `--lab iot`, and `check --lab iot` tests coverage, discovery, logs, drift and Policy Impact Analysis against it. See [the IoT lab](docs/lab.md#the-iot-lab).
+
 On Windows, write these as `python scripts\demo-lab.py traffic`, and so on.
 
 Good to know:

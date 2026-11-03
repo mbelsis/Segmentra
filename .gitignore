@@ -31,8 +31,8 @@ apps/api/data/
 # Temp files
 *.tmp
 
-# scripts/demo-lab.py state (contains the lab's management key)
-.demo-lab.json
+# scripts/demo-lab.py state (contains the labs' management keys)
+.demo-lab*.json
 
 # Integration test runtime artifacts
 tests/docker-ssh-integration/.runtime/
