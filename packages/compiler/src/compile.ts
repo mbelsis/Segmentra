@@ -610,6 +610,8 @@ function nftPublishedPortRules(input: CompileInput, sets: PreparedSets): string[
         protoExpr = `meta l4proto ${r.protocol}`;
         if (ports) protoExpr += ` ct original proto-dst { ${ports.map(([lo, hi]) => (lo === hi ? String(lo) : `${lo}-${hi}`)).join(', ')} }`;
       }
+      const ruleLog = nftRuleLogStmt(r, commentText);
+      if (ruleLog) out.push(['ct status dnat', ifExpr, addrExpr, protoExpr, ruleLog, comment].filter(Boolean).join(' '));
       out.push(['ct status dnat', ifExpr, addrExpr, protoExpr, r.action === 'ALLOW' ? 'accept' : 'drop', comment].filter(Boolean).join(' '));
     }
   }
@@ -1052,7 +1054,10 @@ function compileIptablesFamily(input: CompileInput, logOnly: boolean, fam: Famil
             for (const addr of t.iptAddrs.length === 0 ? [''] : t.iptAddrs) {
               for (const p of iptCtPortArgs(ports)) {
                 for (const out of DOCKER_EGRESS_IFACES.ipt) {
-                  push(`-A ${FWD} ${iface ? `-i ${iface}` : ''} -o ${out} ${pubProto} ${addr ? `-s ${addr}` : ''} -m conntrack --ctstate DNAT ${p} ${pubComment} -j ${r.action === 'ALLOW' ? ALLOW : 'DROP'}`);
+                  const match = `-A ${FWD} ${iface ? `-i ${iface}` : ''} -o ${out} ${pubProto} ${addr ? `-s ${addr}` : ''} -m conntrack --ctstate DNAT ${p} ${pubComment}`;
+                  const ruleLog = iptRuleLogTarget(r, commentText);
+                  if (ruleLog) push(`${match} ${ruleLog}`);
+                  push(`${match} -j ${r.action === 'ALLOW' ? ALLOW : 'DROP'}`);
                 }
               }
             }

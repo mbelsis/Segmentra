@@ -18,6 +18,7 @@ const apiBase = 'http://127.0.0.1:18083/api';
 const LABS = {
   base: { stateFile: '.demo-lab.json', containers: ['test-a', 'test-b', 'test-c', 'test-syslog'], networks: ['segmentra-demo-lab'], checks: false },
   iot: { stateFile: '.demo-lab-iot.json', containers: ['iot-gw', 'iot-hmi', 'iot-eng', 'iot-office', 'iot-plc', 'iot-rtu', 'iot-sensor', 'iot-camera', 'iot-printer'], networks: ['segmentra-iot-it', 'segmentra-iot-ot'], checks: true },
+  swarm: { stateFile: '.demo-lab-swarm.json', containers: ['swarm-m1', 'swarm-m2', 'swarm-m3', 'swarm-w1', 'swarm-w2', 'swarm-client-a', 'swarm-client-b'], networks: ['segmentra-swarm'], checks: true },
 };
 const keep = process.argv.includes('--keep');
 const labName = process.argv.slice(2).find((a) => !a.startsWith('--'));

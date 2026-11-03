@@ -18,7 +18,8 @@ echo "demo:demo" | chpasswd
 
 # Port 22 is Segmentra's management port, which a policy never blocks when no management network is
 # configured. The sample ssh traffic uses port 2222, so the policy decides who gets in.
-cat >> /etc/ssh/sshd_config <<SSHD
+# Only once: a restarted container keeps this file.
+grep -q '^Port 2222' /etc/ssh/sshd_config || cat >> /etc/ssh/sshd_config <<SSHD
 Port 22
 Port 2222
 PasswordAuthentication yes

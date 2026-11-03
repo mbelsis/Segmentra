@@ -1525,6 +1525,9 @@ async function executeDeploymentStartInner(
     // (any_errors_fatal: false), so a non-zero exit code alone must not fail every host.
     let recap = new Map<string, { ok: boolean; error?: string }>();
     try { recap = parseAnsibleRecap(fs.readFileSync(stdoutPath, 'utf8')); } catch { /* fall back to exit code */ }
+    // A run that never reached a host (no recap, for example no access to the Docker socket) only explains itself on stderr.
+    let lastStderrLine = '';
+    try { lastStderrLine = fs.readFileSync(stderrPath, 'utf8').trim().split('\n').filter(Boolean).pop() ?? ''; } catch { /* no log, keep the bare message */ }
 
     // Update every host that was in this run's inventory. Don't filter on status='RUNNING':
     // a long run may have been marked FAILED by the stale-host timeout or PAUSED meanwhile,
@@ -1558,7 +1561,7 @@ async function executeDeploymentStartInner(
           `UPDATE deployment_hosts
            SET status='FAILED', finished_at=now(), message=$3
            WHERE deployment_id=$1 AND host_id=$2 AND status <> 'SKIPPED'`,
-          [deploymentId, hostId, truncateMessage(outcome?.error ? `ansible_failed: ${outcome.error}` : result.timedOut ? `ansible_failed: ${result.error ?? 'timed out'}` : 'ansible_failed')]
+          [deploymentId, hostId, truncateMessage(outcome?.error ? `ansible_failed: ${outcome.error}` : result.timedOut ? `ansible_failed: ${result.error ?? 'timed out'}` : !outcome && lastStderrLine ? `ansible_failed: ${lastStderrLine}` : 'ansible_failed')]
         );
       }
     }

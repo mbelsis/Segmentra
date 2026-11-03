@@ -54,6 +54,7 @@ Drift detection treats a missing `DOCKER-USER` jump as "policy not present".
 - **Published ports become default-deny.** With the setting on, a published port that no IN rule allows is dropped for external clients, including ports a service starts publishing later (no redeployment is needed, or possible to forget). Add the rules before enabling it on a production node, and use the normal approval workflow.
 - **Rules use published ports and client addresses.** Match the **published** port (for example `8080`), not the container's target port. A rule without ports allows all published ports from that source. Sources are the client addresses as the first node sees them: behind a load balancer or NAT that is the balancer's address, not the end client's. After the routing mesh forwards a request to a task on another node, that node sees only node-to-node overlay traffic, which the Swarm profile allows.
 - **Only traffic to Docker's bridges is covered.** The published-port rules and their default verdict only match DNAT'd packets leaving through `docker0`, `docker_gwbridge` or `br-*`. Other DNAT traffic on the same host (gateway port forwards, libvirt or LXC, manual DNAT rules) is handled by the normal FORWARD rules. Docker networks with a custom bridge name (`com.docker.network.bridge.name` not matching `br-*`) are **not** enforced.
+- **Logging.** A rule's log mode also applies to published traffic: its lines appear in Peek at Logs as forwarded traffic under the rule's name, and unmatched traffic as `published`. The destination shown is the internal address Docker rewrote it to, not the node's address. Hosts deployed before this was added need a redeployment to log allowed traffic.
 - **Inbound only.** OUT and ICMP rules are not applied to published ports. FORWARD rules (gateways) keep working as before. Traffic from containers on the host and the overlay is not restricted by these rules.
 - **Learning and policy tests do not cover published ports.** Firewall learning (log-only) and policy test sessions still allow the Swarm ports but do not log or enforce published-port traffic.
 - **Backends.** Only `iptables` and `nftables`. A host set to firewalld, or to UFW with published-port enforcement, fails to compile with a clear message instead of silently ignoring the setting. (UFW hosts can still use the Swarm profile.)
@@ -63,6 +64,10 @@ Drift detection treats a missing `DOCKER-USER` jump as "policy not present".
 - The management SSH baseline is unchanged: the host's SSH port is always allowed from anywhere unless a management VLAN is configured.
 
 ## Testing
+
+To try Swarm support yourself, [the Swarm lab](lab.md#the-swarm-lab) builds three managers and two workers with one command: `python3 scripts/demo-lab.py up --lab swarm`. `npm run test:lab:swarm` runs it from start to finish on a disposable Segmentra.
+
+The older test below is a separate three-node setup. Its network overlaps the base lab's, so remove the base lab first, and it adds users and disabled hosts to the Segmentra it runs against.
 
 `tests/swarm-lab/` builds a 3-node Swarm on Docker Desktop (privileged Docker-in-Docker nodes with sshd, an overlay network, a published nginx service and two client containers):
 

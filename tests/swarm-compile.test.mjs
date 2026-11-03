@@ -96,6 +96,23 @@ test('published ports: default ACCEPT hands unmatched traffic back, log-only mod
   assert.ok(!icmp.includes('published rule10'));
 });
 
+test('published ports: a rule with logging logs in front of its verdict, on both backends; without logging nothing is added', () => {
+  const logged = rule({ logMode: 'LOG_RATE_LIMITED', comment: 'web-a' });
+  const ipt = lines(compileHostPolicy(input({ dockerPublishedPorts: true, rules: [logged] })).text).filter((x) => x.includes('--ctorigdstport 8080'));
+  for (const bridge of ['docker0', 'docker_gwbridge', 'br-+']) {
+    const onBridge = ipt.filter((x) => x.includes(`-o ${bridge} `));
+    assert.equal(onBridge.length, 2, `log and verdict for ${bridge}`);
+    assert.match(onBridge[0], /-j LOG --log-prefix "SEGMENTRA: ALLOW web-a: "/);
+    assert.match(onBridge[1], /-j RETURN$/);
+  }
+  const nft = lines(compileHostPolicy(input({ dockerPublishedPorts: true, rules: [logged], host: { ...input().host, firewallBackend: 'nftables' } })).text).filter((x) => x.includes('ct original proto-dst'));
+  assert.equal(nft.length, 2);
+  assert.match(nft[0], /log prefix "SEGMENTRA: ALLOW web-a: "/);
+  assert.match(nft[1], / accept /);
+  const silent = compileHostPolicy(input({ dockerPublishedPorts: true })).text;
+  assert.ok(!lines(silent).some((x) => x.includes('--ctorigdstport') && x.includes('-j LOG')));
+});
+
 test('published ports: rules without ports match all DNAT traffic from that source; OUT rules are not copied', () => {
   const out = compileHostPolicy(input({ dockerPublishedPorts: true, rules: [rule({ protocol: 'any', ports: null }), rule({ orderIndex: 20, direction: 'OUT' })] })).text;
   const fwd = lines(out).filter((x) => x.startsWith('-A SEGMENTRA-FWD') && x.includes('published rule'));

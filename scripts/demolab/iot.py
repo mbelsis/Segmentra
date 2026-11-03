@@ -8,10 +8,10 @@ import time
 import urllib.parse
 
 from .common import (
-    BUILD_DIR, LABEL, ROOT, Api, LabError, check_executor, connect_to_network, create_network, default_api_url, deploy, docker,
+    BUILD_DIR, LABEL, ROOT, Api, Checks, LabError, check_executor, connect_to_network, create_network, default_api_url, deploy, docker,
     enable_container_firewall_logs, ensure_approved_version, ensure_credential, ensure_tag, find_api_containers, find_credential,
     find_host, find_policy_set, find_tag, generate_ssh_key, has_tag, is_local, labelled, load_state, login, refuse_foreign, remove_host,
-    remove_policy_set, require_docker, restore_container_firewall_logs, save_state, say, stop_sessions, versions_of,
+    remove_policy_set, require_docker, restore_container_firewall_logs, save_state, say, stop_sessions, versions_of, wait_for,
 )
 
 STATE_FILE = ROOT / ".demo-lab-iot.json"
@@ -371,29 +371,6 @@ def cmd_status(args):
             ip = machine_ip(state, name)
         say(f"  {name}: {running.stdout if running.returncode == 0 else 'not created'} {ip}")
     return 0
-
-
-class Checks:
-    def __init__(self):
-        self.failed = []
-        self.count = 0
-
-    def check(self, label, passed, detail=""):
-        self.count += 1
-        if not passed:
-            self.failed.append(label)
-        say(f"  {'PASS' if passed else 'FAIL'}  {label}" + (f"  ({detail})" if detail else ""))
-        return passed
-
-
-def wait_for(read, seconds=20):
-    """Polls until read() is truthy, because logs and statuses arrive a moment later."""
-    deadline = time.time() + seconds
-    while True:
-        value = read()
-        if value or time.time() > deadline:
-            return value
-        time.sleep(2)
 
 
 def cmd_check(args):

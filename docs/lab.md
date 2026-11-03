@@ -21,6 +21,7 @@ Segmentra has to be running first. The [quick start](#quick-start) gives the exa
 - [Things to try](#things-to-try)
 - [What the lab changes](#what-the-lab-changes)
 - [The IoT lab](#the-iot-lab)
+- [The Swarm lab](#the-swarm-lab)
 - [Limits of the lab](#limits-of-the-lab)
 - [Troubleshooting](#troubleshooting)
 - [Where the files are](#where-the-files-are)
@@ -445,6 +446,72 @@ It uses the networks `segmentra-iot-it` and `segmentra-iot-ot` (`--subnet` and `
 
 The devices are small simulators that answer one request. They test firewall rules, not how real equipment behaves, and they do not run the protocols' full logic. All machines share one kernel, and the gateway uses iptables only.
 
+## The Swarm lab
+
+A real Docker Swarm: three managers and two workers, each with its own Docker daemon and firewall, running two published services, with two clients outside the cluster. It can run next to the other labs.
+
+```bash
+python3 scripts/demo-lab.py up --lab swarm        # add --set-executor-ssh when the API runs outside Docker
+python3 scripts/demo-lab.py traffic --lab swarm   # real requests to every node, compared with the policy
+python3 scripts/demo-lab.py check --lab swarm     # test Segmentra's Swarm features against the lab
+python3 scripts/demo-lab.py status --lab swarm    # includes the cluster's own view of its nodes
+python3 scripts/demo-lab.py down --lab swarm      # --remove-images also removes the images
+```
+
+On Windows, write these as `python scripts\demo-lab.py up --lab swarm`, and so on.
+
+```
+ Network 172.28.80.0/24
+
+ Managers  swarm-m1 .11   swarm-m2 .12   swarm-m3 .13     Services, 3 replicas each, on any node:
+ Workers   swarm-w1 .14   swarm-w2 .15                      web    published on 8080
+ Clients   swarm-client-a .50   swarm-client-b .51          admin  published on 8081
+```
+
+**Why three managers.** A swarm needs a majority of its managers to keep working. Two managers cannot lose either one, so they are less fault-tolerant than one. Three can lose one, and `check` shows it.
+
+**What it needs.** Each node runs Docker inside Docker. It takes about two minutes to start, more the first time because of the image builds. The containers use about 500 MB of memory once running. `check` takes about six minutes.
+
+### The sample policy
+
+| Client | web (8080) | admin (8081) |
+|---|---|---|
+| `swarm-client-a` | allowed | blocked |
+| `swarm-client-b` | blocked | allowed |
+
+The result is the same on all five nodes, because the routing mesh accepts a published port on every node, including nodes with no replica. The policy mentions no cluster ports: Segmentra adds them for the nodes that share a Swarm name.
+
+### What it shows
+
+- **Published ports bypass normal host rules.** With enforcement switched off, a client the policy does not allow gets through, because Docker's NAT sends the traffic past the `INPUT` chain.
+- **A default-deny policy can break a swarm quietly.** Without the Swarm profile, the overlay network fails while nodes can still look healthy.
+- **New services are covered.** A service published after the deployment is blocked until a policy allows it, with no redeployment.
+- **A restarted machine needs its rules back.** A restarted container comes back with no firewall rules and rejoins the cluster. Segmentra reports it as drifted, and a deployment restores it. A real server normally reloads its saved rules at boot, which this lab cannot test.
+
+### What `check` tests
+
+`check` changes the lab for a while and restores it. It covers:
+
+- traffic on every node, the routing mesh, overlay traffic and cluster health
+- the **Docker Swarm** page data: the cluster, its managers and its workers
+- generated rules: the manager port only on managers and only from peers, and Segmentra first in Docker's `DOCKER-USER` chain
+- a service published after the deployment
+- **Peek at Logs**, with denied published ports, the refused client, and allowed published traffic under its rule's name
+- **Drift**, by removing the jump from `DOCKER-USER` on one node
+- **Policy Impact Analysis** on a worker, with the cluster staying healthy
+- the two controls above, with enforcement off and with the Swarm profile off
+- losing a manager, then restarting it
+
+`npm run test:lab:swarm` runs `up`, `check`, `traffic` and `down` on a disposable Segmentra and verifies that nothing is left behind. It has passed on macOS with the API in Docker using SSH, with the API outside Docker using SSH, and on a production install using Ansible.
+
+### What it adds and leaves behind
+
+It uses the network `segmentra-swarm` (`--subnet` chooses another free range), the images `segmentra-lab-swarm-node`, `segmentra-lab-web` and `segmentra-lab-machine`, the tag `demo-lab-swarm`, a credential scoped to that tag, the state file `.demo-lab-swarm.json`, and ports 22221-22225 on 127.0.0.1 when the API runs outside Docker. After `down`, Segmentra keeps its history: the hosts stay disabled, without their Swarm name so the Swarm page no longer lists the cluster, and `Swarm lab policy` stays archived. `up` reuses them.
+
+### Limits
+
+All nodes share one kernel, so reboots and boot-time rule loading are not tested. The nodes use iptables on Docker 27. The limits in [docker-swarm.md](docker-swarm.md#not-tested-yet) apply: Segmentra does not filter traffic between containers, and log-only tests do not cover published ports.
+
 ## Limits of the lab
 
 - **Not a real server.** Containers share a kernel and have no boot process, so a policy surviving a reboot, for example, is not tested here.
@@ -470,7 +537,7 @@ The devices are small simulators that answer one request. They test firewall rul
 | Nothing under **Integrations** | The lab is not up on this Segmentra, or you ran `down`, which removes them | Run `up` against the Segmentra you are looking at |
 | `Could not create the network on ...` | The range overlaps another network | Choose another with `--subnet` |
 | `Host key verification failed` | The image was rebuilt from scratch, so a machine has a new host key | Remove the old entry from the `known_hosts` of the user running the API, then run `up` again |
-| A deployment fails with `ansible_failed` and the API cannot use Docker | The API has no access to the Docker socket | Check `DOCKER_GID` in `.env`. The installer normally sets it |
+| A deployment fails with `ansible_failed: permission denied ... docker.sock` | The API has no access to the Docker socket | Check `DOCKER_GID` in `.env`. The installer normally sets it |
 | Results marked `(!)` in `traffic` | A result differs from the sample policy | Expected during a log-only test or after you change the policy. Otherwise, check the host's **Active Rules** |
 | `traffic` shows results marked `(!)` after Docker restarted | Containers have no boot process: each machine clears its firewall when it starts, and the kernel logging setting is reset | Run `up` again (with the same `--lab`) to deploy the policy and turn logging back on |
 | Peek at Logs is empty | The traffic has not run yet, or the policy was deployed before default-deny logging existed | Run `traffic`, then **Refresh**. Otherwise run `up` to deploy again |
@@ -482,11 +549,12 @@ The devices are small simulators that answer one request. They test firewall rul
 | File | Purpose |
 |---|---|
 | `scripts/demo-lab.py` | The command line |
-| `scripts/demolab/` | The labs: `common.py` is shared, `base.py` and `iot.py` are one lab each |
+| `scripts/demolab/` | The labs: `common.py` is shared, `base.py`, `iot.py` and `swarm.py` are one lab each |
 | `tests/labs/` | Runs a lab from start to finish on a disposable Segmentra |
 | `infra/demo-lab/iot-device.py` | The simulated devices and the client that probes them |
+| `infra/demo-lab/swarm-node.Dockerfile`, `swarm-entrypoint.sh`, `swarm-web.Dockerfile` | The Swarm lab's nodes and sample service |
 | `infra/demo-lab/Dockerfile` | The machines' image |
 | `infra/demo-lab/entrypoint.sh` | What starts inside each machine: accounts and services |
 | `infra/demo-lab/kmsg-forward.py` | Passes each machine's own firewall lines to rsyslog |
 | `infra/demo-lab/syslog-receiver.sh` | Runs the sample SIEM in `test-syslog` |
-| `.demo-lab.json`, `.demo-lab-iot.json` | Each running lab's state, not in git |
+| `.demo-lab.json`, `.demo-lab-iot.json`, `.demo-lab-swarm.json` | Each running lab's state, not in git |

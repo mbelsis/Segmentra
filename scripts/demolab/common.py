@@ -375,6 +375,29 @@ def remove_host(api, host):
     return False
 
 
+class Checks:
+    def __init__(self):
+        self.failed = []
+        self.count = 0
+
+    def check(self, label, passed, detail=""):
+        self.count += 1
+        if not passed:
+            self.failed.append(label)
+        say(f"  {'PASS' if passed else 'FAIL'}  {label}" + (f"  ({detail})" if detail else ""))
+        return passed
+
+
+def wait_for(read, seconds=20):
+    """Polls until read() is truthy, because logs and statuses arrive a moment later."""
+    deadline = time.time() + seconds
+    while True:
+        value = read()
+        if value or time.time() > deadline:
+            return value
+        time.sleep(2)
+
+
 # --- State -----------------------------------------------------------------------------------------
 
 def load_state(path):

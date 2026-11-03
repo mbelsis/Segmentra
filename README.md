@@ -678,6 +678,8 @@ python3 scripts/demo-lab.py down                   # remove it (--remove-images 
 
 A second lab covers devices that cannot run a firewall: `python3 scripts/demo-lab.py up --lab iot` builds a Linux gateway between an IT and an OT network, with simulated PLC, RTU, sensor, camera and printer behind it. Every command takes `--lab iot`, and `check --lab iot` tests coverage, discovery, logs, drift and Policy Impact Analysis against it. See [the IoT lab](docs/lab.md#the-iot-lab).
 
+A third lab is a real Docker Swarm: `python3 scripts/demo-lab.py up --lab swarm` builds three managers and two workers with published services, and `check --lab swarm` tests published-port enforcement, cluster health, logs, drift and losing a manager. See [the Swarm lab](docs/lab.md#the-swarm-lab).
+
 On Windows, write these as `python scripts\demo-lab.py traffic`, and so on.
 
 Good to know:
