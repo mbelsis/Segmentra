@@ -760,9 +760,77 @@ async function verifyManagedHostSkipsReadiness(operatorToken, policy) {
     token: operatorToken,
     body: { policyVersionId: policy.versionId, mode: 'FULL', targetQuery: { hosts: [policy.hostId], tags: [], vlans: [] } }
   });
+  // The list shows the policy by name and version, and can be searched that way.
+  const found = await apiRequest('GET', `/deployments?search=${encodeURIComponent('Integration policy target-c v1')}`, { token: operatorToken });
+  const row = found.deployments.find((d) => d.id === created.deployment.id);
+  if (row?.policy_set_name !== 'Integration policy target-c' || row?.version_number !== 1) throw new Error(`Deployments list: policy name and version missing: ${JSON.stringify(row)?.slice(0, 200)}`);
+  if (found.pagination.total !== found.deployments.length) throw new Error('Deployments list: the count does not match the search');
   await apiRequest('POST', `/deployments/${created.deployment.id}/start`, { token: operatorToken, body: {} });
   const done = await waitForDeployment(operatorToken, created.deployment.id);
   if (done.deployment.status !== 'SUCCEEDED') throw new Error(`Readiness check: redeployment ended as ${done.deployment.status}`);
+}
+
+/**
+ * Scheduled deployments have nobody to answer the readiness check: a host that is not ready fails the run and
+ * notifies, a note about reboots is recorded and the run goes ahead. Uses a host record that never had a deployment.
+ */
+async function verifyScheduledReadiness(adminToken, operatorToken, approverToken) {
+  log('Readiness check: scheduled deployments');
+  const host = (await apiRequest('POST', '/hosts', { token: adminToken, body: { hostname: 'sched-fresh', mgmtIp: '172.29.0.33', sshPort: 22, firewallBackend: 'iptables', enabled: true } })).host;
+  const set = (await apiRequest('POST', '/policy-sets', { token: operatorToken, body: { name: 'Scheduled readiness', scopeType: 'HOST_LIST', hostIds: [host.id] } })).policySet;
+  const version = (await apiRequest('POST', `/policy-sets/${set.id}/versions`, { token: operatorToken, body: { changeSummary: 'test', interfaceScopeType: 'ALL_INTERFACES' } })).version;
+  await apiRequest('POST', `/policy-versions/${version.id}/submit-approval`, { token: operatorToken, body: {} });
+  await apiRequest('POST', `/policy-versions/${version.id}/approve`, { token: approverToken, body: {} });
+
+  // A real webhook receiver for the notification.
+  const receiver = "import http.server as h\nclass R(h.BaseHTTPRequestHandler):\n  def do_POST(s):\n    b=s.rfile.read(int(s.headers.get('content-length',0)))\n    open('/tmp/webhooks.log','ab').write(b+b'\\n')\n    s.send_response(200);s.end_headers()\n  def log_message(*a):pass\nh.HTTPServer(('',8099),R).serve_forever()";
+  await execInService('siem-receiver', 'sh', '-c', `touch /tmp/webhooks.log; nohup python3 -c "${receiver.replace(/"/g, '\\"')}" >/dev/null 2>&1 &`);
+  await delay(1000);
+  const channel = (await apiRequest('POST', '/notifications/channels', { token: adminToken, body: { name: 'it-webhook', type: 'webhook', config: { url: 'http://172.29.0.40:8099/hook' }, enabled: true } })).channel;
+  for (const eventType of ['DEPLOYMENT_STARTED', 'DEPLOYMENT_FAILED']) {
+    await apiRequest('POST', `/notifications/channels/${channel.id}/rules`, { token: adminToken, body: { eventType, enabled: true } });
+  }
+  const webhooks = async () => (await execInService('siem-receiver', 'cat', '/tmp/webhooks.log')).stdout;
+
+  const schedule = async () => (await apiRequest('POST', '/deployments', {
+    token: operatorToken,
+    body: { policyVersionId: version.id, mode: 'FULL', scheduledAt: new Date(Date.now() + 1500).toISOString(), targetQuery: { hosts: [host.id], tags: [], vlans: [] } }
+  })).deployment.id;
+  const finished = async (id) => {
+    for (let i = 0; i < 100; i += 1) {
+      const { deployment } = await apiRequest('GET', `/deployments/${id}`, { token: operatorToken });
+      if (['SUCCEEDED', 'FAILED', 'PARTIAL'].includes(deployment.status)) return deployment;
+      await delay(2000);
+    }
+    throw new Error(`Scheduled deployment ${id} never ran`);
+  };
+
+  await execInService('target-c', 'iptables', '-I', 'INPUT', '-p', 'tcp', '--dport', '22', '-j', 'REJECT');
+  const rulesBefore = (await execInService('target-c', 'iptables-save')).stdout.split('\n').filter((l) => l.startsWith('-A SEGMENTRA')).join('\n');
+  let blockedId;
+  try {
+    blockedId = await schedule();
+    const blocked = await finished(blockedId);
+    if (blocked.status !== 'FAILED') throw new Error(`Scheduled, host not ready: ended as ${blocked.status}`);
+  } finally {
+    await execInService('target-c', 'iptables', '-D', 'INPUT', '-p', 'tcp', '--dport', '22', '-j', 'REJECT');
+  }
+  const rulesAfter = (await execInService('target-c', 'iptables-save')).stdout.split('\n').filter((l) => l.startsWith('-A SEGMENTRA')).join('\n');
+  if (rulesAfter !== rulesBefore) throw new Error('Scheduled, host not ready: rules on the host changed');
+  const hostRow = (await apiRequest('GET', `/deployments/${blockedId}/hosts`, { token: operatorToken })).hosts[0];
+  if (hostRow.status !== 'FAILED' || !/Readiness check failed/.test(hostRow.message ?? '')) throw new Error(`Scheduled, host not ready: host shows ${hostRow.status} "${hostRow.message}"`);
+  for (let i = 0; i < 15 && !(await webhooks()).includes('DEPLOYMENT_FAILED'); i += 1) await delay(1000);
+  const sent = await webhooks();
+  if (!sent.includes('DEPLOYMENT_FAILED')) throw new Error(`Scheduled, host not ready: no failure notification. Received: ${sent.slice(0, 300)}`);
+  if (sent.includes('DEPLOYMENT_STARTED')) throw new Error('Scheduled, host not ready: "started" was announced although nothing ran');
+  log('Readiness check: a scheduled run on a host that is not ready failed, notified and changed nothing');
+
+  const notedId = await schedule();
+  const noted = await finished(notedId);
+  if (noted.status !== 'SUCCEEDED') throw new Error(`Scheduled, reboot note: ended as ${noted.status}`);
+  const recorded = await auditQuery(`SELECT count(*) FROM audit_events WHERE action='DEPLOYMENT_READINESS_NOTES' AND entity_id='${notedId}'`);
+  if (recorded !== '1') throw new Error(`Scheduled, reboot note: ${recorded} audit events`);
+  log('Readiness check: a scheduled run with the reboot note went ahead and recorded it');
 }
 
 const SIEM_MESSAGE = /^<110>1 \S+ segmentra segmentra-audit - - \[audit@segmentra action="([^"]*)" actor="[^"]*" entityType="[^"]*" entityId="([^"]*)"/;
@@ -879,6 +947,7 @@ async function main() {
     await verifyPolicyTestSession(operatorToken, debianPolicy);
     await verifyLogSources(operatorToken, policies, debianPolicy);
     await verifyManagedHostSkipsReadiness(operatorToken, policies[2]);
+    await verifyScheduledReadiness(adminToken, operatorToken, approverToken);
     await verifySiem(adminToken, siemIds);
 
     log('Docker SSH integration test completed successfully');

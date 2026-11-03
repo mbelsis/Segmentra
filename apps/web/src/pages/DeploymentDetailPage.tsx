@@ -196,6 +196,9 @@ export function DeploymentDetailPage() {
             ← Back
           </button>
           <h2>Deployment Details</h2>
+          {deployment.policy_set_name && (
+            <div style={{ color: '#5c4633', marginTop: 2 }}>{deployment.policy_set_name} v{deployment.version_number}</div>
+          )}
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           {canApprove && deployment.requires_approval && !deployment.approved_by && ['QUEUED', 'SCHEDULED'].includes(deployment.status) && (

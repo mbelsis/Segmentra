@@ -711,7 +711,7 @@ export function DeploymentsPage() {
                 type="text"
                 value={searchQuery}
                 onChange={(e) => { setSearchQuery(e.target.value); setCurrentPage(1); }}
-                placeholder="Deployment or Policy Version ID"
+                placeholder="Policy name or ID"
                 style={{ width: '100%', padding: '6px 8px', border: '1px solid #ddd', borderRadius: 4 }}
               />
             </div>
@@ -861,8 +861,8 @@ export function DeploymentsPage() {
         <table className="data-table">
           <thead>
             <tr>
+              <th>Policy</th>
               <th>ID</th>
-              <th>Policy Version</th>
               <th>Mode</th>
               <th>Targets</th>
               <th>Status</th>
@@ -874,8 +874,11 @@ export function DeploymentsPage() {
           <tbody>
             {deployments.map((d) => (
               <tr key={d.id}>
-                <td><code style={{ fontSize: '0.85em' }}>{d.id.slice(0, 8)}...</code></td>
-                <td><code style={{ fontSize: '0.85em' }}>{d.policy_version_id.slice(0, 8)}...</code></td>
+                <td title={`Policy version ID: ${d.policy_version_id}`}>
+                  <strong>{d.policy_set_name ?? 'Unknown policy'}</strong>
+                  {d.version_number != null && <span style={{ marginLeft: 6, color: '#78644e' }}>v{d.version_number}</span>}
+                </td>
+                <td title={d.id}><code style={{ fontSize: '0.85em' }}>{d.id.slice(0, 8)}...</code></td>
                 <td><span title={MODE_HELP[d.mode] ?? d.mode} style={{ cursor: 'help', borderBottom: '1px dotted #97846c' }}>{d.mode}</span></td>
                 <td>{d.target_count} host(s)</td>
                 <td>

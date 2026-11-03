@@ -612,9 +612,13 @@ deploymentsRouter.get('/deployments', requireRole('viewer', 'operator', 'approve
   const params: any[] = [];
   let paramIndex = 1;
 
-  // Search by policy version ID or deployment ID
+  // Search by policy name and version ("Web servers v3"), deployment ID or policy version ID
   if (search) {
-    conditions.push(`(d.id::text ILIKE $${paramIndex} OR d.policy_version_id::text ILIKE $${paramIndex})`);
+    conditions.push(`(d.id::text ILIKE $${paramIndex} OR d.policy_version_id::text ILIKE $${paramIndex}
+      OR d.policy_version_id IN (
+        SELECT spv.id FROM policy_versions spv JOIN policy_sets sps ON sps.id = spv.policy_set_id
+        WHERE sps.name || ' v' || spv.version_number ILIKE $${paramIndex}
+      ))`);
     params.push(`%${search}%`);
     paramIndex++;
   }
@@ -690,10 +694,13 @@ deploymentsRouter.get('/deployments', requireRole('viewer', 'operator', 'approve
 
   // Get paginated results with creator username
   const query = `
-    SELECT d.*, u.username as created_by_username, ua.username as approved_by_username
+    SELECT d.*, u.username as created_by_username, ua.username as approved_by_username,
+           ps.name as policy_set_name, pv.version_number
     FROM deployments d
     LEFT JOIN users u ON u.id = d.created_by
     LEFT JOIN users ua ON ua.id = d.approved_by
+    LEFT JOIN policy_versions pv ON pv.id = d.policy_version_id
+    LEFT JOIN policy_sets ps ON ps.id = pv.policy_set_id
     ${whereClause}
     ORDER BY d.${sortColumn} ${sortDir}
     LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
@@ -716,10 +723,12 @@ deploymentsRouter.get('/deployments', requireRole('viewer', 'operator', 'approve
 deploymentsRouter.get('/deployments/:deploymentId', requireRole('viewer', 'operator', 'approver', 'admin'), async (req, res) => {
   const { rows } = await pool.query(
     `SELECT d.*, u.username AS created_by_username, u.display_name AS created_by_display_name,
-            ua.username AS approved_by_username
+            ua.username AS approved_by_username, ps.name AS policy_set_name, pv.version_number
      FROM deployments d
      LEFT JOIN users u ON u.id = d.created_by
      LEFT JOIN users ua ON ua.id = d.approved_by
+     LEFT JOIN policy_versions pv ON pv.id = d.policy_version_id
+     LEFT JOIN policy_sets ps ON ps.id = pv.policy_set_id
      WHERE d.id=$1`,
     [req.params.deploymentId]
   );
@@ -1867,7 +1876,6 @@ export async function processScheduledDeployments(): Promise<number> {
       'AND scheduled_at IS NOT NULL AND scheduled_at <= now()'
     );
     if (!claimed) continue; // started, cancelled or changed by someone else meanwhile
-    notifyDeploymentEvent('DEPLOYMENT_STARTED', row.id, { startedBy: 'scheduler' });
 
     try {
       // Nobody is there to answer at run time: a host that is not ready fails the run. Notes are recorded and accepted,
@@ -1885,6 +1893,7 @@ export async function processScheduledDeployments(): Promise<number> {
           metadata: { readinessNotes: readiness.notes }
         });
       }
+      notifyDeploymentEvent('DEPLOYMENT_STARTED', row.id, { startedBy: 'scheduler' });
       const result = await executeDeploymentStart(row.id, undefined);
       // eslint-disable-next-line no-console
       console.log(`[Scheduled Deployments] Auto-started deployment ${row.id} — ok=${result.ok}, exitCode=${result.exitCode}`);

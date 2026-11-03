@@ -187,6 +187,13 @@ Click an image to open it full size. The screenshots show the sample dataset tha
       <sub>Scan networks for SSH servers and import new hosts with a default tag</sub>
     </td>
   </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="docs/screenshots/22-deployment-modes.png"><img src="docs/screenshots/22-deployment-modes.png" alt="Deployment modes" width="100%"></a><br>
+      <b>Deployment modes</b><br>
+      <sub>Canary, Progressive and Full, explained where you filter and choose them</sub>
+    </td>
+  </tr>
 </table>
 
 ---
