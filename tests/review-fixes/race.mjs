@@ -92,7 +92,7 @@ async function main() {
     };
     const startDeploy = async (v, extra = {}) => {
       const dep = await api('POST', '/deployments', { token: op, body: { policyVersionId: v.id, mode: 'FULL', targetQuery: { hosts: [host.id], tags: [], vlans: [] }, ...extra } });
-      await api('POST', `/deployments/${dep.deployment.id}/start`, { token: op, body: {} });
+      await api('POST', `/deployments/${dep.deployment.id}/start`, { token: op, body: { acceptReadinessNotes: true } });
       return dep.deployment.id;
     };
     const wait = async (id) => { for (let i = 0; i < 60; i += 1) { const d = await api('GET', `/deployments/${id}`, { token: op }); if (['SUCCEEDED', 'FAILED', 'PARTIAL'].includes(d.deployment.status)) return d.deployment.status; await sleep(1500); } return 'TIMEOUT'; };

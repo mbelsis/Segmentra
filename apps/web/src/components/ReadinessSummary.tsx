@@ -51,7 +51,8 @@ export function explainReadiness(result: any): { items: Item[]; raw: string[] } 
   const raw = Array.from(new Set([
     ...errors,
     ...warnings,
-    ...(p?.warnings ?? []),
+    // The API repeats these inside its own warning, some with a code in front: list each fact once.
+    ...(p?.warnings ?? []).map((w: string) => w.replace(/^[a-z_]+: /, '')).filter((w: string) => !warnings.some((x) => x.includes(w))),
     ...(p?.notes ?? []),
   ].flatMap((m: string) => String(m).split(/;\s+/)).map((m) => m.trim()).filter(Boolean)));
 

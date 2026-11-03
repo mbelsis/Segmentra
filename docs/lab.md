@@ -1,10 +1,10 @@
 # Segmentra test lab
 
-The test lab builds a small working environment with one command: three Docker machines, added to the inventory, protected by a sample firewall policy that is really deployed, with real traffic between them. Use it to try Segmentra, to demonstrate it, or to check a change, without any real servers.
+The test lab builds a small working environment with one command: three Docker machines, added to the inventory, protected by a sample firewall policy that is really deployed, with real traffic between them, and a syslog collector receiving Segmentra's Audit Log as a sample SIEM. Use it to try Segmentra, to demonstrate it, or to check a change, without any real servers.
 
-```bash
-python3 scripts/demo-lab.py up        # on Windows: python scripts\demo-lab.py up
-```
+**Lab or demo data?** The [demo data](../README.md#demo-data-optional) (`npm run db:demo`) fills the UI with sample hosts, policies, OT devices and deployments, but nothing behind them is real, so nothing can be deployed or tested. The lab has fewer records, but its firewalls and traffic are real. To have both, load the demo data first, because its loader refuses a database that already has other hosts.
+
+Segmentra has to be running first. The [quick start](#quick-start) gives the exact commands for macOS, Linux and Windows.
 
 > **For testing only.** The machines are privileged containers with a known user password, and the script adds hosts, a policy and a user to the Segmentra it runs against. Do not point it at a production Segmentra.
 
@@ -17,6 +17,7 @@ python3 scripts/demo-lab.py up        # on Windows: python scripts\demo-lab.py u
 - [The sample policy](#the-sample-policy)
 - [What `up` does, step by step](#what-up-does-step-by-step)
 - [Commands and options](#commands-and-options)
+- [The sample SIEM](#the-sample-siem)
 - [Things to try](#things-to-try)
 - [What the lab changes](#what-the-lab-changes)
 - [Limits of the lab](#limits-of-the-lab)
@@ -25,26 +26,51 @@ python3 scripts/demo-lab.py up        # on Windows: python scripts\demo-lab.py u
 
 ## What you need
 
-- A running Segmentra on the same computer (see [installation.md](installation.md)).
+- Segmentra on the same computer, started as shown in the [quick start](#quick-start). The full setup is in [installation.md](installation.md).
 - Docker, running, with Linux containers.
-- Python 3.8 or newer. The script uses only the standard library, so there is nothing to install.
+- Python 3.8 or newer: `python3` on macOS and Linux, `python` or `py` on Windows. The script uses only the standard library, so there is nothing else to install.
 - Internet access the first time, to download the base images and Debian packages.
 
 ## Quick start
 
-**Production install** (`./install.sh --production`). The script finds the API and the admin password in `.env`:
+### 1. Start Segmentra in development mode
 
-```bash
-python3 scripts/demo-lab.py up
-```
+From the repository folder:
 
-**Development mode** (`./start.sh dev`). The API runs outside Docker, so deployments have to use the SSH executor:
+| System | Command | What happens next |
+|---|---|---|
+| macOS or Linux | `./start.sh dev` | Keeps running in this terminal. Leave it open and use a second terminal for the lab |
+| Windows | `start.bat dev` in Command Prompt, `.\start.bat dev` in PowerShell | Opens the API and the UI in their own windows. Leave those open and carry on in the first one |
+
+Wait until the API answers. The address http://localhost:8080/api/health should open in a browser. The UI is at http://localhost:5173, and the development login is `admin` / `admin123`.
+
+### 2. Start the lab
+
+**macOS or Linux** (in a second terminal, in the repository folder):
 
 ```bash
 python3 scripts/demo-lab.py up --set-executor-ssh
 ```
 
-`--set-executor-ssh` changes a global setting that applies to every deployment, which is why you have to ask for it.
+**Windows** (Command Prompt or PowerShell, in the repository folder):
+
+```bat
+python scripts\demo-lab.py up --set-executor-ssh
+```
+
+If Windows says `python` was not found, use `py` instead: `py scripts\demo-lab.py up --set-executor-ssh`.
+
+`--set-executor-ssh` is needed because the API runs outside Docker, so Ansible cannot reach the machines. It changes the deployment setting for all deployments on this install, and `down` does not undo it. If the setting is already SSH, the flag changes nothing.
+
+### Using a production install instead
+
+If you installed with `./install.sh --production` or `.\install.ps1 --production`, Segmentra is already running in Docker, and the Ansible runner can reach the machines, so you do not need the flag. The script finds the API and the admin password in `.env`:
+
+```bash
+python3 scripts/demo-lab.py up        # Windows: python scripts\demo-lab.py up
+```
+
+### 3. See the result
 
 The first run takes a minute or two, because it builds the image. It ends with the result of the traffic and a line saying whether it matches the policy:
 
@@ -61,11 +87,17 @@ After the policy
 Ready. Every result matches the policy.
 ```
 
-When you have finished:
+When you have finished, remove the lab:
 
 ```bash
-python3 scripts/demo-lab.py down
+python3 scripts/demo-lab.py down --remove-images        # Windows: python scripts\demo-lab.py down --remove-images
 ```
+
+This removes the machines, the collector, the network and the lab's images. Leave out `--remove-images` to keep the images, so the next `up` starts faster.
+
+The rest of this guide writes commands the macOS and Linux way. On Windows, replace `python3 scripts/demo-lab.py` with `python scripts\demo-lab.py`.
+
+To stop Segmentra afterwards: on macOS or Linux, press Ctrl+C in its terminal. On Windows, close the API and UI windows. The database keeps running in Docker until you run `docker compose down`.
 
 ## What the lab contains
 
@@ -73,8 +105,9 @@ python3 scripts/demo-lab.py down
 
 | Item | Name | Details |
 |---|---|---|
-| Images | `test-a`, `test-b`, `test-c` | The same Debian 12 image under three names |
+| Images | `test-a`, `test-b`, `test-c`, `test-syslog` | The same Debian 12 image under four names |
 | Containers | `test-a`, `test-b`, `test-c` | Addresses `.11`, `.12` and `.13` on the lab network |
+| Container | `test-syslog` | The sample SIEM, address `.20`, listening for syslog on port 514 over TCP and UDP |
 | Network | `segmentra-demo-lab` | `172.28.77.0/24` by default |
 
 **Services on every machine**
@@ -96,6 +129,7 @@ python3 scripts/demo-lab.py down
 | SSH credential | `demo-lab-credential`, scoped to the tag, so it is never chosen for any other host |
 | Policy set | `Demo lab policy`, applied to the three hosts |
 | User | `demo-lab-approver`, switched off except while approving |
+| Integrations | `demo-lab-siem-tcp` and `demo-lab-siem-udp`, under **Integrations**, both pointing at `test-syslog` |
 
 ## Architecture
 
@@ -134,7 +168,7 @@ On Docker Desktop your computer cannot reach container addresses directly. So ea
 | `test-b` | `127.0.0.1`, port 22202 |
 | `test-c` | `127.0.0.1`, port 22203 |
 
-Only port 22 is published, and only on `127.0.0.1`. Everything else stays inside the lab network. The script chooses the mode itself: if a container publishes the API's port, it is a Docker install.
+The collector is published too, on `127.0.0.1:15514`, so the API can reach it. Nothing is published beyond `127.0.0.1`, and everything else stays inside the lab network. The script chooses the mode itself: if a container publishes the API's port, it is a Docker install.
 
 ### How the firewall sees the traffic
 
@@ -145,15 +179,15 @@ The sample traffic comes from real clients run inside the machines with `docker 
 ### How the logs reach Segmentra
 
 ```
-  packet --> iptables rule with logging --> kernel log --> rsyslog in the machine
-                                                                 |
-       Peek at Logs / Policy Impact Analysis <-- SSH <-- /var/log/kern.log
+  packet --> iptables rule with logging --> kernel log --> kmsg-forward.py --> rsyslog
+                                                                                 |
+       Peek at Logs / Policy Impact Analysis <-- SSH <-- /var/log/kern.log <-----+
 ```
 
 Containers share one kernel, which creates two lab-only details:
 
 - Kernels do not log firewall lines from containers by default. The script turns on `net.netfilter.nf_log_all_netns`, and `down` puts the old value back.
-- The kernel log holds the lines of all three machines. Each machine's rsyslog keeps only its own: packets arriving for it, and packets it sends. That makes each machine's log look like a real server's.
+- The kernel log holds the lines of all three machines. A small program on each machine, `kmsg-forward.py`, passes on only its own: packets arriving for it, and packets it sends. That makes each machine's log look like a real server's. It reads `/dev/kmsg` because rsyslog's usual kernel input reads `/proc/kmsg`, which gives each line to only one reader, so the machines would steal each other's lines.
 
 ## The sample policy
 
@@ -191,10 +225,12 @@ The rules log at a limited rate of 5 lines per second per rule, with short burst
 4. **Connects the API** and the Ansible runner to the lab network (production install only).
 5. **Turns on container firewall logging** (`nf_log_all_netns`).
 6. **Fills the inventory.** Tag, credential and hosts.
-7. **Runs the traffic** with no policy, to show that everything is open.
-8. **Creates and approves the policy.** Segmentra requires a second person to approve a change, so the script switches on `demo-lab-approver`, approves as that user, and switches it off again.
-9. **Deploys the policy** through the normal deployment flow, including the second approval for a deployment Segmentra rates high risk.
-10. **Runs the traffic again** and compares every result with the policy. Any difference is marked `(!)`, and the script exits with an error.
+7. **Connects the sample SIEM.** Starts `test-syslog` and registers it as an integration over each protocol.
+8. **Runs the traffic** with no policy, to show that everything is open.
+9. **Creates and approves the policy.** Segmentra requires a second person to approve a change, so the script switches on `demo-lab-approver`, approves as that user, and switches it off again.
+10. **Deploys the policy** through the normal deployment flow, including the second approval for a deployment Segmentra rates high risk, and the readiness check every host goes through before its first policy. The script accepts the check's note that rules are lost on reboot, because containers have no boot to survive.
+11. **Runs the traffic again** and compares every result with the policy. Any difference is marked `(!)`, and the script exits with an error.
+12. **Checks the sample SIEM.** Sends a connectivity test over each protocol, and confirms that it and the deployment's Audit Log entries arrived over both.
 
 `up` is safe to run again. It reuses what exists and deploys the policy again.
 
@@ -221,9 +257,18 @@ Runs the sample traffic and checks it against the policy. Exits with 1 if any re
 | `--repeat N` | How many rounds. Default: 1 |
 | `--interval SECONDS` | Time between rounds. Default: 10 |
 
+### `siem`
+
+Shows how many messages the sample SIEM received over each protocol, and the newest ones.
+
+| Option | Meaning |
+|---|---|
+| `--last N` | How many of the newest messages to show. Default: 15 |
+| `--by-action` | Also counts the messages per action |
+
 ### `status`
 
-Shows whether the lab is set up, how it is connected, and the state and address of each machine.
+Shows whether the lab is set up, how it is connected, and the state and address of each machine and the collector.
 
 ### `down`
 
@@ -231,7 +276,30 @@ Accepts `--api-url`, `--username` and `--password`, like `up`.
 
 | Option | Meaning |
 |---|---|
-| `--remove-images` | Also removes the images `test-a`, `test-b` and `test-c` |
+| `--remove-images` | Also removes the images `test-a`, `test-b`, `test-c` and `test-syslog` |
+
+## The sample SIEM
+
+`test-syslog` stands in for a real SIEM. It is rsyslog, set to write every message exactly as it arrived, one file per protocol: `/var/log/siem/tcp.log` and `/var/log/siem/udp.log`. Segmentra treats it like any other syslog destination, so what you see here is what a real SIEM would get.
+
+```bash
+python3 scripts/demo-lab.py siem --by-action
+```
+
+**What it receives: the Audit Log.** Every entry, such as a policy approved, a deployment started or a user changed, goes out as one RFC 5424 message:
+
+```
+<110>1 2026-11-03T06:29:45.123Z segmentra segmentra-audit - - [audit@segmentra action="HOST_CREATE" actor="admin" entityType="host" entityId="242d2bb0-..."] HOST_CREATE by admin on host:242d2bb0-...
+```
+
+**What it does not receive: firewall logs.** The accepted and denied lines in Peek at Logs stay on each host. Segmentra has no firewall log forwarding yet.
+
+Good to know:
+
+- **Your other integrations are unaffected.** Every enabled SIEM integration gets every message, so a real SIEM you have configured keeps working. The sample one just receives the same entries.
+- **It also receives the recent past.** When a SIEM is first enabled, Audit Log entries from the last 60 minutes that were never forwarded are sent too, so the first count can be higher than what the lab itself did.
+- **UDP cannot confirm delivery.** That is how UDP works, and why the lab tests both. In **Integrations**, the **Test** button sends a test message and says so for UDP.
+- **If the collector is down,** events are kept and sent again within about a minute of it returning, as long as they are less than 60 minutes old and no other SIEM accepted them. Try it with `docker stop test-syslog`, then `docker start test-syslog`.
 
 ## Things to try
 
@@ -260,6 +328,12 @@ python3 scripts/demo-lab.py traffic --repeat 20 --interval 30
 ### Change the policy
 
 Create a new version of `Demo lab policy` in the UI, for example allowing ping from `test-b`, then have it approved and deploy it. Remember that `traffic` always compares with the original sample policy in the script, so your change will show as `(!)`.
+
+### See the Audit Log reach the SIEM
+
+1. In Segmentra, change something: approve a policy, or add a tag.
+2. Run `python3 scripts/demo-lab.py siem --last 5`. The action is there within a few seconds.
+3. Open **Integrations** to see `demo-lab-siem-tcp` and `demo-lab-siem-udp`, and press **Test** on one.
 
 ### Look at what is on a machine
 
@@ -294,6 +368,7 @@ Also useful: **Inventory > Actions > Active Rules** shows the rules a host shoul
 | Hosts | Disabled, because they have deployment history |
 | Policy set | Archived, because approved versions cannot be deleted |
 | User `demo-lab-approver` | Stays, switched off. Deleting a user erases the record of what they approved |
+| SIEM integrations | Deleted |
 | Tag `demo-lab` | Stays while the hosts use it |
 | Deployments and audit log | Stay |
 
@@ -305,18 +380,23 @@ Running `up` again reuses the hosts and creates a new policy version. Nothing el
 - **iptables only.** The machines use the iptables backend. nftables, firewalld and UFW are not part of the lab.
 - **Hosts only.** Traffic is judged by the rules on the receiving host. Gateways and FORWARD rules have their own lab in `tests/ot-gateway-lab`.
 - **Segmentra must be on the same computer** as Docker, because the containers need to reach it directly.
+- **Audit Log only.** The sample SIEM shows that the Audit Log is forwarded. Firewall log lines are not forwarded at all.
 - **Windows** has not been tested yet. The script is written to work there, but it has only been run on macOS.
 
 ## Troubleshooting
 
 | Message or symptom | What it means | What to do |
 |---|---|---|
+| `command not found: python` on macOS or Linux | The command there is `python3` | Use `python3 scripts/demo-lab.py ...` |
+| `can't open file ... scriptsdemo-lab.py` | The Windows backslash was used on macOS or Linux | Use a forward slash: `scripts/demo-lab.py` |
 | `Docker is installed but not running` | The Docker daemon is not answering | Start Docker and try again |
-| `Cannot reach Segmentra at ...` | The API is not running, or is on another port | Start Segmentra, or use `--api-url` |
+| `Cannot reach Segmentra at ...` | The API is not running, or is on another port | Start it with `./start.sh dev` or `start.bat dev`, or use `--api-url` |
 | `Could not log in to Segmentra` | No password worked | Use `--username`, and `--password` or `SEGMENTRA_ADMIN_PASSWORD` |
 | `Deployments currently use the ansible executor...` | Ansible cannot reach the machines from this setup | Add `--set-executor-ssh`, or change the executor under Admin |
 | `A container called test-a already exists...` | Something of yours has that name, and the lab will not touch it | Rename or remove it |
 | `Your inventory already has a host called test-a...` | A host of yours has that name, without the `demo-lab` tag | Rename it |
+| `The sample SIEM did not receive the events over: ...` | The API could not deliver to the collector | Check the API's log for `[SIEM]` lines, and that `test-syslog` is running with `status` |
+| Nothing under **Integrations** | The lab is not up on this Segmentra, or you ran `down`, which removes them | Run `up` against the Segmentra you are looking at |
 | `Could not create the network on ...` | The range overlaps another network | Choose another with `--subnet` |
 | `Host key verification failed` | The image was rebuilt from scratch, so a machine has a new host key | Remove the old entry from the `known_hosts` of the user running the API, then run `up` again |
 | A deployment fails with `ansible_failed` and the API cannot use Docker | The API has no access to the Docker socket | Check `DOCKER_GID` in `.env`. The installer normally sets it |
@@ -331,5 +411,7 @@ Running `up` again reuses the hosts and creates a new policy version. Nothing el
 |---|---|
 | `scripts/demo-lab.py` | The script |
 | `infra/demo-lab/Dockerfile` | The machines' image |
-| `infra/demo-lab/entrypoint.sh` | What starts inside each machine: accounts, services, rsyslog filter |
+| `infra/demo-lab/entrypoint.sh` | What starts inside each machine: accounts and services |
+| `infra/demo-lab/kmsg-forward.py` | Passes each machine's own firewall lines to rsyslog |
+| `infra/demo-lab/syslog-receiver.sh` | Runs the sample SIEM in `test-syslog` |
 | `.demo-lab.json` | The running lab's state, not in git |

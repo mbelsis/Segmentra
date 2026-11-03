@@ -135,7 +135,7 @@ async function main() {
     };
     const deployOnce = async (versionId) => {
       const created = await api('POST', '/deployments', { token: op, body: { policyVersionId: versionId, mode: 'FULL', targetQuery: { hosts: hosts.map((h) => h.id), tags: [], vlans: [] } } });
-      await api('POST', `/deployments/${created.deployment.id}/start`, { token: op, body: {} });
+      await api('POST', `/deployments/${created.deployment.id}/start`, { token: op, body: { acceptReadinessNotes: true } });
       for (let a = 0; a < 90; a += 1) {
         const d = await api('GET', `/deployments/${created.deployment.id}`, { token: op });
         if (['SUCCEEDED', 'FAILED', 'PARTIAL'].includes(d.deployment.status)) {

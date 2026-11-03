@@ -65,7 +65,7 @@ Segmentra backs up each host, applies the rules over SSH or Ansible, checks it c
 
 ## Screenshots
 
-Click an image to open it full size. The screenshots show the sample dataset that ships with the repository: load it with `npm run db:demo` after the migrations and the seed (see [Demo data](#demo-data-optional)) to get the same hosts, policies, OT devices and deployments on your own installation.
+Click an image to open it full size. The screenshots show the sample dataset that ships with the repository: load it with `npm run db:demo` after the migrations and the seed (see [Demo data](#demo-data-optional)) to get the same hosts, policies, OT devices and deployments on your own installation. You can also use the ready-made [test lab](#test-lab-optional), which uses Docker to set up a live network with three hosts and a syslog collector, so you can see the application working on real firewalls. Screenshots 13 to 19 were taken with the lab.
 
 <table>
   <tr>
@@ -136,6 +136,57 @@ Click an image to open it full size. The screenshots show the sample dataset tha
       <sub>LDAP group mappings, SSH and Kubernetes credentials, users and roles</sub>
     </td>
   </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="docs/screenshots/13-inventory-actions.png"><img src="docs/screenshots/13-inventory-actions.png" alt="Inventory with the test lab" width="100%"></a><br>
+      <b>Inventory with the test lab</b><br>
+      <sub>The machines from the <a href="docs/lab.md">test lab</a>, each with one <b>Actions</b> menu</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="docs/screenshots/14-firewall-logs.png"><img src="docs/screenshots/14-firewall-logs.png" alt="Peek at Logs" width="100%"></a><br>
+      <b>Peek at Logs</b><br>
+      <sub>A host's recent firewall log, accepted and denied, with the rule that decided</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="docs/screenshots/15-policy-visualization.png"><img src="docs/screenshots/15-policy-visualization.png" alt="Policy Visualization" width="100%"></a><br>
+      <b>Policy Visualization</b><br>
+      <sub>Who may reach a host, and on which ports, as a diagram</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="docs/screenshots/16-host-readiness.png"><img src="docs/screenshots/16-host-readiness.png" alt="Check Readiness" width="100%"></a><br>
+      <b>Check Readiness</b><br>
+      <sub>Whether a host can take a policy, and whether its rules would survive a reboot</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="docs/screenshots/17-policy-test-running.png"><img src="docs/screenshots/17-policy-test-running.png" alt="A policy test running" width="100%"></a><br>
+      <b>A policy test running</b><br>
+      <sub>Traffic being captured in log-only mode, with the time left until the original rules return</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="docs/screenshots/18-compliance-report.png"><img src="docs/screenshots/18-compliance-report.png" alt="Compliance Report" width="100%"></a><br>
+      <b>Compliance Report</b><br>
+      <sub>Evidence from Segmentra's own data, mapped to PCI DSS, ISO 27001, SOC 2 and HIPAA controls</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="docs/screenshots/19-audit-log-deployment.png"><img src="docs/screenshots/19-audit-log-deployment.png" alt="Audit Log of a deployment" width="100%"></a><br>
+      <b>Audit Log of a deployment</b><br>
+      <sub>Who approved and started it, which hosts it reached and how it ended</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="docs/screenshots/20-auto-tagging.png"><img src="docs/screenshots/20-auto-tagging.png" alt="Auto-Tagging" width="100%"></a><br>
+      <b>Auto-Tagging</b><br>
+      <sub>Rules that tag hosts by hostname, IP, OS or VLAN, with examples</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="docs/screenshots/21-inventory-discovery.png"><img src="docs/screenshots/21-inventory-discovery.png" alt="Inventory Discovery" width="100%"></a><br>
+      <b>Inventory Discovery</b><br>
+      <sub>Scan networks for SSH servers and import new hosts with a default tag</sub>
+    </td>
+  </tr>
 </table>
 
 ---
@@ -189,6 +240,7 @@ Supported Linux backends are **nftables, iptables, firewalld, and UFW**. Select 
 - **Deployment Modes** — Full, Canary, and Progressive. With the SSH Direct executor hosts are deployed one at a time in hostname order: Canary stops if one of the first *N* canary hosts (default 1) fails, Progressive stops at the end of a batch (default 5 hosts) that had a failure; halted hosts are marked skipped and can be resumed with **Retry Failed Hosts**. The Ansible executor deploys all target hosts in one playbook run
 - **Scheduled Deployments** — schedule for future execution (e.g., maintenance windows); auto-starts via background job
 - **Two Executors** — Ansible (parallel, recommended) or SSH Direct (lightweight, no Ansible dependency)
+- **Compulsory readiness check** — before a host's first policy, Segmentra checks that it can take one. A host that fails stops the start, with nothing deployed. If rules would be lost on reboot, someone has to accept that first, and it is recorded in the audit log. Scheduled deployments cannot ask, so they fail on a host that is not ready, and record the reboot note and continue. **Check Readiness** in the Inventory still runs the same check at any time
 - **Safety Guardrails** — pre-deployment validation ensures SSH access from management VLAN is preserved
 - **Automatic Rollback** — failed deployments restore previous state from host-local backups
 - **Real-time Tracking** — per-host deployment status with 10-minute timeout for unresponsive hosts; **Retry Failed Hosts**, pause/resume/stop, and a deployment-level approval for high-risk deployments
@@ -581,13 +633,23 @@ On Windows use `.\run.ps1` with the same options. `--stop --development` only st
 
 ### Test lab (optional)
 
-To try Segmentra on real firewalls without real servers, start Segmentra and run:
+To try Segmentra on real firewalls without real servers, first start Segmentra in development mode, from the repository folder:
 
 ```bash
-python3 scripts/demo-lab.py up        # on Windows: python scripts\demo-lab.py up
+./start.sh dev      # macOS or Linux: keeps running, so use a second terminal for the next step
+start.bat dev       # Windows: opens the API and UI in their own windows (PowerShell: .\start.bat dev)
 ```
 
-In about a minute this creates three Docker machines (images and containers `test-a`, `test-b`, `test-c`), adds them to the inventory with the tag `demo-lab`, and creates, approves and deploys the policy `Demo lab policy`. It then tries ping, ssh, telnet and curl between the machines with real clients, and checks each result against the policy:
+When http://localhost:8080/api/health answers, start the lab, also from the repository folder:
+
+```bash
+python3 scripts/demo-lab.py up --set-executor-ssh     # macOS or Linux
+python scripts\demo-lab.py up --set-executor-ssh      # Windows (or: py scripts\demo-lab.py ...)
+```
+
+`--set-executor-ssh` is needed because the API runs outside Docker, so Ansible cannot reach the machines. It changes the deployment setting for all deployments on this install, and `down` does not undo it. If the setting is already SSH, the flag changes nothing. On a production install (`--production`), Segmentra is already running and you can leave the flag out.
+
+In about a minute this creates three Docker machines (images and containers `test-a`, `test-b`, `test-c`) and a syslog collector (`test-syslog`), adds the machines to the inventory with the tag `demo-lab`, connects the collector as a SIEM under **Integrations**, and creates, approves and deploys the policy `Demo lab policy`. It then tries ping, ssh, telnet and curl between the machines with real clients, and checks each result against the policy:
 
 | Traffic | Allowed from | Blocked from |
 |---|---|---|
@@ -602,14 +664,18 @@ The full guide, with the architecture and things to try, is in [docs/lab.md](doc
 
 ```bash
 python3 scripts/demo-lab.py traffic                # send the traffic again (--repeat 10 --interval 30 to keep it going)
+python3 scripts/demo-lab.py siem                   # what the syslog collector received
 python3 scripts/demo-lab.py status                 # what exists right now
 python3 scripts/demo-lab.py down                   # remove it (--remove-images removes the images too)
 ```
 
+On Windows, write these as `python scripts\demo-lab.py traffic`, and so on.
+
 Good to know:
 
 - **Login:** the script uses `admin` and the password from `--password`, `SEGMENTRA_ADMIN_PASSWORD` or `.env`, and otherwise tries the development default and then asks.
-- **Development mode:** deployments default to Ansible, which cannot reach the machines when the API runs outside Docker. Add `--set-executor-ssh`, which changes that setting for all deployments.
+- **Not the same as the demo data:** the [demo data](#demo-data-optional) fills the UI with sample records and needs no servers, but nothing behind it is real. The lab has real firewalls and real traffic. To have both, load the demo data first, because its loader refuses a database that already has other hosts.
+- **What the collector receives:** Segmentra's Audit Log, over TCP and UDP. Firewall log lines stay on each host and are not forwarded. While the lab is up, every Audit Log entry on that Segmentra also goes to the collector, including entries from the past hour that were never forwarded.
 - **SSH uses port 2222:** with no management network configured, Segmentra keeps port 22 open from everywhere so a host can never be locked out, so a policy could not block it.
 - **What stays after `down`:** Segmentra keeps deployment history, so the hosts stay disabled, the policy stays archived and the switched-off user `demo-lab-approver` stays. Running `up` again reuses them. Approvals need a second person, which is why that user exists.
 - **What else it touches:** it connects the API and Ansible runner containers to the lab network, and turns on `net.netfilter.nf_log_all_netns` on the Docker host's kernel so that containers can log firewall lines (`down` puts the old value back). In development mode, the machines' host keys are added to your `known_hosts`.
@@ -617,7 +683,7 @@ Good to know:
 
 ### Demo data (optional)
 
-To explore the UI without real servers, load the sample dataset after the migrations and the seed. In the local development setup (`./run.sh --start --development`) the database runs on `127.0.0.1:15432` and the loader uses that connection when `DATABASE_URL` is not set:
+To see real firewalls and traffic instead, use the [test lab](#test-lab-optional). To explore the UI without real servers, load the sample dataset after the migrations and the seed. In the local development setup (`./run.sh --start --development`) the database runs on `127.0.0.1:15432` and the loader uses that connection when `DATABASE_URL` is not set:
 
 ```bash
 npm run db:demo                 # local dev; set DATABASE_URL for another database

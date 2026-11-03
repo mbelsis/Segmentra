@@ -33,7 +33,7 @@ npm run lint            # Lint all workspaces (only apps/web has a real ESLint c
 npm run db:migrate      # Run database migrations (packages/db/scripts/migrate.js -> node-pg-migrate)
 npm run db:seed         # Seed RBAC roles, system tags and the initial admin user
 npm run db:demo         # Load the sample dataset (packages/db/demo/demo-data.sql; idempotent, defaults to the dev DATABASE_URL; refuses NODE_ENV=production, a non-localhost DATABASE_URL or a database with non-demo users/hosts unless `-- --force`; -- --remove deletes it)
-python3 scripts/demo-lab.py up        # Test environment against a running Segmentra: Docker machines test-a/b/c (infra/demo-lab), inventory, sample policy approved and deployed, ping/ssh/telnet/curl checked against it (`traffic`, `status`, `down`)
+python3 scripts/demo-lab.py up        # Test environment against a running Segmentra: Docker machines test-a/b/c (infra/demo-lab), inventory, sample policy approved and deployed, ping/ssh/telnet/curl checked against it, syslog collector test-syslog as a sample SIEM (`traffic`, `siem`, `status`, `down`)
 npm run test:integration:ssh-docker   # Docker-based SSH deployment integration test
 npm run test:integration:ot-gateway   # Docker lab: Debian IoT/OT gateway between an IT and an OT network, FORWARD rules, real traffic (tests/ot-gateway-lab)
 
@@ -45,7 +45,7 @@ npm run build -w @segmentra/executor
 npm run build -w apps/api              # also builds shared, compiler and executor
 ```
 
-There is no unit test framework. The automated test is `npm run test:integration:ssh-docker` (see `tests/README.md`): it builds the API image, starts PostgreSQL, three Alpine SSH targets, a privileged Debian target (rsyslog, python3) and the Ansible runner, deploys real policies via the SSH and Ansible executors and verifies `iptables` rules, live traffic, drift, Firewall Learning and Policy Impact Analysis sessions (rsyslog and kernel-log fallback). Add `-- --keep` to leave the stack running (API on 18080; `SEGMENTRA_API_URL=http://127.0.0.1:18080 npm run dev -- --port 5174` in `apps/web` points the UI at it).
+There is no unit test framework. The automated test is `npm run test:integration:ssh-docker` (see `tests/README.md`): it builds the API image, starts PostgreSQL, three Alpine SSH targets, a privileged Debian target (rsyslog, python3) and the Ansible runner, forwards the Audit Log to a real syslog receiver over TCP and UDP (each event exactly once, valid RFC 5424, no secrets, catch-up after an outage), deploys real policies via the SSH and Ansible executors and verifies `iptables` rules, live traffic, drift, Firewall Learning and Policy Impact Analysis sessions (rsyslog and kernel-log fallback). Add `-- --keep` to leave the stack running (API on 18080; `SEGMENTRA_API_URL=http://127.0.0.1:18080 npm run dev -- --port 5174` in `apps/web` points the UI at it).
 
 ### Migrations
 
@@ -57,6 +57,8 @@ Migrations live in `packages/db/migrations` as plain `NNN_description.sql` files
 UI → HTTP with Bearer JWT → `requireAuth` middleware → `requireRole` check → route handler → PostgreSQL → JSON response
 
 ### Deployment Flow
+Readiness is compulsory before a host's first policy (`services/deployment-readiness.ts`, hosts with no `SUCCEEDED` deployment): `POST /deployments/:id/start` refuses with 409 `readiness_blocked` when a host fails, and `readiness_notes` when rules would be lost on reboot until the body has `acceptReadinessNotes: true` (recorded in the audit event). Scheduled runs fail when a host is blocked and accept notes with an audit event.
+
 Policy version approved → deployment created → compiler generates per-host rules → executor (Ansible/SSH) deploys → status tracked in `deployment_hosts` → audit events logged → background jobs monitor timeouts
 
 ### Key Patterns

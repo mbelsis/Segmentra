@@ -295,7 +295,8 @@ export const api = {
   },
   deployment: (deploymentId: string) => request<{ deployment: any }>(`/deployments/${deploymentId}`),
   createDeployment: (b: any) => request<{ deployment: any }>('/deployments', { method: 'POST', body: JSON.stringify(b) }),
-  startDeployment: (deploymentId: string) => request<any>(`/deployments/${deploymentId}/start`, { method: 'POST' }),
+  startDeployment: (deploymentId: string, opts: { acceptReadinessNotes?: boolean } = {}) =>
+    request<any>(`/deployments/${deploymentId}/start`, { method: 'POST', body: JSON.stringify(opts) }),
   pauseDeployment: (deploymentId: string) => request<{ ok: boolean }>(`/deployments/${deploymentId}/pause`, { method: 'POST' }),
   resumeDeployment: (deploymentId: string) => request<{ ok: boolean }>(`/deployments/${deploymentId}/resume`, { method: 'POST' }),
   stopDeployment: (deploymentId: string) => request<{ ok: boolean }>(`/deployments/${deploymentId}/stop`, { method: 'POST' }),

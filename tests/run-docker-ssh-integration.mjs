@@ -110,7 +110,7 @@ async function pullBaseImage() {
 
 async function startInfrastructure() {
   log('Building and starting the Docker integration stack');
-  await dockerCompose('up', '-d', '--build', 'db', 'target-a', 'target-b', 'target-c', 'target-d', 'ansible-runner');
+  await dockerCompose('up', '-d', '--build', 'db', 'target-a', 'target-b', 'target-c', 'target-d', 'ansible-runner', 'siem-receiver');
   await dockerCompose('build', 'api');
   await dockerCompose('run', '--rm', 'api', 'npm', 'run', 'migrate:up', '-w', '@segmentra/db');
   await dockerCompose('run', '--rm', 'api', 'npm', 'run', 'seed', '-w', '@segmentra/db');
@@ -336,7 +336,7 @@ async function startDeployment(operatorToken, versionId, hostId) {
 
   await apiRequest('POST', `/deployments/${created.deployment.id}/start`, {
     token: operatorToken,
-    body: {}
+    body: { acceptReadinessNotes: true }
   });
 
   return created.deployment.id;
@@ -722,6 +722,118 @@ async function verifyLogSources(operatorToken, policies, debianPolicy) {
   }
 }
 
+/**
+ * The readiness check is compulsory before a host's first policy. Run before anything was deployed to target-c:
+ * unreachable refuses, then the note about reboots has to be accepted, and nothing reaches the host until it is.
+ */
+async function verifyFirstDeploymentReadiness(operatorToken, policy) {
+  log('Readiness check: compulsory before a first policy');
+  const created = await apiRequest('POST', '/deployments', {
+    token: operatorToken,
+    body: { policyVersionId: policy.versionId, mode: 'FULL', targetQuery: { hosts: [policy.hostId], tags: [], vlans: [] } }
+  });
+  const id = created.deployment.id;
+  const refused = async (expected) => {
+    const res = await fetch(`${apiBase}/deployments/${id}/start`, { method: 'POST', headers: { authorization: `Bearer ${operatorToken}`, 'content-type': 'application/json' }, body: '{}' });
+    const body = await res.json();
+    if (res.status !== 409 || body.error !== expected) throw new Error(`Readiness check: expected ${expected}, got ${res.status} ${JSON.stringify(body).slice(0, 300)}`);
+    const { stdout } = await execInService(policy.hostService, 'iptables-save');
+    if (stdout.includes('SEGMENTRA')) throw new Error('Readiness check: rules reached the host although the start was refused');
+    return body;
+  };
+  await execInService(policy.hostService, 'iptables', '-I', 'INPUT', '-p', 'tcp', '--dport', '22', '-j', 'REJECT');
+  try {
+    const blocked = await refused('readiness_blocked');
+    if (blocked.blocked[0]?.hostname !== policy.hostName) throw new Error(`Readiness check: wrong host refused: ${JSON.stringify(blocked.blocked)}`);
+  } finally {
+    await execInService(policy.hostService, 'iptables', '-D', 'INPUT', '-p', 'tcp', '--dport', '22', '-j', 'REJECT');
+  }
+  const noted = await refused('readiness_notes');
+  if (!/survive a reboot/.test(noted.notes[0]?.messages?.[0] ?? '')) throw new Error(`Readiness check: note missing: ${JSON.stringify(noted.notes)}`);
+  await apiRequest('POST', `/deployments/${id}/cancel`, { token: operatorToken, body: {} });
+}
+
+/** A host that already has a successful deployment does not go through the check again. */
+async function verifyManagedHostSkipsReadiness(operatorToken, policy) {
+  log('Readiness check: not repeated for a host already deployed to');
+  const created = await apiRequest('POST', '/deployments', {
+    token: operatorToken,
+    body: { policyVersionId: policy.versionId, mode: 'FULL', targetQuery: { hosts: [policy.hostId], tags: [], vlans: [] } }
+  });
+  await apiRequest('POST', `/deployments/${created.deployment.id}/start`, { token: operatorToken, body: {} });
+  const done = await waitForDeployment(operatorToken, created.deployment.id);
+  if (done.deployment.status !== 'SUCCEEDED') throw new Error(`Readiness check: redeployment ended as ${done.deployment.status}`);
+}
+
+const SIEM_MESSAGE = /^<110>1 \S+ segmentra segmentra-audit - - \[audit@segmentra action="([^"]*)" actor="[^"]*" entityType="[^"]*" entityId="([^"]*)"/;
+
+/** Registers the stand-in SIEM over both protocols, before the actions the test will check on. */
+async function enableSiem(adminToken) {
+  log('SIEM: forwarding the Audit Log to a real syslog receiver over TCP and UDP');
+  const ids = {};
+  for (const protocol of ['tcp', 'udp']) {
+    const created = await apiRequest('POST', '/integrations', {
+      token: adminToken,
+      body: { type: 'siem', provider: 'syslog', name: `it-siem-${protocol}`, enabled: true, config: { host: '172.29.0.40', port: 514, protocol } }
+    });
+    ids[protocol] = created.integration.id;
+  }
+  return ids;
+}
+
+async function readSiem(protocol) {
+  const { stdout } = await execInService('siem-receiver', 'cat', `/var/log/siem/${protocol}.log`);
+  return stdout.split('\n').filter(Boolean);
+}
+
+async function auditQuery(sql) {
+  const { stdout } = await execInService('db', 'psql', '-U', 'segmentra', '-d', 'segmentra', '-Atc', sql);
+  return stdout.trim();
+}
+
+/** Every Audit Log entry arrived exactly once over each protocol, valid, without secrets; an outage is caught up on. */
+async function verifySiem(adminToken, ids) {
+  log('SIEM: every Audit Log entry arrived exactly once, valid and without secrets');
+  for (let i = 0; i < 90 && (await auditQuery('SELECT count(*) FROM audit_events WHERE siem_forwarded_at IS NULL')) !== '0'; i += 1) await delay(1000);
+  await delay(3000);
+  const counted = (rows) => rows.reduce((m, k) => m.set(k, (m.get(k) ?? 0) + 1), new Map());
+  const expected = counted((await auditQuery(`SELECT action || '|' || coalesce(entity_id::text, '') FROM audit_events`)).split('\n'));
+  const total = [...expected.values()].reduce((a, b) => a + b, 0);
+  if (total < 50) throw new Error(`SIEM: only ${total} audit events, the test did not exercise enough`);
+
+  for (const protocol of ['tcp', 'udp']) {
+    const lines = await readSiem(protocol);
+    const invalid = lines.filter((l) => !SIEM_MESSAGE.test(l));
+    if (invalid.length) throw new Error(`SIEM ${protocol}: ${invalid.length} messages are not valid RFC 5424, e.g. ${invalid[0].slice(0, 200)}`);
+    const got = counted(lines.map((l) => { const m = SIEM_MESSAGE.exec(l); return `${m[1]}|${m[2]}`; }));
+    // Creating the TCP integration was logged before the UDP one existed: that event cannot have gone over UDP.
+    const notSentYet = protocol === 'udp' ? `INTEGRATION_CREATE|${ids.tcp}` : null;
+    const wrong = [...new Set([...expected.keys(), ...got.keys()])].filter((k) => k !== notSentYet && (got.get(k) ?? 0) !== (expected.get(k) ?? 0));
+    if (wrong.length) throw new Error(`SIEM ${protocol}: ${wrong.length} events arrived the wrong number of times, e.g. ${wrong.slice(0, 5).map((k) => `${k}: sent ${expected.get(k) ?? 0}, got ${got.get(k) ?? 0}`).join('; ')}`);
+    const text = lines.join('\n');
+    for (const secret of ['segmentra123!', 'Operator123!', 'Approver123!', 'admin123', 'PRIVATE KEY', '$2a$', '$2b$']) {
+      if (text.includes(secret)) throw new Error(`SIEM ${protocol}: a message contains "${secret}"`);
+    }
+    log(`SIEM ${protocol}: ${lines.length} of ${total} events, each exactly once`);
+  }
+
+  log('SIEM: the receiver goes down; events are kept and delivered when it returns');
+  await apiRequest('PUT', `/integrations/${ids.udp}`, { token: adminToken, body: { enabled: false } });
+  await dockerCompose('stop', 'siem-receiver');
+  await apiRequest('POST', '/tags', { token: adminToken, body: { name: `siem-outage-${Date.now()}` } });
+  // An event stays claimed while the send is failing (TCP gives up after 5 seconds), then it is released for a retry.
+  await delay(10000);
+  const unsent = await auditQuery(`SELECT count(*) FROM audit_events WHERE siem_forwarded_at IS NULL`);
+  if (unsent === '0') throw new Error('SIEM: an event counted as forwarded while the only collector was down');
+  await dockerCompose('start', 'siem-receiver');
+  for (let i = 0; i < 90 && (await auditQuery('SELECT count(*) FROM audit_events WHERE siem_forwarded_at IS NULL')) !== '0'; i += 1) await delay(1000);
+  await delay(2000);
+  if ((await auditQuery('SELECT count(*) FROM audit_events WHERE siem_forwarded_at IS NULL')) !== '0') throw new Error('SIEM: events from the outage were not delivered after the receiver returned');
+  const newest = await auditQuery(`SELECT action || '|' || coalesce(entity_id::text, '') FROM audit_events ORDER BY timestamp DESC LIMIT 1`);
+  const after = (await readSiem('tcp')).map((l) => SIEM_MESSAGE.exec(l)).filter(Boolean).map((m) => `${m[1]}|${m[2]}`);
+  if (!after.includes(newest)) throw new Error(`SIEM: newest event ${newest} did not arrive after the outage`);
+}
+
 async function cleanup() {
   if (keepStack) {
     log('Leaving the integration stack running because --keep was passed');
@@ -742,9 +854,12 @@ async function main() {
     await waitForApi();
 
     const { adminToken, operatorToken, approverToken } = await prepareUsersAndSettings();
+    const siemIds = await enableSiem(adminToken);
     const createdHosts = await createHosts(adminToken); // SSH target is admin-only
     const policies = await createPolicies(operatorToken, approverToken, createdHosts);
 
+    await createGlobalCredential(adminToken, 'PASSWORD');
+    await verifyFirstDeploymentReadiness(operatorToken, policies[2]);
     await seedForeignRules(policies);
 
     await runDeploymentRound('PASSWORD', adminToken, operatorToken, policies);
@@ -763,6 +878,8 @@ async function main() {
     await verifyLearningSession(operatorToken, debianPolicy, { rsyslogDropInDisabled: true });
     await verifyPolicyTestSession(operatorToken, debianPolicy);
     await verifyLogSources(operatorToken, policies, debianPolicy);
+    await verifyManagedHostSkipsReadiness(operatorToken, policies[2]);
+    await verifySiem(adminToken, siemIds);
 
     log('Docker SSH integration test completed successfully');
   } finally {

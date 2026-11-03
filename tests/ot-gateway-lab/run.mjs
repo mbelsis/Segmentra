@@ -98,7 +98,7 @@ async function counter(match) {
 
 async function deploy(token, versionId, hostId) {
   const dep = await api('POST', '/deployments', { token, body: { policyVersionId: versionId, mode: 'FULL', targetQuery: { hosts: [hostId], tags: [], vlans: [] } } });
-  await api('POST', `/deployments/${dep.deployment.id}/start`, { token, body: {} });
+  await api('POST', `/deployments/${dep.deployment.id}/start`, { token, body: { acceptReadinessNotes: true } });
   for (let i = 0; i < 60; i += 1) {
     const d = await api('GET', `/deployments/${dep.deployment.id}`, { token });
     if (['SUCCEEDED', 'FAILED', 'PARTIAL'].includes(d.deployment.status)) return { id: dep.deployment.id, status: d.deployment.status };
@@ -219,7 +219,7 @@ async function main() {
   console.log('\nPolicy removal');
   const expDep = await api('POST', '/deployments', { token: op, body: { policyVersionId: v.id, mode: 'FULL', targetQuery: { hosts: [gw.id], tags: [], vlans: [] }, expiresAt: new Date(Date.now() + 70_000).toISOString(), expiryAction: 'REMOVE' }, allow: true });
   if (expDep.status < 300) {
-    await api('POST', `/deployments/${expDep.deployment.id}/start`, { token: op, body: {} });
+    await api('POST', `/deployments/${expDep.deployment.id}/start`, { token: op, body: { acceptReadinessNotes: true } });
     let st = '';
     for (let i = 0; i < 90; i += 1) { st = (await api('GET', `/deployments/${expDep.deployment.id}`, { token: op })).deployment.status; if (st === 'EXPIRED') break; await delay(2000); }
     check('a deployment with a one-minute expiry and REMOVE is marked EXPIRED', st === 'EXPIRED', st);

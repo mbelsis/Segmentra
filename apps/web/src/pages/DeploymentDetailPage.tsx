@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 
-import { api, errorMessage } from '../lib/api';
+import { api, errorMessage, isApiError } from '../lib/api';
+import { DeploymentReadinessDialog } from '../components/DeploymentReadinessDialog';
+import { readinessRefusal, type ReadinessRefusal } from '../lib/readiness-refusal';
 import { hasRole, useAuth } from '../lib/auth-context';
 
 // Deployment statuses that may still change and therefore warrant polling.
@@ -42,6 +44,7 @@ export function DeploymentDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>('');
   const [actionError, setActionError] = useState<string>('');
+  const [readinessGate, setReadinessGate] = useState<ReadinessRefusal | null>(null);
   const { roles } = useAuth();
   const canOperate = hasRole(roles, 'operator', 'admin');
   const canApprove = hasRole(roles, 'approver', 'admin');
@@ -92,7 +95,9 @@ export function DeploymentDetailPage() {
     try {
       await fn();
     } catch (e: any) {
-      setActionError(errorMessage(e));
+      const refusal = isApiError(e) ? readinessRefusal(deployment.id, e.code, e.body) : null;
+      if (refusal) setReadinessGate(refusal);
+      else setActionError(errorMessage(e));
     } finally {
       loadData();
     }
@@ -534,6 +539,17 @@ export function DeploymentDetailPage() {
           </table>
         )}
       </div>
+      {readinessGate && (
+        <DeploymentReadinessDialog
+          refusal={readinessGate}
+          onAccept={() => {
+            const id = readinessGate.deploymentId;
+            setReadinessGate(null);
+            void runAction(() => api.startDeployment(id, { acceptReadinessNotes: true }), 'Deploy, knowing the rules will be lost on reboot on these hosts?');
+          }}
+          onClose={() => setReadinessGate(null)}
+        />
+      )}
     </div>
   );
 }

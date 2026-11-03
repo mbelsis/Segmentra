@@ -3,6 +3,7 @@
 
   python3 scripts/demo-lab.py up        three Docker machines, inventory, a sample policy, deployed
   python3 scripts/demo-lab.py traffic   ping, ssh, telnet and curl between the machines
+  python3 scripts/demo-lab.py siem      what the sample SIEM received from Segmentra
   python3 scripts/demo-lab.py status    what exists right now
   python3 scripts/demo-lab.py down      remove it again
 
@@ -13,6 +14,7 @@ Everything is created through Segmentra's normal API, and nothing global is chan
 --set-executor-ssh. FOR TESTING ONLY: the machines are privileged containers with a known user password.
 """
 import argparse
+import collections
 import getpass
 import json
 import os
@@ -36,10 +38,18 @@ TAG_NAME = "demo-lab"
 CREDENTIAL_NAME = "demo-lab-credential"
 POLICY_NAME = "Demo lab policy"
 APPROVER_NAME = "demo-lab-approver"
+# Containers have no boot to survive, so the readiness note about rules being lost on reboot does not matter here.
+START_BODY = {"acceptReadinessNotes": True}
 MACHINES = ["test-a", "test-b", "test-c"]
 FIRST_SSH_PORT = 22201  # host ports, only when the API runs outside Docker
 NF_LOG_SYSCTL = "/proc/sys/net/netfilter/nf_log_all_netns"
 SYSCTL_IMAGE = "alpine:3.20"
+
+# A stand-in SIEM: a syslog receiver, registered in Segmentra as one integration per protocol.
+SYSLOG_NAME = "test-syslog"
+SYSLOG_HOST_PORT = 15514  # on 127.0.0.1, only when the API runs outside Docker
+SIEM_PROTOCOLS = ["tcp", "udp"]
+SIEM_MESSAGE = re.compile(r'^<\d+>1 (\S+) segmentra segmentra-audit - - \[audit@segmentra action="([^"]*)" actor="([^"]*)" entityType="([^"]*)" entityId="([^"]*)"')
 
 ACTIONS = ["ping", "ssh", "telnet", "curl"]
 # Which machine may do what, enforced on every machine. This is the sample policy in one table.
@@ -98,14 +108,19 @@ def lab_ips(subnet):
     return {name: f"{prefix}.{11 + i}" for i, name in enumerate(MACHINES)}
 
 
+def syslog_ip(subnet):
+    return subnet.rsplit(".", 1)[0] + ".20"
+
+
 def build_images():
     say("Building the images test-a, test-b and test-c (the first time takes a minute or two)")
-    for name in MACHINES:
+    names = [*MACHINES, SYSLOG_NAME]
+    for name in names:
         if labelled("image", name) is False:
             raise LabError(f"An image called {name} already exists and was not created by this script. Remove or rename it first.")
-    docker("build", "--quiet", "-t", MACHINES[0], str(BUILD_DIR))
-    for name in MACHINES[1:]:
-        docker("tag", MACHINES[0], name)
+    docker("build", "--quiet", "-t", names[0], str(BUILD_DIR))
+    for name in names[1:]:
+        docker("tag", names[0], name)
 
 
 def create_network(subnet):
@@ -147,6 +162,28 @@ def start_machines(state):
                 logs = docker("logs", "--tail", "20", name, check=False)
                 raise LabError(f"{name} did not start:\n{logs.stdout}\n{logs.stderr}")
             time.sleep(1)
+
+
+def start_syslog_receiver(state):
+    existing = labelled("container", SYSLOG_NAME)
+    if existing is False:
+        raise LabError(f"A container called {SYSLOG_NAME} already exists and was not created by this script. Remove or rename it first.")
+    if existing:
+        docker("start", SYSLOG_NAME)
+    else:
+        publish = []
+        if state["mode"] == "published":
+            publish = ["-p", f"127.0.0.1:{SYSLOG_HOST_PORT}:514/tcp", "-p", f"127.0.0.1:{SYSLOG_HOST_PORT}:514/udp"]
+        docker(
+            "run", "-d", "--name", SYSLOG_NAME, "--hostname", SYSLOG_NAME, "--label", f"{LABEL}=1",
+            "--network", NETWORK, "--ip", syslog_ip(state["subnet"]), "--restart", "unless-stopped",
+            "--entrypoint", "/syslog-receiver.sh", *publish, SYSLOG_NAME,
+        )
+    deadline = time.time() + 30
+    while docker("exec", SYSLOG_NAME, "pgrep", "-x", "rsyslogd", check=False).returncode != 0:
+        if time.time() > deadline:
+            raise LabError(f"{SYSLOG_NAME} did not start:\n{docker('logs', '--tail', '20', SYSLOG_NAME, check=False).stderr}")
+        time.sleep(1)
 
 
 def find_api_containers(port):
@@ -386,6 +423,53 @@ def approve_as_second_person(api, path):
         api.request("PUT", f"/admin/users/{user_id}", {"isActive": False})
 
 
+def siem_integrations(api):
+    return {i["name"]: i for i in api.get("/integrations").get("integrations", []) if i["name"].startswith("demo-lab-siem-")}
+
+
+def ensure_siem(api, state):
+    """One SIEM integration per protocol, both pointing at the receiver."""
+    published = state["mode"] == "published"
+    host, port = ("127.0.0.1", SYSLOG_HOST_PORT) if published else (syslog_ip(state["subnet"]), 514)
+    existing = siem_integrations(api)
+    ids = {}
+    for protocol in SIEM_PROTOCOLS:
+        name = f"demo-lab-siem-{protocol}"
+        body = {
+            "type": "siem", "provider": "syslog", "name": name, "description": "Sample SIEM from scripts/demo-lab.py", "enabled": True,
+            "config": {"host": host, "port": port, "protocol": protocol},
+        }
+        if name in existing:
+            api.request("PUT", f"/integrations/{existing[name]['id']}", body)
+            ids[protocol] = existing[name]["id"]
+        else:
+            ids[protocol] = api.post("/integrations", body)["integration"]["id"]
+    return ids
+
+
+def read_siem(protocol):
+    """(time, action, actor, entity type, entity id) of each valid message, and how many lines were not valid."""
+    text = docker("exec", SYSLOG_NAME, "cat", f"/var/log/siem/{protocol}.log", check=False).stdout
+    messages, invalid = [], 0
+    for line in text.splitlines():
+        match = SIEM_MESSAGE.match(line)
+        if match:
+            messages.append(match.groups())
+        elif line.strip():
+            invalid += 1
+    return messages, invalid
+
+
+def wait_for_siem(action_prefix, seconds=30):
+    """Waits until the receiver has the action on every protocol. Returns the protocols it never arrived on."""
+    deadline = time.time() + seconds
+    while True:
+        missing = [p for p in SIEM_PROTOCOLS if not any(m[1].startswith(action_prefix) for m in read_siem(p)[0])]
+        if not missing or time.time() > deadline:
+            return missing
+        time.sleep(1)
+
+
 def check_executor(api, state, args):
     """The default executor is Ansible, which needs a runner container that can reach the machines."""
     executor = api.get("/admin/executor-setting").get("executor", "ansible")
@@ -403,12 +487,12 @@ def check_executor(api, state, args):
 def deploy(api, version_id, host_ids):
     created = api.post("/deployments", {"policyVersionId": version_id, "mode": "FULL", "targetQuery": {"hosts": list(host_ids.values()), "tags": [], "vlans": []}})
     deployment_id = created["deployment"]["id"]
-    status, started = api.request("POST", f"/deployments/{deployment_id}/start", {}, ok=(200, 201, 202, 409))
+    status, started = api.request("POST", f"/deployments/{deployment_id}/start", START_BODY, ok=(200, 201, 202, 409))
     if status == 409:
         if started.get("error") != "deployment_requires_approval":
             raise LabError(f"The deployment could not start: {started}")
         approve_as_second_person(api, f"/deployments/{deployment_id}/approve")
-        api.post(f"/deployments/{deployment_id}/start")
+        api.post(f"/deployments/{deployment_id}/start", START_BODY)
     deadline = time.time() + 300
     while time.time() < deadline:
         status = api.get(f"/deployments/{deployment_id}")["deployment"]["status"]
@@ -529,6 +613,10 @@ def cmd_up(args):
     ensure_credential(api, tag_id, state["mgmt_private_key"])
     host_ids = ensure_hosts(api, state, tag_id)
 
+    say("Connecting the sample SIEM")
+    start_syslog_receiver(state)
+    siem_ids = ensure_siem(api, state)
+
     say("\nBefore the policy: everything is open")
     run_traffic(state, enforced=False)
 
@@ -541,12 +629,20 @@ def cmd_up(args):
     if differences:
         raise LabError(f"{differences} results differ from the policy, marked (!).")
 
+    for integration_id in siem_ids.values():
+        api.post(f"/integrations/{integration_id}/test")
+    missing = wait_for_siem("INTEGRATION_TEST") + wait_for_siem("DEPLOYMENT_")
+    if missing:
+        raise LabError(f"The sample SIEM did not receive the events over: {', '.join(sorted(set(missing)))}. Check the API's log for [SIEM] lines.")
+
+    say("\nThe sample SIEM received the audit events over TCP and UDP.")
     say("\nReady. Every result matches the policy.")
     say("  ping and ssh (port 2222): only from test-a | telnet: only from test-c | curl: from test-a and test-b")
     say("\nTry this in Segmentra:")
     say("  Inventory: Actions > Peek at Logs on a machine, to see accepted and denied traffic")
     say("  Policy Impact Analysis: start a test, then run the traffic command below")
     say("\n  python3 scripts/demo-lab.py traffic      send the sample traffic again")
+    say("  python3 scripts/demo-lab.py siem         see what the sample SIEM received")
     say("  python3 scripts/demo-lab.py down         remove the lab")
     say("\nFor testing only: these are privileged containers with a known user password.")
 
@@ -571,6 +667,28 @@ def cmd_traffic(args):
     return 0
 
 
+def cmd_siem(args):
+    require_docker()
+    require_state()
+    if docker("exec", SYSLOG_NAME, "true", check=False).returncode != 0:
+        raise LabError(f"{SYSLOG_NAME} is not running. Run: python3 scripts/demo-lab.py up")
+    say("The sample SIEM receives Segmentra's Audit Log. Firewall log lines are not forwarded.\n")
+    newest = []
+    for protocol in SIEM_PROTOCOLS:
+        messages, invalid = read_siem(protocol)
+        say(f"{protocol.upper()}: {len(messages)} messages" + (f", {invalid} not in the expected format" if invalid else ""))
+        if protocol == SIEM_PROTOCOLS[0]:
+            newest = messages
+    if args.by_action:
+        say("\nBy action (TCP):")
+        for action, count in collections.Counter(m[1] for m in newest).most_common():
+            say(f"  {count:>5}  {action}")
+    say(f"\nNewest {min(args.last, len(newest))} (TCP):")
+    for when, action, actor, entity_type, entity_id in newest[-args.last:]:
+        say(f"  {when[:19]}  {action:<28}{actor:<20}{entity_type}:{entity_id[:8]}")
+    return 0
+
+
 def cmd_status(args):
     require_docker()
     state = load_state()
@@ -578,7 +696,9 @@ def cmd_status(args):
     if state:
         say(f"Network: {NETWORK} ({state['subnet']}), reached by {'the API container' if state['mode'] == 'connected' else 'ports published on 127.0.0.1'}")
     ips = lab_ips(state["subnet"]) if state else {}
-    for name in MACHINES:
+    if state:
+        ips[SYSLOG_NAME] = syslog_ip(state["subnet"])
+    for name in [*MACHINES, SYSLOG_NAME]:
         running = docker("inspect", "--format", "{{.State.Status}}", name, check=False)
         say(f"  {name}: {running.stdout if running.returncode == 0 else 'not created'} {ips.get(name, '')}")
     return 0
@@ -615,6 +735,8 @@ def clean_up_inventory(api):
         if status not in (200, 204):
             api.request("PUT", f"/hosts/{host['id']}", {"enabled": False})
             kept.append(f"host {host['hostname']} (disabled)")
+    for integration in siem_integrations(api).values():
+        api.request("DELETE", f"/integrations/{integration['id']}", ok=(200, 204, 400, 404, 409))
     credential = find_credential(api)
     if credential:
         api.request("DELETE", f"/ssh-credentials/{credential['id']}", ok=(200, 204, 400, 404, 409))
@@ -637,7 +759,7 @@ def cmd_down(args):
         say(f"  Warning: Segmentra was not cleaned up ({error}). Remove the hosts and '{POLICY_NAME}' by hand if they remain.")
 
     say("Removing the machines and the network")
-    for name in MACHINES:
+    for name in [*MACHINES, SYSLOG_NAME]:
         if labelled("container", name):
             docker("rm", "-f", "-v", name, check=False)
     for name in state.get("api_containers") or []:
@@ -645,7 +767,7 @@ def cmd_down(args):
     docker("network", "rm", NETWORK, check=False)
     restore_container_firewall_logs(state)
     if args.remove_images:
-        for name in MACHINES:
+        for name in [*MACHINES, SYSLOG_NAME]:
             if labelled("image", name):
                 docker("rmi", name, check=False)
     if STATE_FILE.exists():
@@ -675,10 +797,15 @@ def main():
     traffic.add_argument("--interval", type=int, default=10, help="seconds between rounds (default: 10)")
     traffic.set_defaults(run=cmd_traffic)
 
+    siem = commands.add_parser("siem", help="show what the sample SIEM received")
+    siem.add_argument("--last", type=int, default=15, help="how many of the newest messages to show (default: 15)")
+    siem.add_argument("--by-action", action="store_true", help="also count the messages per action")
+    siem.set_defaults(run=cmd_siem)
+
     commands.add_parser("status", help="show what exists").set_defaults(run=cmd_status)
 
     down = commands.add_parser("down", parents=[common], help="remove the lab")
-    down.add_argument("--remove-images", action="store_true", help="also remove the images test-a, test-b and test-c")
+    down.add_argument("--remove-images", action="store_true", help="also remove the lab's images")
     down.set_defaults(run=cmd_down)
 
     args = parser.parse_args()

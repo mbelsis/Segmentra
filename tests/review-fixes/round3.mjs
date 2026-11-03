@@ -186,7 +186,7 @@ async function main() {
     };
     const deploy = async (v) => {
       const dep = await api('POST', '/deployments', { token: op, body: { policyVersionId: v.id, mode: 'FULL', targetQuery: { hosts: [host.id], tags: [], vlans: [] } } });
-      await api('POST', `/deployments/${dep.deployment.id}/start`, { token: op, body: {} });
+      await api('POST', `/deployments/${dep.deployment.id}/start`, { token: op, body: { acceptReadinessNotes: true } });
       for (let i = 0; i < 60; i += 1) {
         const d = await api('GET', `/deployments/${dep.deployment.id}`, { token: op });
         if (['SUCCEEDED', 'FAILED', 'PARTIAL'].includes(d.deployment.status)) {

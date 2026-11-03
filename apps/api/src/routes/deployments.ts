@@ -19,6 +19,7 @@ import { addDestinationSets, compilerDestination, getProtectedDestinations } fro
 import { getDockerCompileInput } from '../services/swarm.js';
 import { acquireHostLock, acquireHostLocks } from '../services/host-lock.js';
 import { createAuditEvent } from '../services/audit.js';
+import { checkFirstDeploymentReadiness } from '../services/deployment-readiness.js';
 import { getSshCredentialForHost, loadSshCredential, materializeSshCredential, sshAuthFields, type MaterializedSshCredential } from '../services/ssh-credentials.js';
 import { checkDeploymentSafety } from '../services/safety-check.js';
 import { isPolicyVersionHighRisk } from '../services/high-risk.js';
@@ -1629,6 +1630,31 @@ deploymentsRouter.post('/deployments/:deploymentId/start', requireRole('operator
     });
   }
 
+  // No SSH to the hosts for a deployment that could not start anyway.
+  const startable = await pool.query(
+    `SELECT 1 FROM deployments WHERE id=$1 AND status = ANY($2::text[]) AND (requires_approval = false OR approved_by IS NOT NULL)`,
+    [deploymentId, ['QUEUED', 'SCHEDULED']]
+  );
+  if (!startable.rows[0]) return explainNotStartable(deploymentId, res, ['QUEUED', 'SCHEDULED']);
+
+  // Compulsory before a host's first policy; nothing has touched a host yet if this refuses.
+  const readiness = await checkFirstDeploymentReadiness(deploymentId);
+  if (readiness.blocked.length > 0) {
+    return res.status(409).json({
+      error: 'readiness_blocked',
+      message: `${readiness.blocked.length} host(s) getting their first policy failed the readiness check: ${readiness.blocked.map((h) => h.hostname).join(', ')}. Nothing was deployed.`,
+      blocked: readiness.blocked
+    });
+  }
+  const acceptNotes = req.body?.acceptReadinessNotes === true;
+  if (readiness.notes.length > 0 && !acceptNotes) {
+    return res.status(409).json({
+      error: 'readiness_notes',
+      message: `Rules would be lost on reboot on ${readiness.notes.map((h) => h.hostname).join(', ')}. Start again accepting this, or make them survive a reboot first.`,
+      notes: readiness.notes
+    });
+  }
+
   // Atomically claim QUEUED/SCHEDULED -> RUNNING (prevents double-start and enforces approval)
   const claimed = await claimDeploymentForStart(deploymentId, ['QUEUED', 'SCHEDULED']);
   if (!claimed) return explainNotStartable(deploymentId, res, ['QUEUED', 'SCHEDULED']);
@@ -1640,7 +1666,8 @@ deploymentsRouter.post('/deployments/:deploymentId/start', requireRole('operator
       action: 'DEPLOYMENT_STARTED',
       entityType: 'DEPLOYMENT',
       entityId: deploymentId,
-      ipAddress: req.ip
+      ipAddress: req.ip,
+      ...(readiness.notes.length > 0 ? { metadata: { readinessNotesAccepted: readiness.notes } } : {})
     });
     notifyDeploymentEvent('DEPLOYMENT_STARTED', deploymentId, { startedBy: req.auth!.username });
   } finally {
@@ -1843,6 +1870,21 @@ export async function processScheduledDeployments(): Promise<number> {
     notifyDeploymentEvent('DEPLOYMENT_STARTED', row.id, { startedBy: 'scheduler' });
 
     try {
+      // Nobody is there to answer at run time: a host that is not ready fails the run. Notes are recorded and accepted,
+      // because a firewall change that was planned for a maintenance window should not silently not happen.
+      const readiness = await checkFirstDeploymentReadiness(row.id);
+      if (readiness.blocked.length > 0) {
+        throw new Error(`Readiness check failed: ${readiness.blocked.map((h) => `${h.hostname}: ${h.messages.join('; ')}`).join(' | ')}`);
+      }
+      if (readiness.notes.length > 0) {
+        await createAuditEvent({
+          actorUserId: null,
+          action: 'DEPLOYMENT_READINESS_NOTES',
+          entityType: 'DEPLOYMENT',
+          entityId: row.id,
+          metadata: { readinessNotes: readiness.notes }
+        });
+      }
       const result = await executeDeploymentStart(row.id, undefined);
       // eslint-disable-next-line no-console
       console.log(`[Scheduled Deployments] Auto-started deployment ${row.id} — ok=${result.ok}, exitCode=${result.exitCode}`);

@@ -179,7 +179,7 @@ async function main() {
     };
     const createDeploy = async (v, extra = {}) => (await api('POST', '/deployments', { token: op, body: { policyVersionId: v.id, mode: 'FULL', targetQuery: { hosts: [host.id], tags: [], vlans: [] }, ...extra } })).deployment.id;
     const wait = async (id) => { for (let i = 0; i < 60; i += 1) { const d = await api('GET', `/deployments/${id}`, { token: op }); if (['SUCCEEDED', 'FAILED', 'PARTIAL'].includes(d.deployment.status)) return d.deployment.status; await sleep(1500); } return 'TIMEOUT'; };
-    const runDeploy = async (id) => { await api('POST', `/deployments/${id}/start`, { token: op, body: {} }); return wait(id); };
+    const runDeploy = async (id) => { await api('POST', `/deployments/${id}/start`, { token: op, body: { acceptReadinessNotes: true } }); return wait(id); };
     const startAudit = async () => (await api('POST', '/troubleshoot/audit/start', { token: op, body: { hosts: [host.id], durationMinutes: 30 } })).results?.[0];
     const restoreAudit = (id) => raw('POST', `/troubleshoot/audit/sessions/${id}/restore`, { token: op, body: {} });
     const startTest = (v) => raw('POST', '/policy-test/start', { token: op, body: { policyVersionId: v.id, hostId: host.id, durationMinutes: 30 } });

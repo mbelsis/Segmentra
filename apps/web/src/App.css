@@ -986,3 +986,25 @@ small {
 .firewall-logs-footnote {
   margin-top: 12px;
 }
+
+/* Readiness check refused a deployment's start */
+.readiness-dialog {
+  width: 640px;
+  max-width: 95vw;
+  max-height: 85vh;
+  overflow: auto;
+  padding: 24px;
+}
+
+.readiness-dialog-hosts {
+  margin: 12px 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13.5px;
+}
+
+.readiness-dialog-hosts li {
+  padding: 8px 0;
+  border-top: 1px solid #e8e0d4;
+  overflow-wrap: anywhere;
+}

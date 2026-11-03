@@ -33,15 +33,11 @@ iptables -P INPUT ACCEPT
 iptables -P OUTPUT ACCEPT
 iptables -P FORWARD ACCEPT
 
-# rsyslog reads the kernel log, where firewall log lines land (needs a privileged container).
-# Containers share one kernel, so it also holds the other machines' lines. Keep what a real machine
-# would log for itself: packets arriving for it, and packets it sends (empty IN=).
-SELF_IP="$(hostname -i | cut -d' ' -f1)"
-cat > /etc/rsyslog.d/00-demo-lab-own-lines.conf <<RSYSLOG
-if (\$msg contains "SRC=" and \$msg contains " DST=" and not ((\$msg contains "IN= " and \$msg contains "SRC=${SELF_IP} ") or (not (\$msg contains "IN= ") and \$msg contains "DST=${SELF_IP} "))) then stop
-RSYSLOG
+# Firewall log lines reach rsyslog through kmsg-forward.py, not rsyslog's own kernel input (see that file).
+sed -i '/imklog/s/^/#/' /etc/rsyslog.conf
 rm -f /run/rsyslogd.pid
 rsyslogd
+python3 /kmsg-forward.py &
 
 # telnet
 echo "telnet stream tcp nowait root /usr/sbin/telnetd telnetd" > /etc/inetd.conf

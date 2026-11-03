@@ -116,6 +116,15 @@ services:
       integration_net:
         ipv4_address: 172.29.0.34
 
+  # A stand-in SIEM: receives syslog on 514 and writes it to /var/log/siem/{udp,tcp}.log as it arrived.
+  siem-receiver:
+    build:
+      context: ../../infra/demo-lab
+    entrypoint: /syslog-receiver.sh
+    networks:
+      integration_net:
+        ipv4_address: 172.29.0.40
+
   ansible-runner:
     build:
       context: ../../infra/ansible-runner

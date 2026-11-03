@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { api, errorMessage, isApiError } from '../lib/api';
+import { DeploymentReadinessDialog } from '../components/DeploymentReadinessDialog';
+import { readinessRefusal, type ReadinessRefusal } from '../lib/readiness-refusal';
 import { hasRole, useAuth } from '../lib/auth-context';
 
 /** Convert a datetime-local value (local wall-clock time) to an ISO-8601 UTC string. */
@@ -33,6 +35,7 @@ export function DeploymentsPage() {
   const [hosts, setHosts] = useState<any[]>([]);
   const [showCreate, setShowCreate] = useState(false);
   const [error, setError] = useState<string>('');
+  const [readinessGate, setReadinessGate] = useState<ReadinessRefusal | null>(null);
 
   // Filtering and pagination state
   const [searchQuery, setSearchQuery] = useState('');
@@ -253,13 +256,17 @@ export function DeploymentsPage() {
     }
   }
 
-  async function startDeployment(deploymentId: string) {
-    if (!confirm('Start this deployment? This will apply firewall rules to target hosts.')) return;
+  async function startDeployment(deploymentId: string, acceptReadinessNotes = false) {
+    if (!acceptReadinessNotes && !confirm('Start this deployment? This will apply firewall rules to target hosts.')) return;
+    setReadinessGate(null);
     try {
-      await api.startDeployment(deploymentId);
+      await api.startDeployment(deploymentId, { acceptReadinessNotes });
       loadDeployments();
     } catch (e: any) {
-      if (isApiError(e) && e.code === 'deployment_requires_approval') {
+      const refusal = isApiError(e) ? readinessRefusal(deploymentId, e.code, e.body) : null;
+      if (refusal) {
+        setReadinessGate(refusal);
+      } else if (isApiError(e) && e.code === 'deployment_requires_approval') {
         setError('This deployment requires approval by an approver before it can be started.');
       } else {
         setError(errorMessage(e));
@@ -891,7 +898,7 @@ export function DeploymentsPage() {
                     )}
                     {canOperate && d.status === 'QUEUED' && (
                       <button
-                        onClick={() => startDeployment(d.id)}
+                        onClick={() => void startDeployment(d.id)}
                         className="btn-small btn-primary"
                         disabled={d.requires_approval && !d.approved_by}
                         title={d.requires_approval && !d.approved_by ? 'Awaiting approval' : undefined}
@@ -954,6 +961,13 @@ export function DeploymentsPage() {
           </div>
         )}
       </div>
+      {readinessGate && (
+        <DeploymentReadinessDialog
+          refusal={readinessGate}
+          onAccept={() => void startDeployment(readinessGate.deploymentId, true)}
+          onClose={() => setReadinessGate(null)}
+        />
+      )}
     </div>
   );
 }
