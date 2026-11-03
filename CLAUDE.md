@@ -36,7 +36,8 @@ npm run db:demo         # Load the sample dataset (packages/db/demo/demo-data.sq
 python3 scripts/demo-lab.py up        # Test environment against a running Segmentra: Docker machines test-a/b/c (infra/demo-lab), inventory, sample policy approved and deployed, ping/ssh/telnet/curl checked against it, syslog collector test-syslog as a sample SIEM (`traffic`, `siem`, `status`, `down`)
 python3 scripts/demo-lab.py up --lab iot   # IoT lab (scripts/demolab/iot.py): gateway iot-gw between an IT and an OT network, simulated devices, FORWARD policy; `check --lab iot` tests coverage, discovery, logs, drift, Policy Impact Analysis
 python3 scripts/demo-lab.py up --lab swarm  # Swarm lab (scripts/demolab/swarm.py): 3 managers + 2 workers (Docker-in-Docker), published services, two clients; `check --lab swarm` tests cluster health, published ports, logs, drift, controls, losing a manager
-npm run test:lab:iot                  # (also test:lab:swarm, test:lab:base) Runs a lab start to finish on a disposable Segmentra (tests/labs, API on 18083) and verifies down leaves nothing behind
+python3 scripts/demo-lab.py up --lab k8s  # Kubernetes lab (scripts/demolab/k8s.py): kind cluster segmentra-lab, kindnet or --cni calico, NetworkPolicy applied through the API; needs kind, not kubectl; never changes the kubectl context
+npm run test:lab:iot                  # (also test:lab:swarm, test:lab:k8s, test:lab:base) Runs a lab start to finish on a disposable Segmentra (tests/labs, API on 18083) and verifies down leaves nothing behind
 npm run test:integration:ssh-docker   # Docker-based SSH deployment integration test
 npm run test:integration:ot-gateway   # Docker lab: Debian IoT/OT gateway between an IT and an OT network, FORWARD rules, real traffic (tests/ot-gateway-lab)
 

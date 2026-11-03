@@ -244,6 +244,10 @@ A DENY after the ALLOW, or one that does not overlap it, changes nothing.
 
 ---
 
+## Testing
+
+To try this yourself, [the Kubernetes lab](lab.md#the-kubernetes-lab) builds a `kind` cluster with sample pods and a policy from Segmentra with one command: `python3 scripts/demo-lab.py up --lab k8s`. `npm run test:lab:k8s` runs it from start to finish on a disposable Segmentra. `npm run test:integration:k8s` is the deeper test, including Cilium.
+
 ## Not tested yet
 
 These are implemented or should work, but have not been verified:

@@ -647,6 +647,7 @@ To try Segmentra on real firewalls without real servers, build a lab with one co
 | Base | `up` | Three machines (`test-a`, `test-b`, `test-c`) and a syslog collector | Host firewalls, the sample SIEM, Peek at Logs, Policy Impact Analysis |
 | IoT | `up --lab iot` | A gateway between an IT and an OT network, three clients, and a simulated PLC, RTU, sensor, camera and printer | Devices that cannot run a firewall: FORWARD rules, coverage, discovery |
 | Swarm | `up --lab swarm` | A real Docker Swarm: three managers, two workers, two published services, two outside clients | Published ports, cluster ports, cluster health |
+| Kubernetes | `up --lab k8s` | A real `kind` cluster with three nodes and sample pods (needs [`kind`](https://kind.sigs.k8s.io/docs/user/quick-start/#installation)) | NetworkPolicies generated, applied, checked and removed through Segmentra |
 
 First start Segmentra in development mode, from the repository folder:
 
@@ -662,11 +663,13 @@ When http://localhost:8080/api/health answers, start a lab, also from the reposi
 python3 scripts/demo-lab.py up --set-executor-ssh               # base lab
 python3 scripts/demo-lab.py up --lab iot --set-executor-ssh     # IoT lab
 python3 scripts/demo-lab.py up --lab swarm --set-executor-ssh   # Swarm lab
+python3 scripts/demo-lab.py up --lab k8s                        # Kubernetes lab (add --cni calico to use Calico)
 
 # Windows (or: py scripts\demo-lab.py ...)
 python scripts\demo-lab.py up --set-executor-ssh
 python scripts\demo-lab.py up --lab iot --set-executor-ssh
 python scripts\demo-lab.py up --lab swarm --set-executor-ssh
+python scripts\demo-lab.py up --lab k8s
 ```
 
 `--set-executor-ssh` is needed because the API runs outside Docker, so Ansible cannot reach the machines. It changes the deployment setting for all deployments on this install, and `down` does not undo it. If the setting is already SSH, the flag changes nothing. On a production install (`--production`), Segmentra is already running and you can leave the flag out.
@@ -684,7 +687,7 @@ In about a minute this creates three Docker machines (images and containers `tes
 
 Then try **Inventory > Actions > Peek at Logs** on a machine, or start a test in **Policy Impact Analysis** while the traffic runs.
 
-The full guide for all three labs is in [docs/lab.md](docs/lab.md).
+The full guide for all the labs is in [docs/lab.md](docs/lab.md).
 
 ```bash
 python3 scripts/demo-lab.py traffic                # send the traffic again (--repeat 10 --interval 30 to keep it going)
@@ -718,6 +721,12 @@ Three managers and two workers, each with its own Docker daemon and firewall, ru
 
 Then look at **Docker Swarm**, and **Inventory > Actions > Peek at Logs** on a node. See [the Swarm lab](docs/lab.md#the-swarm-lab).
 
+#### Kubernetes lab
+
+A `kind` cluster called `segmentra-lab`, with one control plane and two workers. Segmentra turns an approved policy into a NetworkPolicy and applies it through the API server. In the namespace `lab-shop`, `frontend` may reach the API (a rule by label), `monitoring` may reach the metrics (a rule by address), and `intruder` reaches nothing. The namespace `lab-open` has no policy, for comparison. It needs about 1 GB of memory for Docker and about 1 GB of disk for the node image, but no `kubectl`. It leaves your other `kind` clusters and your current `kubectl` context alone.
+
+Then look at **Kubernetes**, select the cluster `demo-lab-k8s`, and open **Network Policies**. See [the Kubernetes lab](docs/lab.md#the-kubernetes-lab).
+
 #### Test Segmentra with a lab
 
 ```bash
@@ -727,14 +736,15 @@ python3 scripts/demo-lab.py status --lab iot      # what exists right now
 python3 scripts/demo-lab.py down --lab iot        # remove it
 ```
 
-Use `--lab swarm` for the Swarm lab. `check` is available for these two labs and runs real scenarios:
+Use `--lab swarm` or `--lab k8s` for those labs. `check` runs real scenarios on these three labs:
 
 - **IoT lab (29 checks):** coverage, discovery, firewall logs, drift, Policy Impact Analysis, and taking a device off the gateway.
 - **Swarm lab (33 checks, about six minutes):** published-port enforcement, cluster health, firewall logs, drift, what breaks without the Swarm settings, and losing a manager.
+- **Kubernetes lab (28 checks):** the generated manifest, drift, dry run, policies Segmentra did not create, a read-only service account, restarted pods, and removing a policy.
 
 `check` changes the lab while it runs and then restores it. If it is stopped halfway, run `up` for that lab again.
 
-To test on a disposable Segmentra instead of yours, run `npm run test:lab:iot`, `npm run test:lab:swarm` or `npm run test:lab:base`. Each builds its own database and API, runs the lab from start to finish, and fails if `down` leaves anything behind. Remove the same lab first if it is already up, because the container names are fixed.
+To test on a disposable Segmentra instead of yours, run `npm run test:lab:iot`, `npm run test:lab:swarm`, `npm run test:lab:k8s` or `npm run test:lab:base`. Each builds its own database and API, runs the lab from start to finish, and fails if `down` leaves anything behind. Remove the same lab first if it is already up, because the container names are fixed.
 
 Good to know:
 
@@ -810,7 +820,7 @@ This builds the current code, starts a temporary API + PostgreSQL + 3 target-con
 
 `npm run test:installers` unit-tests how the installers' development database settings are worked out from `.env` (no Docker needed).
 
-`npm run test:lab:iot`, `npm run test:lab:swarm` and `npm run test:lab:base` run the [test labs](#test-labs-optional) from start to finish on a disposable Segmentra.
+`npm run test:lab:iot`, `npm run test:lab:swarm`, `npm run test:lab:k8s` and `npm run test:lab:base` run the [test labs](#test-labs-optional) from start to finish on a disposable Segmentra.
 
 Other integration tests need a running Segmentra API: `npm run test:integration:policy-code` (policy as code: export, import, validation, CLI) and `npm run test:integration:compliance` (compliance reports; the tamper check uses `docker exec` on the database container and is skipped without it), neither of which needs a lab, `npm run test:integration:review-fixes` (troubleshoot's effective policy, the per-host lock and the restore guard) and `npm run test:integration:race` (a real deployment racing a real learning-session restore in Docker) and `npm run test:review-fixes` (unit tests: unresolved interface scopes and drift hooks, no API needed), and, with Docker Desktop or Docker, `npm run test:integration:k8s -- <kindnet|calico|cilium>` (Kubernetes enforcement on kind clusters) and `npm run test:integration:swarm` (a 3-node Docker Swarm lab). They create their own lab and remove it afterwards; run them against a development stack, because they leave users, hosts and archived policy sets behind.
 

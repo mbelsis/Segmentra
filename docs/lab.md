@@ -7,6 +7,7 @@ The test labs build a small working environment with one command: real firewalls
 | [Base](#the-base-lab) | `up` | Three machines (`test-a`, `test-b`, `test-c`) and a syslog collector | Host firewalls, the sample SIEM, Peek at Logs, Policy Impact Analysis |
 | [IoT](#the-iot-lab) | `up --lab iot` | A gateway between an IT and an OT network, three clients, five simulated devices | Devices that cannot run a firewall: FORWARD rules, coverage, discovery |
 | [Swarm](#the-swarm-lab) | `up --lab swarm` | A real swarm: three managers, two workers, two published services, two outside clients | Published ports, cluster ports, cluster health |
+| [Kubernetes](#the-kubernetes-lab) | `up --lab k8s` | A real `kind` cluster with three nodes, sample pods in three namespaces | NetworkPolicies generated, applied, checked and removed through Segmentra |
 
 The labs can run side by side, and each has its own networks, tag, credential and policy.
 
@@ -28,6 +29,7 @@ The labs can run side by side, and each has its own networks, tag, credential an
   - [Things to try](#things-to-try)
 - [The IoT lab](#the-iot-lab)
 - [The Swarm lab](#the-swarm-lab)
+- [The Kubernetes lab](#the-kubernetes-lab)
 - [Commands and options](#commands-and-options)
 - [What the labs change](#what-the-labs-change)
 - [Limits of the labs](#limits-of-the-labs)
@@ -40,11 +42,12 @@ The labs can run side by side, and each has its own networks, tag, credential an
 - Docker, running, with Linux containers.
 - Python 3.8 or newer: `python3` on macOS and Linux, `python` or `py` on Windows. The script uses only the standard library, so there is nothing else to install.
 - Internet access the first time, to download the base images and packages.
-- For the Swarm lab, about 500 MB of free memory for Docker. The other labs use much less.
+- For the Swarm lab, about 500 MB of free memory for Docker. The base and IoT labs use much less.
+- For the Kubernetes lab, [`kind`](https://kind.sigs.k8s.io/docs/user/quick-start/#installation), about 1 GB of free memory for Docker, and about 1 GB of disk for its node image. `kubectl` is not needed on your computer.
 
 ## Test with a lab: the five steps
 
-Every lab works the same way. The examples use the IoT lab; use `--lab swarm` for the Swarm lab, or leave out `--lab` for the base lab.
+Every lab works the same way. The examples use the IoT lab; use `--lab swarm` or `--lab k8s` for those labs, or leave out `--lab` for the base lab.
 
 **1. Start Segmentra**, from the repository folder, and wait until http://localhost:8080/api/health answers:
 
@@ -60,7 +63,7 @@ python3 scripts/demo-lab.py up --lab iot --set-executor-ssh     # macOS or Linux
 python scripts\demo-lab.py up --lab iot --set-executor-ssh      # Windows (or: py scripts\demo-lab.py ...)
 ```
 
-`--set-executor-ssh` is needed because the API runs outside Docker in development mode, and it changes the setting for all deployments on this install. On a [production install](#using-a-production-install-instead), leave it out.
+`--set-executor-ssh` is needed because the API runs outside Docker in development mode, and it changes the setting for all deployments on this install. On a [production install](#using-a-production-install-instead), leave it out. The Kubernetes lab never needs it, because Segmentra talks to the cluster's API server instead of using SSH.
 
 **3. Send the traffic again** whenever you like. It prints the result for each flow and marks anything that differs from the policy with `(!)`:
 
@@ -68,7 +71,7 @@ python scripts\demo-lab.py up --lab iot --set-executor-ssh      # Windows (or: p
 python3 scripts/demo-lab.py traffic --lab iot
 ```
 
-**4. Test Segmentra's features** (IoT and Swarm labs). This runs real scenarios against the lab and prints `PASS` or `FAIL` for each one, ending with the total. It changes the lab while it runs, then restores it, so do not change the lab's hosts or policy in the meantime:
+**4. Test Segmentra's features** (IoT, Swarm and Kubernetes labs). This runs real scenarios against the lab and prints `PASS` or `FAIL` for each one, ending with the total. It changes the lab while it runs, then restores it, so do not change the lab's hosts or policy in the meantime:
 
 ```bash
 python3 scripts/demo-lab.py check --lab iot
@@ -78,6 +81,7 @@ python3 scripts/demo-lab.py check --lab iot
 |---|---|---|
 | IoT | 29 | A few minutes |
 | Swarm | 33 | About six minutes |
+| Kubernetes | 28 | A few minutes |
 
 **5. Look at it in Segmentra, then remove it.** Each lab's section says what to look at. When you have finished:
 
@@ -87,7 +91,7 @@ python3 scripts/demo-lab.py down --lab iot        # add --remove-images to remov
 
 On Windows, write all of these as `python scripts\demo-lab.py ...`.
 
-To run steps 2 to 5 on a disposable Segmentra instead of yours, use `npm run test:lab:iot` or `npm run test:lab:swarm`. Each builds its own database and API, runs the lab from start to finish, and fails if `down` leaves anything behind. `npm run test:lab:base` does the same for the base lab. Your own install is not touched, but a lab that is already up from this folder has to be removed first, because the container names are fixed.
+To run steps 2 to 5 on a disposable Segmentra instead of yours, use `npm run test:lab:iot`, `npm run test:lab:swarm` or `npm run test:lab:k8s`. Each builds its own database and API, runs the lab from start to finish, and fails if `down` leaves anything behind. `npm run test:lab:base` does the same for the base lab. Your own install is not touched, but a lab that is already up from this folder has to be removed first, because the container names are fixed.
 
 ## The base lab
 
@@ -566,18 +570,110 @@ It uses the network `segmentra-swarm` (`--subnet` chooses another free range), t
 
 All nodes share one kernel, so reboots and boot-time rule loading are not tested. The nodes use iptables on Docker 27. The limits in [docker-swarm.md](docker-swarm.md#not-tested-yet) apply: Segmentra does not filter traffic between containers, and log-only tests do not cover published ports.
 
+## The Kubernetes lab
+
+A real Kubernetes cluster in Docker, created with `kind`. Segmentra registers it with its credentials, turns a normal approved policy into a NetworkPolicy, and applies it through the API server. The cluster's network plugin enforces it. It can run next to the other labs, and it uses its own cluster name, `segmentra-lab`, so any other `kind` cluster you have is left alone. Your current `kubectl` context does not change.
+
+```bash
+python3 scripts/demo-lab.py up --lab k8s          # add --cni calico to use Calico instead of kindnet
+python3 scripts/demo-lab.py traffic --lab k8s     # real HTTP requests between pods, compared with the policy
+python3 scripts/demo-lab.py check --lab k8s       # test Segmentra's Kubernetes features against the lab
+python3 scripts/demo-lab.py status --lab k8s      # includes the pods and NetworkPolicies
+python3 scripts/demo-lab.py down --lab k8s
+```
+
+On Windows, write these as `python scripts\demo-lab.py up --lab k8s`, and so on.
+
+```
+ Cluster segmentra-lab: 1 control plane, 2 workers
+
+ lab-shop      orders pod   api 8080, metrics 9100     gets the policy
+ lab-open      orders pod   api 8080, metrics 9100     no policy: the comparison
+ lab-clients   frontend, monitoring, intruder          on both workers, so traffic crosses nodes
+```
+
+**Which network plugin.** The default, `kindnet`, comes with `kind` and needs no extra download. `--cni calico` installs Calico from its project's site. To change plugin, run `down` first. Cilium is not offered here, because it ignores `ipBlock` rules for traffic between pods, so the sample policy's rule by address would not work. `npm run test:integration:k8s -- cilium` covers Cilium, and it needs `cilium-cli`.
+
+### The sample policy
+
+A NetworkPolicy from Segmentra covers a whole namespace, so everything in `lab-shop` is denied unless a rule allows it.
+
+| Client | api (8080) | metrics (9100) | How the rule names it |
+|---|---|---|---|
+| `frontend` | allowed | blocked | A tag mapped to the workload, which becomes a label selector |
+| `monitoring` | blocked | allowed | The pod's address, which becomes an `ipBlock` |
+| `intruder` | blocked | blocked | No rule |
+
+### Run it
+
+```bash
+python3 scripts/demo-lab.py up --lab k8s
+python3 scripts/demo-lab.py check --lab k8s
+```
+
+`up` shows the traffic before and after the policy, ending with:
+
+```
+After the policy
+  namespace   service   frontend      monitoring    intruder
+  lab-shop    api       ok            blocked       blocked
+  lab-shop    metrics   blocked       ok            blocked
+  lab-open    api       ok            ok            ok
+  lab-open    metrics   ok            ok            ok
+
+Ready. Every result matches the policy.
+```
+
+`check` ends with `28 of 28 checks passed`.
+
+### Look at it in Segmentra
+
+- **Kubernetes:** select the cluster `demo-lab-k8s` by its name.
+- **Workloads:** the `frontend` pod, its label and the tag it is mapped to.
+- **Network Policies:** `lab-shop-policy` as **Applied**. Use **Check** to compare it with the cluster, **View** to read the manifest, and **Dry run** to validate without changing anything. After running `check`, older records appear here as **Superseded**, along with a **Generated** record called `handmade` from the safety test.
+
+### What it shows
+
+- **Prefer labels to addresses.** A restarted pod gets a new address. A rule by label keeps working with no new policy, while a rule by address stops matching. Running `up` again creates a new policy version with the current address of `monitoring`.
+- **Default deny starts when a policy selects a pod.** `lab-open` has no policy, so everything reaches it.
+- **Changes on the cluster are noticed.** A policy edited or deleted by hand is reported as drifted or missing, and applying again repairs it.
+- **Segmentra stays in its lane.** It will not overwrite or delete a policy it did not create.
+
+### What `check` tests
+
+`check` changes the lab while it runs, then restores it. It covers:
+
+- traffic, the connection to the API server, and that stored credentials are never returned
+- the generated manifest: label selector, `ipBlock`, whole-namespace scope, the managed-by label
+- **Drift**: a policy edited by hand and one deleted by hand, both repaired by applying again
+- **Safety**: dry run, an older manifest refused, and a policy Segmentra did not create left alone
+- a read-only service account: applying is refused, and the failure is recorded
+- the warning about `ipBlock` when a cluster is marked as Cilium
+- a restarted pod still allowed by its label, and access lost when the tag is taken off the workload
+- removing the policy through Segmentra, then applying it again
+
+`npm run test:lab:k8s` runs `up`, `check`, `traffic` and `down` on a disposable Segmentra and verifies that nothing is left behind. Add `-- --cni=calico` to use Calico. It has passed on macOS with `kindnet` and with Calico on a disposable install, and with `kindnet` with the API outside Docker and on a production install.
+
+### What it adds and leaves behind
+
+It uses the `kind` cluster `segmentra-lab`, the tag `demo-lab-k8s`, the cluster record `demo-lab-k8s` with its stored credentials, and the state file `.demo-lab-k8s.json`. On a production install, the API container is connected to Docker's `kind` network, which every `kind` cluster on the computer shares. `down` disconnects it. After `down`, the cluster and its record are gone, while `Kubernetes lab policy` stays archived and the tag stays because that policy uses it. `up` reuses both. The `kindest/node` image stays, because other `kind` clusters may use it. `up` also works after Docker restarts, and creates a new policy version if pod addresses changed.
+
+### Limits
+
+It is one local cluster on `kind`, tested with `kindnet` and Calico. Cloud logins (EKS, GKE, AKS) and other network plugins are not part of the lab. See [kubernetes.md](kubernetes.md#not-tested-yet). NetworkPolicies from Segmentra cover whole namespaces and ingress only.
+
 ## Commands and options
 
-Every command takes `--lab base`, `--lab iot` or `--lab swarm`. The default is `base`.
+Every command takes `--lab base`, `--lab iot`, `--lab swarm` or `--lab k8s`. The default is `base`.
 
-| Command | Base | IoT | Swarm |
-|---|---|---|---|
-| `up` | Yes | Yes | Yes |
-| `traffic` | Yes | Yes | Yes |
-| `check` | No | Yes | Yes |
-| `siem` | Yes | No | No |
-| `status` | Yes | Yes | Yes |
-| `down` | Yes | Yes | Yes |
+| Command | Base | IoT | Swarm | Kubernetes |
+|---|---|---|---|---|
+| `up` | Yes | Yes | Yes | Yes |
+| `traffic` | Yes | Yes | Yes | Yes |
+| `check` | No | Yes | Yes | Yes |
+| `siem` | Yes | No | No | No |
+| `status` | Yes | Yes | Yes | Yes |
+| `down` | Yes | Yes | Yes | Yes |
 
 ### `up`
 
@@ -588,6 +684,7 @@ Every command takes `--lab base`, `--lab iot` or `--lab swarm`. The default is `
 | `--password PASSWORD` | Its password (see below) |
 | `--subnet CIDR` | Network for the machines, a free /24. Defaults: base `172.28.77.0/24`, IoT (its IT network) `172.28.78.0/24`, Swarm `172.28.80.0/24` |
 | `--ot-subnet CIDR` | IoT lab: the OT network behind the gateway, a free /24. Default: `172.28.79.0/24` |
+| `--cni NAME` | Kubernetes lab: the network plugin, `kindnet` (default) or `calico` |
 | `--set-executor-ssh` | Switches deployments to the SSH executor. A global setting, needed only when Ansible cannot reach the machines |
 
 The password is taken from the first of these that works: `--password`, the environment variable `SEGMENTRA_ADMIN_PASSWORD`, `.env`, the development default. If none works, the script asks.
@@ -628,7 +725,7 @@ Accepts `--api-url`, `--username` and `--password`, like `up`.
 
 ## What the labs change
 
-This describes the base lab. The [IoT](#what-it-adds-and-leaves-behind) and [Swarm](#what-it-adds-and-leaves-behind-1) labs change the same kinds of things, under their own names.
+This describes the base lab. The [IoT](#what-it-adds-and-leaves-behind), [Swarm](#what-it-adds-and-leaves-behind-1) and [Kubernetes](#what-it-adds-and-leaves-behind-2) labs each list what they add.
 
 **On your computer**
 
@@ -665,7 +762,7 @@ Running `up` again reuses the hosts and creates a new policy version. Nothing el
 - **Base lab: hosts only.** Traffic is judged by the rules on the receiving host. Gateways and FORWARD rules are in [the IoT lab](#the-iot-lab).
 - **Segmentra must be on the same computer** as Docker, because the containers need to reach it directly.
 - **Audit Log only.** The sample SIEM shows that the Audit Log is forwarded. Firewall log lines are not forwarded at all.
-- **Windows** has not been tested yet. The script is written to work there, but all three labs have only been run on macOS.
+- **Windows** has not been tested yet. The script is written to work there, but all the labs have only been run on macOS.
 
 ## Troubleshooting
 
@@ -690,6 +787,8 @@ Running `up` again reuses the hosts and creates a new policy version. Nothing el
 | `FAIL` lines from `check` | A scenario did not behave as expected | The line says what failed. Run `up` for that lab to restore it, then `check` again. If it fails again, look at the host's **Active Rules** and the API's log |
 | `check` was stopped halfway | The lab may still be changed: a rule removed, a device unassigned, a manager stopped | Run `up` for that lab again |
 | `The ... lab is already up from this folder` from `npm run test:lab:...` | The test uses the same container names as your lab | Run `down` for that lab first |
+| `The Kubernetes lab needs kind` | `kind` is not installed | [Install it](https://kind.sigs.k8s.io/docs/user/quick-start/#installation), then run `up --lab k8s` again |
+| `A kind cluster called segmentra-lab already exists` | The lab did not create that cluster from this folder | Remove it with `kind delete cluster --name segmentra-lab` if it is not needed |
 | `could not turn on container firewall logging` | The kernel setting could not be changed | The policy still works, but logs may stay empty. Check that Docker can run privileged containers |
 | `down` warns that Segmentra was not cleaned up | Segmentra could not be reached | The machines are still removed. Disable the hosts and archive the policy by hand |
 
@@ -698,7 +797,7 @@ Running `up` again reuses the hosts and creates a new policy version. Nothing el
 | File | Purpose |
 |---|---|
 | `scripts/demo-lab.py` | The command line |
-| `scripts/demolab/` | The labs: `common.py` is shared, `base.py`, `iot.py` and `swarm.py` are one lab each |
+| `scripts/demolab/` | The labs: `common.py` is shared, `base.py`, `iot.py`, `swarm.py` and `k8s.py` are one lab each |
 | `tests/labs/` | Runs a lab from start to finish on a disposable Segmentra |
 | `infra/demo-lab/iot-device.py` | The simulated devices and the client that probes them |
 | `infra/demo-lab/swarm-node.Dockerfile`, `swarm-entrypoint.sh`, `swarm-web.Dockerfile` | The Swarm lab's nodes and sample service |
@@ -706,4 +805,4 @@ Running `up` again reuses the hosts and creates a new policy version. Nothing el
 | `infra/demo-lab/entrypoint.sh` | What starts inside each machine: accounts and services |
 | `infra/demo-lab/kmsg-forward.py` | Passes each machine's own firewall lines to rsyslog |
 | `infra/demo-lab/syslog-receiver.sh` | Runs the sample SIEM in `test-syslog` |
-| `.demo-lab.json`, `.demo-lab-iot.json`, `.demo-lab-swarm.json` | Each running lab's state, not in git |
+| `.demo-lab.json`, `.demo-lab-iot.json`, `.demo-lab-swarm.json`, `.demo-lab-k8s.json` | Each running lab's state, not in git |

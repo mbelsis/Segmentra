@@ -2,7 +2,7 @@
 // Runs a lab of scripts/demo-lab.py from start to finish on a disposable Segmentra: up, its feature
 // checks, down, and then verifies that nothing is left behind. What users run is what is tested.
 //
-//   node tests/labs/run.mjs <lab> [--keep]      (API on http://127.0.0.1:18083, login admin/admin123)
+//   node tests/labs/run.mjs <lab> [--keep] [--cni=calico]      (API on http://127.0.0.1:18083, login admin/admin123)
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
@@ -19,6 +19,7 @@ const LABS = {
   base: { stateFile: '.demo-lab.json', containers: ['test-a', 'test-b', 'test-c', 'test-syslog'], networks: ['segmentra-demo-lab'], checks: false },
   iot: { stateFile: '.demo-lab-iot.json', containers: ['iot-gw', 'iot-hmi', 'iot-eng', 'iot-office', 'iot-plc', 'iot-rtu', 'iot-sensor', 'iot-camera', 'iot-printer'], networks: ['segmentra-iot-it', 'segmentra-iot-ot'], checks: true },
   swarm: { stateFile: '.demo-lab-swarm.json', containers: ['swarm-m1', 'swarm-m2', 'swarm-m3', 'swarm-w1', 'swarm-w2', 'swarm-client-a', 'swarm-client-b'], networks: ['segmentra-swarm'], checks: true },
+  k8s: { stateFile: '.demo-lab-k8s.json', containers: ['segmentra-lab-control-plane', 'segmentra-lab-worker', 'segmentra-lab-worker2'], networks: [], checks: true },
 };
 const keep = process.argv.includes('--keep');
 const labName = process.argv.slice(2).find((a) => !a.startsWith('--'));
@@ -71,7 +72,9 @@ async function verifyNothingLeft() {
   const hosts = (await apiGet(token, '/hosts?limit=1000')).hosts.filter((h) => h.enabled);
   const credentials = (await apiGet(token, '/ssh-credentials')).sshCredentials;
   const assets = (await apiGet(token, '/iot-assets')).assets;
+  const k8sClusters = (await apiGet(token, '/k8s/clusters')).clusters;
   const leftovers = [];
+  if (k8sClusters.length) leftovers.push(`Kubernetes clusters: ${k8sClusters.map((c) => c.name)}`);
   if (hosts.length) leftovers.push(`enabled hosts: ${hosts.map((h) => h.hostname)}`);
   if (credentials.length) leftovers.push(`credentials: ${credentials.map((c) => c.name)}`);
   if (assets.length) leftovers.push(`IoT assets: ${assets.map((a) => a.name)}`);
@@ -92,7 +95,7 @@ async function main() {
   }
   await run('docker', ['version']);
   await startSegmentra();
-  await labCommand('up', '--set-executor-ssh');
+  await labCommand('up', '--set-executor-ssh', ...process.argv.slice(2).filter((a) => a.startsWith('--cni')));
   if (lab.checks) await labCommand('check');
   await run(python, [path.join('scripts', 'demo-lab.py'), 'traffic', '--lab', labName], { show: true });
   if (keep) {

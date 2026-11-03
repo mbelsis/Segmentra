@@ -261,8 +261,9 @@ def versions_of(api, policy_set_id):
     return api.get(f"/policy-sets/{policy_set_id}/versions").get("versions", [])
 
 
-def ensure_approved_version(api, policy_name, description, host_ids, rules):
-    """The newest usable version of the policy, or a new one with `rules`, submitted and approved."""
+def ensure_approved_version(api, policy_name, description, host_ids, rules, scope=None):
+    """The newest usable version of the policy, or a new one with `rules`, submitted and approved.
+    A policy set covers the hosts in `host_ids`, unless `scope` says otherwise."""
     policy = find_policy_set(api, policy_name)
     if policy:
         usable = [v for v in versions_of(api, policy["id"]) if v["status"] in ("APPROVED", "DEPLOYED")]
@@ -271,7 +272,7 @@ def ensure_approved_version(api, policy_name, description, host_ids, rules):
         policy_id = policy["id"]
     else:
         policy_id = api.post("/policy-sets", {
-            "name": policy_name, "description": description, "scopeType": "HOST_LIST", "hostIds": list(host_ids.values()),
+            "name": policy_name, "description": description, **(scope or {"scopeType": "HOST_LIST", "hostIds": list(host_ids.values())}),
         })["policySet"]["id"]
     version_id = api.post(f"/policy-sets/{policy_id}/versions", {"changeSummary": "Sample rules", "interfaceScopeType": "ALL_INTERFACES"})["version"]["id"]
     for rule in rules():

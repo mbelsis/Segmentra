@@ -4,13 +4,14 @@
   python3 scripts/demo-lab.py up             three Docker machines, inventory, a sample policy, deployed
   python3 scripts/demo-lab.py up --lab iot   an IoT/OT gateway, IT clients and simulated devices behind it
   python3 scripts/demo-lab.py up --lab swarm   a real swarm: 3 managers, 2 workers, published services
+  python3 scripts/demo-lab.py up --lab k8s   a kind cluster with a NetworkPolicy from Segmentra (needs kind)
   python3 scripts/demo-lab.py traffic        real traffic, compared with the policy
   python3 scripts/demo-lab.py check --lab iot   test Segmentra's features against the lab
   python3 scripts/demo-lab.py siem           what the sample SIEM received (base lab)
   python3 scripts/demo-lab.py status         what exists right now
   python3 scripts/demo-lab.py down           remove it again
 
-Every command takes --lab (base, iot, swarm; default base). Labs can run side by side.
+Every command takes --lab (base, iot, swarm, k8s; default base). Labs can run side by side.
 
 Needs Python 3.8+, Docker and a running Segmentra (./install.sh --production or ./start.sh dev).
 Uses only the Python standard library. Run with --help on a command for its options.
@@ -23,10 +24,10 @@ import sys
 
 sys.dont_write_bytecode = True  # no __pycache__ folder in the repository
 
-from demolab import base, iot, swarm  # noqa: E402
+from demolab import base, iot, k8s, swarm  # noqa: E402
 from demolab.common import LabError, default_api_url  # noqa: E402
 
-LABS = {"base": base, "iot": iot, "swarm": swarm}
+LABS = {"base": base, "iot": iot, "swarm": swarm, "k8s": k8s}
 
 
 def run_lab_command(args):
@@ -50,6 +51,7 @@ def main():
     up = commands.add_parser("up", parents=[common], help="create everything and deploy the sample policy")
     up.add_argument("--subnet", help="network for the machines; the IT network in the iot lab (a free /24, defaults: base 172.28.77.0/24, iot 172.28.78.0/24, swarm 172.28.80.0/24)")
     up.add_argument("--ot-subnet", help="iot lab: the OT network behind the gateway (a free /24, default: 172.28.79.0/24)")
+    up.add_argument("--cni", choices=k8s.CNI_CHOICES, help="k8s lab: the network plugin (default: kindnet, which needs no extra download)")
     up.add_argument("--set-executor-ssh", action="store_true", help="switch deployments to the SSH executor; a global setting, only needed when Ansible cannot reach the machines")
 
     traffic = commands.add_parser("traffic", parents=[which], help="run real traffic between the machines and compare it with the policy")

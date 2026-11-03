@@ -34,7 +34,7 @@ Through the real API and the SSH executor it checks: readiness on the gateway, t
 
 ## Lab Checks
 
-Run `npm run test:lab:iot`, `npm run test:lab:swarm` or `npm run test:lab:base`, adding `-- --keep` to leave it running. `tests/labs/run.mjs` starts a disposable PostgreSQL and API (port 18083), runs the lab of `scripts/demo-lab.py` from start to finish, including `check` where a lab has it, then runs `down` and fails if containers, networks, enabled hosts, credentials or assets remain. It refuses to run while the same lab is up from this folder. See [docs/lab.md](../docs/lab.md).
+Run `npm run test:lab:iot`, `npm run test:lab:swarm`, `npm run test:lab:k8s` or `npm run test:lab:base`, adding `-- --keep` to leave it running. `tests/labs/run.mjs` starts a disposable PostgreSQL and API (port 18083), runs the lab of `scripts/demo-lab.py` from start to finish, including `check` where a lab has it, then runs `down` and fails if containers, networks, enabled hosts, credentials, assets or Kubernetes clusters remain. It refuses to run while the same lab is up from this folder. See [docs/lab.md](../docs/lab.md).
 
 ## Docker Swarm Checks
 
