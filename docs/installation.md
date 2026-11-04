@@ -219,7 +219,7 @@ Alternatively, switch to the **SSH Direct** executor in the UI: **Admin → Depl
 - **Docker Engine** + **docker compose** (v2)
 - Linux host recommended
 - Network access from Segmentra to managed hosts (SSH, port 22)
-- On managed hosts: an account with full sudo rights and a supported backend: **nftables**, **iptables**, **firewalld**, or **UFW**. Raw reboot persistence needs Debian/Ubuntu `nftables` or `iptables-persistent`, or RHEL-family `nftables`/`iptables-services` without conflicting firewalld. Native firewalld/UFW require Python 3, systemd, and an already active manager: firewalld needs the native policy API and nftables backend; UFW needs IPv6 enabled and both family save/restore tools. Native ACLs are saved in the manager's permanent files and its boot service is enabled and verified; persistence failures roll back deployment. Segmentra never installs target packages or disables firewalld. See [target prerequisites](guide.md#on-target-linux-hosts), [native firewall managers](firewall-managers.md), and [Persistence across reboots](../README.md#persistence-across-reboots).
+- On managed hosts: an account with full sudo rights and a supported backend: **nftables**, **iptables**, **firewalld**, or **UFW**. Raw reboot persistence needs Debian/Ubuntu `nftables` or `iptables-persistent`, or RHEL-family `nftables`/`iptables-services` without conflicting firewalld. Native firewalld/UFW require Python 3, systemd, and an already active manager: firewalld needs the native policy API and nftables backend; UFW needs IPv6 enabled and both family save/restore tools. Native ACLs are saved in the manager's permanent files and its boot service is enabled and verified; persistence failures roll back deployment. Segmentra never installs target packages or disables firewalld. See [target prerequisites](guide.md#on-target-linux-hosts), [native firewall managers](firewall-managers.md), and [Persistence across reboots](coexistence-and-persistence.md#persistence-across-reboots).
 
 ### Docker Architecture
 
@@ -433,13 +433,13 @@ docker compose up -d        # production: the API re-runs migrations + seed on s
 |----------|----------|---------|-------------|
 | `DATABASE_URL` | Yes | — | PostgreSQL connection string |
 | `JWT_SECRET` | Yes | — | JWT signing secret. Min. 32 chars when `NODE_ENV=production` (16 in dev); known placeholder values are refused in production |
-| `SEGMENTRA_KEK_B64` | Prod: yes | — | 32 random bytes, base64. Key for AES-256-GCM encryption of SSH keys/passwords and LDAP passwords. **Fallback:** if unset, the key is derived from `JWT_SECRET` (SHA-256), so rotating `JWT_SECRET` breaks stored secrets. Set it explicitly in production and before storing secrets; changing it later requires re-entering all secrets |
-| `NODE_ENV` | No | — | `production` enables strict checks (set by the Docker image) |
+| `SEGMENTRA_KEK_B64` | Prod: yes | — | 32 random bytes, canonical base64 (`openssl rand -base64 32`). Key for AES-256-GCM encryption of SSH keys/passwords and LDAP passwords. **Fallback (development):** if unset, the key is derived from `JWT_SECRET` (SHA-256), so rotating `JWT_SECRET` breaks stored secrets. Set it explicitly in production and before storing secrets; changing it later requires re-entering all secrets. The API validates it at startup and refuses to start without it in production |
+| `NODE_ENV` | No | — | `production` enables strict checks: JWT length, KEK required in Docker, no default admin password (set by the Docker image) |
 | `PORT` | No | `8080` | API server port |
 | `BUNDLES_DIR` | No | `./data/bundles` | Directory for deployment bundles (`/bundles` in Docker, shared with the Ansible runner) |
 | `ANSIBLE_RUNNER_CONTAINER` | No | `segmentra-ansible-runner` | Container used with `docker exec` by the Ansible executor |
 | `CORS_ORIGIN` | No | Same-origin only in production; allow all in development | Comma-separated HTTP(S) browser origins without paths or wildcards; set for cross-origin UI access |
-| `TRUST_PROXY` | No | — | Express `trust proxy` setting (`1`, `loopback`, CIDR, `true`) when behind a reverse proxy, so client IPs are correct for login rate limiting and audit |
+| `TRUST_PROXY` | No | — | Express `trust proxy` setting (`1`, `loopback`, CIDR, `true`) when behind a reverse proxy, so client IPs are correct for login rate limiting and audit. docker-compose sets `1` (nginx) |
 | `SEGMENTRA_KNOWN_HOSTS` | No | `~/.ssh/known_hosts` | known_hosts file for SSH connections (SSH executor, readiness checks, firewall learning). New hosts are trusted on first use (`StrictHostKeyChecking=accept-new`); a changed host key is rejected |
 | `SEGMENTRA_ALLOW_PRIVATE_WEBHOOKS` | No | `false` | `true` allows notification webhooks to loopback, link-local and cloud-metadata addresses (blocked by default; RFC1918 ranges are always allowed) |
 | `SEGMENTRA_BOOTSTRAP_TOKEN` | No | — | Enables one-time `POST /api/admin/bootstrap` while no users exist; requires `token`, optional `username`, and `password` (12+ characters, at most 72 UTF-8 bytes) |
@@ -448,7 +448,7 @@ docker compose up -d        # production: the API re-runs migrations + seed on s
 | `SEGMENTRA_ASKPASS_DIR` | No | OS temp dir | Directory for the short-lived `SSH_ASKPASS` helper used with passphrase-protected keys (the helper never contains a secret) |
 | `SEGMENTRA_SKIP_MIGRATIONS` | No | `0` | Docker only: `1` skips migrations + seed in the API entrypoint |
 
-docker-compose also reads `POSTGRES_PASSWORD` (or legacy `DB_PASSWORD`), `DB_USER`, `DB_NAME`, `DB_PORT`, `API_PORT`, `API_BIND`, `WEB_PORT`, `WEB_BIND`, `COMPOSE_FILE` (hardened mode) and `DOCKER_GID`.
+docker-compose also reads `POSTGRES_PASSWORD` (or legacy `DB_PASSWORD`), `DB_USER`, `DB_NAME`, `DB_PORT`, `API_PORT`, `API_BIND`, `WEB_PORT`, `WEB_BIND`, `COMPOSE_FILE` (hardened mode) and `DOCKER_GID` (group owning `/var/run/docker.sock`).
 
 The local dev scripts also read `SEGMENTRA_DATABASE_URL` (custom database URL instead of the local container; `start.sh`, `run.sh`, `run.ps1`) and `SEGMENTRA_RESET_DB=1` (`start.sh` / `start.bat`: wipe the Docker volumes before starting — data loss).
 

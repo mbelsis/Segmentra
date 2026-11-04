@@ -55,7 +55,7 @@ This guide walks through every step of using Segmentra — from initial setup to
 - One supported backend: **nftables**, **iptables**, **firewalld**, or **UFW**. `auto` prefers an active firewalld/UFW manager before raw tools.
 - Native firewalld/UFW require **Python 3**, **systemd**, and an already active manager. Firewalld requires the policy API and nftables backend; UFW requires `IPV6=yes` and both IPv4/IPv6 save/restore tools. See [native firewall managers](firewall-managers.md).
 - **rsyslog** installed for firewall learning/audit on raw nftables/iptables. Native-manager learning/log-only mode is not yet supported.
-- **For rules that survive a reboot** (Segmentra never installs packages or disables firewalld; see [Persistence across reboots](../README.md#persistence-across-reboots)):
+- **For rules that survive a reboot** (Segmentra never installs packages or disables firewalld; see [Persistence across reboots](coexistence-and-persistence.md#persistence-across-reboots)):
 
   | Distribution | nftables backend | iptables backend |
   |---|---|---|
@@ -407,7 +407,7 @@ Go to **Approvals** in the sidebar (a number next to it counts the versions wait
 - **Dashboard**: the card **Your approval requests** lists your versions of the last 30 days as waiting, approved (who and when, "ready to deploy") or rejected (who, when and the reason).
 - **Menu**: a red number next to **Policy Sets** counts your rejected versions that still need a fix (a rejected version is not counted once a newer version of the same policy set is waiting, approved or deployed). In the policy set list, the **Versions** column shows a red **Rejected** badge on each policy set that has rejected versions; open it to see the reasons.
 - **Policy set page and version page** show the status, your reason and the rejection reason.
-- **Webhooks and email-style integrations**: `POLICY_APPROVED` and `POLICY_REJECTED` can be subscribed to under Notifications (see [Notifications](#notifications)).
+- **Webhooks and email-style integrations**: `POLICY_APPROVED` and `POLICY_REJECTED` can be subscribed to under Notifications (see [Notifications](#21-notifications)).
 
 ### The audit trail
 
@@ -1111,7 +1111,7 @@ No backups                     →  /var/backups/segmentra/
 - `/var/backups/segmentra/nft.ruleset.<timestamp>` — nftables backups (`table inet segmentra` only)
 - `/var/backups/segmentra/iptables.<timestamp>` / `ip6tables.<timestamp>` — iptables backups (Segmentra chains; the full `iptables-save` is kept as `<file>.full`)
 - `/var/backups/segmentra/segmentra-nft.sh`, `segmentra-iptables.sh` — helper scripts used for unattended restores (they are never run at boot)
-- Reboot persistence, written into the distribution's own files (see [Persistence across reboots](../README.md#persistence-across-reboots)):
+- Reboot persistence, written into the distribution's own files (see [Persistence across reboots](coexistence-and-persistence.md#persistence-across-reboots)):
   - nftables: `/etc/nftables.d/segmentra.nft` (Debian/Ubuntu) or `/etc/nftables/segmentra.nft` (RHEL family), plus one `include` line (with a `# managed by Segmentra` marker) at the end of `/etc/nftables.conf` or `/etc/sysconfig/nftables.conf`
   - iptables: Segmentra's chains and jumps merged into `/etc/iptables/rules.v4` / `rules.v6` (Debian/Ubuntu) or `/etc/sysconfig/iptables` / `ip6tables` (RHEL family); all other lines are left unchanged
   - `/var/backups/segmentra/persist/` — previous version of each of those files before Segmentra changed it

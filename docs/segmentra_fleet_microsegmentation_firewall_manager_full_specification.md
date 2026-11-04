@@ -1,6 +1,6 @@
 # Segmentra
 
-> **Note:** This is the original product specification, kept for reference. The implementation differs in places (some features were built differently, some were not built, and many were added). For the current behavior see the [README](../README.md) and [Architecture.md](Architecture.md).
+> **Note:** This is the original product specification, kept for reference. The implementation differs in places (some features were built differently, some were not built, and many were added). For the current behavior see [Features](features.md) and [Architecture.md](Architecture.md).
 
 > **Current backend support:** The implementation now supports nftables, iptables, firewalld, and UFW. Native firewalld/UFW ACLs persist through the manager's permanent configuration and boot service without a Segmentra agent. Their requirements and learning/interface limitations are documented in [native firewall managers](firewall-managers.md); the original nftables/iptables-only design below is historical.
 

@@ -2,7 +2,7 @@
 
 ## Status of this software
 
-Segmentra changes firewall rules on real hosts, clusters and gateways. It is a **work in progress**, has been tested mainly in lab environments (see [Not Yet Tested](README.md#not-yet-tested)) and has **not had an independent security review**. It is provided "AS IS", without warranty (see [LICENSE](LICENSE), sections 7 and 8). Before using it on production systems:
+Segmentra changes firewall rules on real hosts, clusters and gateways. It is a **work in progress**, has been tested mainly in lab environments (see [Not tested yet](docs/testing-status.md#not-tested-yet)) and has **not had an independent security review**. It is provided "AS IS", without warranty (see [LICENSE](LICENSE), sections 7 and 8). Before using it on production systems:
 
 - test every policy on non-critical hosts first and keep out-of-band (console) access;
 - use the lockout protection, canary rollouts and approvals, and review what a deployment will do;

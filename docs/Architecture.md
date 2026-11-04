@@ -6,11 +6,12 @@ This document provides detailed technical information about Segmentra's architec
 
 ## Table of Contents
 
-1. [File Structure](#file-structure)
-2. [API Endpoints](#api-endpoints)
-3. [Database Schema](#database-schema)
-4. [Deployment Executors](#deployment-executors)
-5. [Advanced Features](#advanced-features)
+1. [Overview](#overview)
+2. [File Structure](#file-structure)
+3. [API Endpoints](#api-endpoints)
+4. [Database Schema](#database-schema)
+5. [Deployment Executors](#deployment-executors)
+6. [Advanced Features](#advanced-features)
    - [Firewall Learning (Traffic Discovery)](#firewall-learning-traffic-discovery)
    - [Drift Detection & Configuration Compliance](#drift-detection--configuration-compliance)
    - [Safety Guardrails](#safety-guardrails)
@@ -33,18 +34,36 @@ This document provides detailed technical information about Segmentra's architec
    - [Notification System](#notification-system)
    - [Security Posture Audit](#security-posture-audit)
    - [Role-Based Access Control (RBAC)](#role-based-access-control-rbac)
-6. [Firewall Backend Configuration](#firewall-backend-configuration)
+7. [Firewall Backend Configuration](#firewall-backend-configuration)
    - [Generated Firewall Rules](#generated-firewall-rules)
    - [Async Deployment Execution](#async-deployment-execution)
    - [Login Security](#login-security)
-7. [Troubleshooting](#troubleshooting)
-8. [Configuration Details](#configuration-details)
+8. [Troubleshooting](#troubleshooting)
+9. [Configuration Details](#configuration-details)
    - [Environment Variables](#environment-variables)
    - [Background Jobs](#background-jobs)
    - [Docker Compose Configuration](#docker-compose-configuration)
    - [Security Considerations](#security-considerations)
    - [Secret Storage & Encryption](#secret-storage--encryption)
    - [Current v1 Limitations](#current-v1-limitations)
+
+---
+
+## Overview
+
+TypeScript monorepo:
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| **API** | `apps/api` | Express + PostgreSQL backend |
+| **UI** | `apps/web` | React (Vite) frontend |
+| **Compiler** | `packages/compiler` | Policy → nftables/iptables rules or native firewalld/UFW artifacts |
+| **Executor** | `packages/executor` | SSH Direct + Ansible deployment |
+| **DB** | `packages/db` | PostgreSQL migrations + seed scripts |
+
+Production runs 4 Docker containers: `segmentra-web` (nginx, port 80), `segmentra-app` (API, published on 127.0.0.1:8080 only), `segmentra-db` (PostgreSQL, 127.0.0.1:15432 only), `segmentra-ansible-runner` (Ansible executor). With the hardened override (`docker-compose.hardened.yml`) the Ansible runner is not started (only with `--profile ansible`) and only nginx is published.
+
+> **Security note — Docker socket:** `segmentra-app` mounts `/var/run/docker.sock` so the Ansible executor can run `docker exec segmentra-ansible-runner ansible-playbook ...`. Access to the Docker socket is equivalent to root on the Docker host. If you only use the SSH executor, remove that mount (and `group_add`) from `docker-compose.yml`, or use the hardened override, which does this.
 
 ---
 

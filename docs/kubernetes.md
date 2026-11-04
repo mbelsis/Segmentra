@@ -6,6 +6,27 @@ Segmentra's Kubernetes module generates **Kubernetes NetworkPolicy** manifests f
 
 With credentials stored, Segmentra talks to the Kubernetes API to **apply** a generated NetworkPolicy, **check** it for drift and **remove** it. It does not discover workloads (they are registered by hand) and does not read anything else from the cluster.
 
+## Capabilities
+
+- **Cluster registry** — register several clusters, each with its CNI plugin (kindnet, Calico, Cilium, Antrea, Weave, kube-router, other) and default namespace.
+- **Stored credentials** — a kubeconfig with an inline token or client certificate, a service-account/bearer token plus the API server CA, or a **cloud login** for managed clusters (see below). They are encrypted like the SSH and LDAP secrets, never shown again, and managed per cluster or in **Admin → Kubernetes Credentials**. **Test connection** checks them. API server addresses in the link-local/cloud-metadata range are refused.
+- **Cloud logins (implemented, not yet tested against real clouds)** — **Amazon EKS** (AWS access key, secret key and optional session token; Segmentra mints the same token as `aws eks get-token`), **Google GKE** (service-account JSON key, exchanged for an access token) and **Azure AKS** (Entra ID service principal). Nothing is executed: no AWS CLI, `gke-gcloud-auth-plugin` or `kubelogin` is needed, and kubeconfigs that rely on those exec plugins are still rejected. You also supply the cluster's API endpoint and CA certificate. See [Not tested yet](#not-tested-yet).
+- **NetworkPolicy generation** — **Generate NetworkPolicy** translates the inbound ALLOW rules of an approved or deployed policy version into an Ingress-only `networking.k8s.io/v1` manifest. Sources become `ipBlock` peers (CIDR, HOST, VLAN and the hosts of a TAG; multiple CIDRs and `any` are supported). Rules NetworkPolicy cannot express (DENY, FORWARD, ICMP, outbound) are skipped with a warning, and a source that resolves to nothing is never widened to `0.0.0.0/0`.
+- **Label-based sources** — register workloads with their pod labels and map them to Segmentra tags. A rule whose source is such a tag allows those pods by `namespaceSelector` + `podSelector`, which works on every CNI. A TAG can mix host IPs and labelled workloads.
+- **Apply, Dry run, Check and Remove from Segmentra** — server-side apply creates or updates the policy; **Dry run** validates it first; **Check** compares the live policy with Segmentra's manifest (in sync, drifted, missing); **Remove** deletes it. Status, last error and drift state are tracked per manifest, and every action is audited.
+- **Safety guards** — Segmentra only touches policies carrying the `app.kubernetes.io/managed-by: segmentra` label and refuses to overwrite or delete a same-named policy it did not create. It refuses to apply an older manifest over a newer one, and apply asks for confirmation showing the generation warnings.
+- **Manual route** — you can still copy the `kubectl apply` command or download the JSON and apply it with your own pipeline.
+
+## Limitations
+
+- **Cilium ignores `ipBlock` for in-cluster traffic.** IP-based sources only match clients outside the cluster there, so a policy built only from CIDR/HOST/VLAN sources blocks all in-cluster clients. Segmentra warns when the cluster CNI is Cilium or unknown; use tags mapped to labelled workloads for in-cluster clients. Calico and kindnet match `ipBlock` for pods.
+- **Ingress only, allow-only.** DENY rules cannot be expressed in a NetworkPolicy, and ICMP and FORWARD rules are skipped.
+- **A policy denies everything else inbound.** Once applied, only traffic allowed by the policy reaches the pods in that namespace. Review the warnings and use Dry run first.
+- **Enforcement depends on the CNI.** A cluster without a NetworkPolicy-capable CNI (for example plain kubenet) accepts the policy but does not enforce it.
+- **Credential limits.** A kubeconfig must carry inline credentials: file paths, exec plugins, auth providers and proxies are rejected (use a cloud login or a token instead). Static tokens expire and must be replaced before then; cloud logins mint a fresh short-lived token on every call. The API server must be reachable from the Segmentra API (inside the container in the Docker deployment) over HTTPS.
+- **Not tracked:** policies applied outside Segmentra stay `Generated`; deleting a cluster record does not remove policies already on the cluster.
+- **Tested only on kind**, plus unit tests for the cloud token minting; see [Not tested yet](#not-tested-yet).
+
 ---
 
 ## How It Works

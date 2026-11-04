@@ -191,7 +191,7 @@ To try all of this without equipment, [the IoT lab](lab.md#the-iot-lab) builds a
 
 ### Service shorthand (protocol catalog)
 
-Segmentra knows the default ports of about 35 common OT/IoT services (Modbus/TCP 502, DNP3 20000, EtherNet/IP 44818, S7/ISO-TSAP 102, OPC UA 4840/4843, BACnet/IP udp 47808, MQTT 1883/8883, CoAP, RTSP, DICOM, SNMP and others). Each has a category, a **security** flag (`cleartext`, `encrypted` or `mixed`) and a note.
+Segmentra knows the default ports of 30 common OT/IoT services (Modbus/TCP 502, DNP3 20000, EtherNet/IP 44818, S7/ISO-TSAP 102, OPC UA 4840/4843, BACnet/IP udp 47808, MQTT 1883/8883, CoAP, RTSP, DICOM, SNMP and others). Each has a category, a **security** flag (`cleartext`, `encrypted` or `mixed`) and a note.
 
 - **Web UI:** in the rule form, "Common service (optional)" fills protocol and ports. Rule lists show service chips; cleartext services are coloured.
 - **Policy as code:** a rule may use `service: modbus-tcp` instead of `protocol` and `ports`. A service on several transports (for example DNP3 on tcp and udp) expands into one rule per transport with consecutive order numbers. Using `service` together with `protocol`, an unknown service, or an order collision is an error.
