@@ -2,6 +2,34 @@
 
 ---
 
+## Development or production mode?
+
+**Development mode runs the app directly on your machine so you can work on the code. Production mode runs everything in Docker with generated secrets.** It's the same application either way, but it's built, run and secured differently.
+
+| | Development | Production |
+|---|---|---|
+| **Where it runs** | API and UI run on the machine with Node; only PostgreSQL is in Docker | Everything is in Docker: database, API, nginx web server and Ansible runner |
+| **What you need** | Docker and Node.js 20+ | Docker only |
+| **UI address** | `http://localhost:5173` (Vite dev server) | `http://localhost` on port 80 (nginx) |
+| **API address** | `localhost:8080` | `127.0.0.1:8080`; browsers reach it through nginx at `/api` |
+| **Admin login** | `admin` / `admin123` by default | Random password, printed once and saved in `.env` |
+| **Secrets** | Generated JWT secret in `.dev-jwt-secret`; the encryption key is derived from it, unless you set one or `.env` has one | Random JWT secret and encryption key in `.env`; the API won't start without them |
+| **Database password** | `segmentra`, or the one in `.env` if a production install wrote one | Random on a new install |
+| **Migrations and seed** | Run by the install and run scripts | Run by the API container each time it starts |
+| **`NODE_ENV`** | Not set to `production` | `production`, which turns on stricter checks such as refusing default JWT secrets |
+| **Lifetime** | Stops with the terminal session; `./run.sh --start --development` (Windows: `.\run.ps1 --start --development`) rebuilds and starts it again | Containers run in the background until stopped |
+
+**Which one to use:**
+
+- **Development:** only if you're changing Segmentra's code.
+- **Production:** for trying or actually using the app, even on a laptop.
+
+"Production" doesn't mean hardened: the UI is plain HTTP and the API container mounts the Docker socket by default. Before exposing it, read [Security hardening](#security-hardening).
+
+**On Windows, use `.\install.ps1 --production`.** In development mode, the code that deploys firewall rules runs directly on Windows. It needs tools like `sshpass`, which Windows doesn't normally have, so password-based SSH logins would probably fail. The Ansible runner container isn't started in development mode either. Production mode has `sshpass` in the API image and starts the runner. This comes from reading the code and hasn't been tested on Windows.
+
+---
+
 ## Quick Start
 
 ### Automated Installation
@@ -30,6 +58,10 @@
 .\install.ps1 --production
 ```
 
+`--hardened` is not available in `install.ps1` yet. The Windows scripts have not been run on real Windows yet, so please report anything that goes wrong.
+
+`--production` generates `JWT_SECRET`, `SEGMENTRA_KEK_B64`, `POSTGRES_PASSWORD` and `SEGMENTRA_ADMIN_PASSWORD` into `.env` (kept if already present) and prints the initial admin password. Back up `.env`: losing `SEGMENTRA_KEK_B64` makes stored SSH/LDAP secrets unrecoverable.
+
 If PowerShell says scripts are disabled or "not digitally signed", allow them for this window only and unblock the downloaded files, then run the installer again:
 
 ```powershell
@@ -49,6 +81,8 @@ Both installers check the prerequisites for the chosen mode first and report eve
 | Node.js 20+ and npm | Development | Offers to install with Homebrew, apt, dnf/yum or winget. If the distribution only has an older version, it asks separately before adding the third-party NodeSource repository (Node.js 22). |
 | `ssh`, `sshpass` | Development, optional | Offered on Linux; otherwise a warning. Password-based SSH credentials need `sshpass`. Production mode includes both in the API image. |
 
+Docker is never installed for you, because it needs admin rights, may need a reboot, and Docker Desktop has licence terms. If Docker can't be reached, you see Docker's own error message. On Windows the installer also finds Docker Desktop when `docker` isn't on `PATH`, waits if its engine is still starting, and stops if it is in Windows containers mode.
+
 Options for `install.sh` and `install.ps1`:
 
 - `--yes` (`-y`) accepts every offer. Without it, and without a terminal to ask on, the installer declines and stops if something required is still missing.
@@ -61,7 +95,7 @@ If Node.js comes from a version manager such as `nvm`, an install can't replace 
 A database belongs to the `.env` that created it: that file holds its password and the key that encrypts the credentials stored in it. Docker Compose names the database volume after the folder, so a fresh copy in a folder with the same name finds the old database.
 
 - **`--production` with an existing database and no matching `.env`** stops without changing anything. Copy your earlier `.env` into this folder to keep the data, or run `docker compose down -v` to delete the data and start over.
-- **If the API does not become healthy**, the installer shows its last log lines and exits with an error instead of reporting success.
+- **If the API does not become healthy within 2 minutes**, the installer shows its last log lines and exits with an error instead of reporting success.
 - **Production, then development in the same folder** works: the development scripts use the database password and the secret key from `.env`. Stop the production stack first, because both use the same ports.
 
 #### Moving from development to production
@@ -96,10 +130,12 @@ Be aware that the database then keeps its development password, the `admin` user
 .\run.ps1 -status -development
 ```
 
+`--stop --development` only stops this folder's API and UI, not other projects' processes.
+
 ### Default Login
 
 - **Development:** `admin` / `admin123` (created by the seed when `SEGMENTRA_ADMIN_PASSWORD` is not set; change it after first login)
-- **Production:** `admin` / the `SEGMENTRA_ADMIN_PASSWORD` value. `./install.sh --production` generates one into `.env` and prints it. With `NODE_ENV=production` the seed never creates the `admin123` default.
+- **Production:** `admin` / the `SEGMENTRA_ADMIN_PASSWORD` value (min. 12 characters). `./install.sh --production` generates one into `.env` and prints it. With `NODE_ENV=production` the seed never creates the `admin123` default; use `SEGMENTRA_BOOTSTRAP_TOKEN` instead if you only use LDAP.
 
 The seed runs on every API container start, but it creates `admin` only on a **fresh database** (the `users` table is empty). Once any user exists it logs `Initial admin bootstrap skipped` and ignores `SEGMENTRA_ADMIN_PASSWORD`, so deleting or renaming `admin` (a common hardening step, after creating your own admin account) is permanent and a restart never brings it back with the password kept in `.env`. You can remove `SEGMENTRA_ADMIN_PASSWORD` from `.env` after the first start. To recover from losing every admin account, use `SEGMENTRA_BOOTSTRAP_TOKEN` with `POST /api/admin/bootstrap`.
 
@@ -198,7 +234,7 @@ npm run db:demo                 # load the sample dataset
 npm run db:demo -- --remove     # delete it again
 ```
 
-It uses the local development database, including the password from `.env` if there is one. What the dataset contains and when the loader refuses to run is in [Demo data](../README.md#demo-data-optional).
+It uses the local development database, including the password from `.env` if there is one. What the dataset contains and when the loader refuses to run is in [Demo data](demo-data.md).
 
 ### Step 9 (Optional): Start Ansible Runner
 
@@ -327,7 +363,7 @@ docker compose exec -T segmentra-db psql -U segmentra -d segmentra < packages/db
 docker compose exec -T segmentra-db psql -U segmentra -d segmentra < packages/db/demo/demo-remove.sql   # to remove it
 ```
 
-The dataset includes demo users with a well-known password, so only load it into an installation you use for evaluation. See [Demo data](../README.md#demo-data-optional).
+The dataset includes demo users with a well-known password, so only load it into an installation you use for evaluation. See [Demo data](demo-data.md).
 
 ### Building the Docker Images
 
@@ -477,6 +513,26 @@ Configure in: **Admin → SSH Credentials**
 - The SSH client in the API image must be OpenSSH 8.4 or newer for passphrase-protected keys (the bundled Debian bookworm image has 9.2)
 - **Applies to:** all hosts (global), hosts with a tag, hosts in a VLAN, one host, or *not assigned* (only used by discovery or when assigned to a host explicitly). Each host uses its explicitly assigned credential, else a host-, tag-, VLAN- and finally the global credential (highest priority, then newest, within a level); **Inventory → Hosts** shows which one each host uses. See the [user guide](guide.md#step-4-add-ssh-credentials)
 - Keys, passphrases and passwords are encrypted at rest with AES-256-GCM (see [security.md](security.md))
+
+---
+
+## Security hardening
+
+Segmentra can change the firewall of every managed host and stores SSH credentials with `sudo` rights on all of them, so a compromised Segmentra means compromised hosts. Before going to production:
+
+- **Use the hardened override:** `./install.sh --production --hardened`, which records it in `.env` so later `docker compose` commands keep using it. By hand: `docker compose -f docker-compose.yml -f docker-compose.hardened.yml up -d --build`. This removes the Docker socket, makes the containers read-only, drops Linux capabilities, sets resource limits and publishes only nginx. It requires the SSH Direct executor.
+- **Network:** serve the UI over TLS (reverse proxy) and make it reachable only from a management network or VPN.
+- **Managed hosts:** use a dedicated SSH user with keys, restricted to logins from the Segmentra host, and set a management VLAN.
+- **Secrets:** `chmod 600 .env` and back it up separately from database backups.
+- **People:** use LDAP with MFA at your identity provider, keep few admins, and monitor the audit log (forward it to your SIEM).
+
+The full guide, including what is already hardened and the remaining gaps, is in [security.md](security.md#hardening-a-production-install).
+
+---
+
+## Backup and restore
+
+**Admin → Backup & Restore** exports the whole configuration (inventory, auto-tagging rules, OT/IoT assets, templates, every policy set with all versions and rules, settings) as one JSON file and restores it into any installation, including a fresh one; `./scripts/segmentra-backup.sh dump` takes a full database dump. What each one contains and how a restore behaves is in [backup-restore.md](backup-restore.md).
 
 ---
 

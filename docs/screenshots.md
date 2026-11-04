@@ -1,6 +1,6 @@
 # Screenshots
 
-Click an image to open it full size. The screenshots show the sample dataset that ships with the repository: load it with `npm run db:demo` after the migrations and the seed (see [Demo data](../README.md#demo-data-optional)) to get the same hosts, policies, OT devices and deployments on your own installation. You can also use the ready-made [test labs](../README.md#test-labs-optional), which uses Docker to set up a live network with three hosts and a syslog collector, so you can see the application working on real firewalls. Screenshots 13 to 19 were taken with the lab.
+Click an image to open it full size. The screenshots show the sample dataset that ships with the repository: load it with `npm run db:demo` after the migrations and the seed (see [Demo data](demo-data.md)) to get the same hosts, policies, OT devices and deployments on your own installation. You can also use the ready-made [test labs](lab.md), which uses Docker to set up a live network with three hosts and a syslog collector, so you can see the application working on real firewalls. Screenshots 13 to 19 were taken with the lab.
 
 <table>
   <tr>

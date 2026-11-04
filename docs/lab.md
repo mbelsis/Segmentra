@@ -11,7 +11,7 @@ The test labs build a small working environment with one command: real firewalls
 
 The labs can run side by side, and each has its own networks, tag, credential and policy.
 
-**Lab or demo data?** The [demo data](../README.md#demo-data-optional) (`npm run db:demo`) fills the UI with sample hosts, policies, OT devices and deployments, but nothing behind them is real, so nothing can be deployed or tested. The labs have fewer records, but their firewalls and traffic are real. To have both, load the demo data first, because its loader refuses a database that already has other hosts.
+**Lab or demo data?** The [demo data](demo-data.md) (`npm run db:demo`) fills the UI with sample hosts, policies, OT devices and deployments, but nothing behind them is real, so nothing can be deployed or tested. The labs have fewer records, but their firewalls and traffic are real. To have both, load the demo data first, because its loader refuses a database that already has other hosts.
 
 > **For testing only.** Some machines are privileged containers, the base lab has a known user password, and the script adds hosts, a policy and a user to the Segmentra it runs against. Do not point it at a production Segmentra.
 
