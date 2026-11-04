@@ -1,0 +1,14 @@
+# Rocky Linux booting real systemd, with the distribution's own firewall packages.
+FROM rockylinux:9
+ARG PACKAGES="iptables-services nftables"
+ARG ENABLE=""
+RUN dnf install -y --setopt=install_weak_deps=False systemd dbus-broker openssh-server sudo python3 iproute procps-ng ${PACKAGES} && dnf clean all
+COPY listen.py /usr/local/bin/listen.py
+COPY seg-listen.service /etc/systemd/system/seg-listen.service
+RUN useradd -m -s /bin/sh segmentra && usermod -p '*' segmentra \
+ && printf 'segmentra ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/segmentra && chmod 440 /etc/sudoers.d/segmentra \
+ && mkdir -p /home/segmentra/.ssh && chown segmentra /home/segmentra/.ssh && chmod 700 /home/segmentra/.ssh \
+ && systemctl enable sshd seg-listen ${ENABLE} \
+ && systemctl mask getty.target console-getty.service systemd-udevd.service
+STOPSIGNAL SIGRTMIN+3
+CMD ["/usr/sbin/init"]

@@ -1,0 +1,19 @@
+# Debian or Ubuntu booting real systemd, with the distribution's own firewall packages.
+ARG BASE=debian:12
+FROM ${BASE}
+ARG PACKAGES=iptables-persistent
+ENV DEBIAN_FRONTEND=noninteractive
+RUN echo 'iptables-persistent iptables-persistent/autosave_v4 boolean false' | debconf-set-selections \
+ && echo 'iptables-persistent iptables-persistent/autosave_v6 boolean false' | debconf-set-selections \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends systemd systemd-sysv dbus openssh-server sudo python3 iproute2 procps iptables nftables ${PACKAGES} \
+ && rm -rf /var/lib/apt/lists/*
+COPY listen.py /usr/local/bin/listen.py
+COPY seg-listen.service /etc/systemd/system/seg-listen.service
+RUN useradd -m -s /bin/sh segmentra && usermod -p '*' segmentra \
+ && printf 'segmentra ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/segmentra && chmod 440 /etc/sudoers.d/segmentra \
+ && mkdir -p /home/segmentra/.ssh && chown segmentra /home/segmentra/.ssh && chmod 700 /home/segmentra/.ssh \
+ && systemctl enable ssh seg-listen \
+ && systemctl mask getty.target console-getty.service systemd-udevd.service systemd-networkd.service systemd-resolved.service
+STOPSIGNAL SIGRTMIN+3
+CMD ["/lib/systemd/systemd"]

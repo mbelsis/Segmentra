@@ -1,0 +1,143 @@
+# Disposable stack for matrix.mjs: Segmentra with the Ansible runner, hosts booting real systemd on Debian, Ubuntu and
+# Rocky Linux (iptables, nftables, UFW, firewalld), and two IoT/OT gateways with a protected device behind each.
+x-host: &host
+  privileged: true
+  cgroup: private
+  tmpfs: [/run, /run/lock]
+  stop_signal: SIGRTMIN+3
+  sysctls:
+    net.ipv6.conf.all.disable_ipv6: 0
+    net.ipv4.ip_forward: 1
+
+services:
+  db:
+    image: postgres:16
+    environment: { POSTGRES_USER: segmentra, POSTGRES_PASSWORD: segmentra, POSTGRES_DB: segmentra }
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U segmentra -d segmentra"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [lab]
+
+  api:
+    build: { context: ../../.., dockerfile: infra/app/Dockerfile }
+    depends_on: { db: { condition: service_healthy } }
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgres://segmentra:segmentra@db:5432/segmentra
+      JWT_SECRET: expiry-matrix-secret-1234567890-abcdefgh
+      SEGMENTRA_KEK_B64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      BUNDLES_DIR: /bundles
+      ANSIBLE_RUNNER_CONTAINER: seg-matrix-runner
+      PORT: 8080
+    ports: ["127.0.0.1:18087:8080"]
+    # Only for the Ansible executor (docker exec into the runner), as in tests/docker-ssh-integration.
+    group_add: ["0"]
+    volumes:
+      - matrix_bundles:/bundles
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [lab]
+
+  ansible-runner:
+    build: { context: ../../../infra/ansible-runner }
+    container_name: seg-matrix-runner
+    volumes:
+      - matrix_bundles:/bundles
+      - matrix_ansible_ssh:/runner/ssh
+    networks: [lab]
+
+  deb-ipt:
+    <<: *host
+    build: { context: ., dockerfile: Dockerfile.apt, args: { BASE: "debian:12", PACKAGES: "iptables-persistent" } }
+    container_name: seg-matrix-deb-ipt
+    networks: { lab: { ipv4_address: 172.31.93.11 } }
+  deb-nft:
+    <<: *host
+    build: { context: ., dockerfile: Dockerfile.apt, args: { BASE: "debian:12", PACKAGES: "iptables-persistent" } }
+    container_name: seg-matrix-deb-nft
+    networks: { lab: { ipv4_address: 172.31.93.12 } }
+  ubu-ipt:
+    <<: *host
+    build: { context: ., dockerfile: Dockerfile.apt, args: { BASE: "ubuntu:24.04", PACKAGES: "iptables-persistent" } }
+    container_name: seg-matrix-ubu-ipt
+    networks: { lab: { ipv4_address: 172.31.93.13 } }
+  ubu-nft:
+    <<: *host
+    build: { context: ., dockerfile: Dockerfile.apt, args: { BASE: "ubuntu:24.04", PACKAGES: "iptables-persistent" } }
+    container_name: seg-matrix-ubu-nft
+    networks: { lab: { ipv4_address: 172.31.93.14 } }
+  roc-ipt:
+    <<: *host
+    build: { context: ., dockerfile: Dockerfile.rocky }
+    container_name: seg-matrix-roc-ipt
+    networks: { lab: { ipv4_address: 172.31.93.15 } }
+  # Follows the advice Segmentra gives for the stock iptables-services file (see matrix.mjs).
+  roc-ips:
+    <<: *host
+    build: { context: ., dockerfile: Dockerfile.rocky }
+    container_name: seg-matrix-roc-ips
+    networks: { lab: { ipv4_address: 172.31.93.19 } }
+  roc-nft:
+    <<: *host
+    build: { context: ., dockerfile: Dockerfile.rocky }
+    container_name: seg-matrix-roc-nft
+    networks: { lab: { ipv4_address: 172.31.93.16 } }
+  ubu-ufw:
+    <<: *host
+    build: { context: ., dockerfile: Dockerfile.apt, args: { BASE: "ubuntu:24.04", PACKAGES: "ufw" } }
+    container_name: seg-matrix-ubu-ufw
+    networks: { lab: { ipv4_address: 172.31.93.17 } }
+  roc-fwd:
+    <<: *host
+    build: { context: ., dockerfile: Dockerfile.rocky, args: { PACKAGES: firewalld, ENABLE: firewalld } }
+    container_name: seg-matrix-roc-fwd
+    networks: { lab: { ipv4_address: 172.31.93.18 } }
+  gw-ipt:
+    <<: *host
+    build: { context: ., dockerfile: Dockerfile.apt, args: { BASE: "debian:12", PACKAGES: "iptables-persistent" } }
+    container_name: seg-matrix-gw-ipt
+    networks: { lab: { ipv4_address: 172.31.93.20 }, ot: { ipv4_address: 172.31.94.2 } }
+  gw-nft:
+    <<: *host
+    build: { context: ., dockerfile: Dockerfile.apt, args: { BASE: "ubuntu:24.04", PACKAGES: "iptables-persistent" } }
+    container_name: seg-matrix-gw-nft
+    networks: { lab: { ipv4_address: 172.31.93.21 }, ot: { ipv4_address: 172.31.94.3 } }
+  plc-ipt:
+    image: node:20-alpine
+    container_name: seg-matrix-plc-ipt
+    cap_add: [NET_ADMIN]
+    command:
+      - sh
+      - -c
+      - |
+        ip route replace default via 172.31.94.2
+        exec node -e 'for (const p of [8081, 8082, 8083]) require("net").createServer((c) => c.end()).listen(p);'
+    networks: { ot: { ipv4_address: 172.31.94.11 } }
+  plc-nft:
+    image: node:20-alpine
+    container_name: seg-matrix-plc-nft
+    cap_add: [NET_ADMIN]
+    command:
+      - sh
+      - -c
+      - |
+        ip route replace default via 172.31.94.3
+        exec node -e 'for (const p of [8081, 8082, 8083]) require("net").createServer((c) => c.end()).listen(p);'
+    networks: { ot: { ipv4_address: 172.31.94.12 } }
+  client:
+    image: node:20-alpine
+    container_name: seg-matrix-client
+    cap_add: [NET_ADMIN]
+    command: ["sh", "-c", "ip route replace 172.31.94.11 via 172.31.93.20 && ip route replace 172.31.94.12 via 172.31.93.21 && exec sleep infinity"]
+    networks: { lab: { ipv4_address: 172.31.93.50 } }
+
+networks:
+  lab:
+    ipam: { config: [{ subnet: 172.31.93.0/24 }] }
+  ot:
+    ipam: { config: [{ subnet: 172.31.94.0/24 }] }
+
+volumes:
+  matrix_bundles:
+  matrix_ansible_ssh:

@@ -40,6 +40,7 @@ python3 scripts/demo-lab.py up --lab k8s  # Kubernetes lab (scripts/demolab/k8s.
 npm run test:lab:iot                  # (also test:lab:swarm, test:lab:k8s, test:lab:base) Runs a lab start to finish on a disposable Segmentra (tests/labs, API on 18083) and verifies down leaves nothing behind
 npm run test:integration:ssh-docker   # Docker-based SSH deployment integration test
 npm run test:integration:expiry       # Policy expiry on a disposable stack (tests/expiry-lab): NOTIFY_ONLY, REMOVE, REVERT, warnings, unreachable hosts; real traffic and webhooks, about 15 minutes
+npm run test:integration:expiry-matrix # REVERT and REMOVE with both executors on systemd containers (Debian, Ubuntu, Rocky; iptables, nftables, UFW, firewalld, gateways), with reboots; tests/expiry-lab/matrix
 npm run test:integration:ot-gateway   # Docker lab: Debian IoT/OT gateway between an IT and an OT network, FORWARD rules, real traffic (tests/ot-gateway-lab)
 
 # Workspace-specific
