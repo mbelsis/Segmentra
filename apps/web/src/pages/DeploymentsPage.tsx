@@ -594,9 +594,7 @@ export function DeploymentsPage() {
                 <small style={{ color: '#666', fontSize: '0.85em' }}>
                   {formExpiryAction === 'NOTIFY_ONLY' && (<span>
                     A notification will be sent when the policy expires. The deployed rules remain active on hosts until you manually remove or replace them.
-                    <br /><br />To restore the previous ruleset, SSH into the host and run:
-                    <br /><strong>nftables:</strong> <code style={{ background: '#f5ebe0', padding: '1px 4px', borderRadius: 3, fontSize: '0.9em' }}>sudo nft -f /var/backups/segmentra/nft.ruleset.&lt;timestamp&gt;</code>
-                    <br /><strong>iptables:</strong> <code style={{ background: '#f5ebe0', padding: '1px 4px', borderRadius: 3, fontSize: '0.9em' }}>sudo iptables-restore &lt; /var/backups/segmentra/iptables.&lt;timestamp&gt;</code>
+                    <br /><br />To go back to the previous policy afterwards, create a new deployment of its version here. Do not restore the backup files in <code style={{ background: '#f5ebe0', padding: '1px 4px', borderRadius: 3, fontSize: '0.9em' }}>/var/backups/segmentra</code> with a plain <code style={{ background: '#f5ebe0', padding: '1px 4px', borderRadius: 3, fontSize: '0.9em' }}>iptables-restore</code> or <code style={{ background: '#f5ebe0', padding: '1px 4px', borderRadius: 3, fontSize: '0.9em' }}>nft -f</code>: they hold only Segmentra's own rules, so that removes other tools' rules (iptables) or merges with the live rules (nftables).
                   </span>)}
                   {formExpiryAction === 'REMOVE' && (<span>
                     On expiry Segmentra connects to every host where this deployment succeeded (using each host's SSH credential) and removes the Segmentra nftables table / iptables chains, so the host falls back to its non-Segmentra rules. Hosts whose rules were since replaced by a later deployment are skipped. Per-host results appear on the deployment page and a notification is sent; hosts where removal failed still enforce the expired policy and need manual cleanup.

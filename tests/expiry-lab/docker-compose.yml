@@ -1,0 +1,94 @@
+# Disposable stack for tests/expiry-lab/run.mjs: Segmentra (database and API), four managed hosts with a real
+# firewall (three iptables, one nftables) and a client that also receives the notification webhooks.
+x-target: &target
+  build:
+    context: ../docker-ssh-integration/target
+    dockerfile_inline: |
+      FROM alpine:3.20
+      RUN apk add --no-cache iproute2 iptables nftables iputils openssh-server shadow sudo
+      COPY entrypoint.sh /entrypoint.sh
+      RUN chmod +x /entrypoint.sh
+      ENTRYPOINT ["/entrypoint.sh"]
+  cap_add: [NET_ADMIN]
+  environment:
+    TARGET_USER: segmentra
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: segmentra
+      POSTGRES_PASSWORD: segmentra
+      POSTGRES_DB: segmentra
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U segmentra -d segmentra"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [lab]
+
+  api:
+    build:
+      context: ../..
+      dockerfile: infra/app/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgres://segmentra:segmentra@db:5432/segmentra
+      JWT_SECRET: expiry-test-secret-1234567890-abcdefgh
+      SEGMENTRA_KEK_B64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      BUNDLES_DIR: /bundles
+      ANSIBLE_RUNNER_CONTAINER: segmentra-unused
+      PORT: 8080
+    ports:
+      - "127.0.0.1:18084:8080"
+    volumes:
+      - expiry_bundles:/bundles
+    networks: [lab]
+
+  tgt-a:
+    <<: *target
+    container_name: seg-expiry-a
+    networks: { lab: { ipv4_address: 172.31.91.11 } }
+  tgt-b:
+    <<: *target
+    container_name: seg-expiry-b
+    networks: { lab: { ipv4_address: 172.31.91.12 } }
+  tgt-c:
+    <<: *target
+    container_name: seg-expiry-c
+    networks: { lab: { ipv4_address: 172.31.91.13 } }
+  tgt-n:
+    <<: *target
+    container_name: seg-expiry-n
+    networks: { lab: { ipv4_address: 172.31.91.14 } }
+
+  client:
+    image: node:20-alpine
+    container_name: seg-expiry-client
+    ports:
+      - "127.0.0.1:18086:9000"
+    command:
+      - node
+      - -e
+      - |
+        const events = [];
+        require('http').createServer((req, res) => {
+          if (req.method === 'POST') {
+            let b = '';
+            req.on('data', (d) => { b += d; });
+            req.on('end', () => { try { events.push(JSON.parse(b)); } catch {} res.end('ok'); });
+          } else res.end(JSON.stringify(events));
+        }).listen(9000);
+    networks: { lab: { ipv4_address: 172.31.91.50 } }
+
+networks:
+  lab:
+    ipam:
+      config:
+        - subnet: 172.31.91.0/24
+
+volumes:
+  expiry_bundles:

@@ -59,7 +59,7 @@ Supported Linux backends are **nftables, iptables, firewalld, and UFW**. Select 
 - **Policy as Code** — policy sets as YAML/JSON documents (tags, VLANs, hosts by name) that can be exported, reviewed in Git and imported again; imports only ever create DRAFT versions. See [Policy as Code](#policy-as-code) below
 - **Policy Impact Analysis** — semantic diff showing new/removed allows and denies per host before approval
 - **High-Risk Detection** — audit policies to flag broad rules, wide scopes, and sensitive port exposure
-- **Policy Expiry** — optional time-limited deployments with 24-hour warnings. On expiry the deployment is marked `EXPIRED`, a notification is sent and the expiry action runs: `NOTIFY_ONLY` does nothing else, `REMOVE` removes Segmentra's rules (`table inet segmentra` or the `SEGMENTRA-*` chains) from the hosts, and `REVERT` redeploys the previous successfully deployed version of the same policy set
+- **Policy Expiry** — optional time-limited deployments with 24-hour warnings. On expiry the deployment is marked `EXPIRED`, a notification is sent and the expiry action runs: `NOTIFY_ONLY` does nothing else, `REMOVE` removes Segmentra's rules (`table inet segmentra` or the `SEGMENTRA-*` chains) from the hosts, and `REVERT` redeploys the previous successfully deployed version of the same policy set (tested end to end with `npm run test:integration:expiry`; see [what is not covered](testing-status.md#not-tested-yet))
 - **Policy Archive & Delete** — archive deployed/approved versions (read-only), delete DRAFT/REJECTED versions
 
 ## Approvals and Separation of Duties
