@@ -232,7 +232,8 @@ async function finalizeDeployment(
     if (dep) {
       const t = await resolveTargetNames(dep.target_query);
       await createAuditEvent({
-        actorUserId: dep.user_id || null,
+        // An automatic expiry revert was not run by a person: its creation is audited as system too.
+        actorUserId: dep.revert_of_deployment_id ? null : dep.user_id || null,
         action: 'DEPLOYMENT_FINISHED',
         entityType: 'DEPLOYMENT',
         entityId: deploymentId,

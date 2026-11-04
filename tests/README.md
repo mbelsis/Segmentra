@@ -58,6 +58,8 @@ Through the real API and the SSH executor it checks: readiness on the gateway, t
 
 `-- --lab ubuntu` tests Ubuntu 24.04 with UFW, nftables and iptables. `-- --lab rhel` tests RHEL 9 with firewalld, iptables and nftables on a VM you install yourself, because it needs your own Red Hat login, and which the test keeps. Create a VirtualBox VM `seg-rhel` (ARM, EFI, USB 3 with a USB keyboard and tablet, NAT on the first adapter forwarding `127.0.0.1:22104` to `22104`, the internal network `segmentra-expiry` on the second), and attach the `aarch64` RHEL boot ISO and an ISO labelled `OEMDRV` holding `tests/expiry-lab/vm/rhel/ks.cfg`. In the installer, choose **Connect to Red Hat** and log in, then **Begin Installation**. Replace the public key in `ks.cfg` with one whose private key is at `tests/expiry-lab/vm/rhel/.key/id` (not in git). Remove the ISOs before booting from the disk.
 
+For testing by hand with real addresses from the Mac, create a host-only network (`VBoxManage hostonlynet add --name <name> ...`) and set `SEG_HOSTONLY_NET=<name>` when running `vagrant up` in `tests/expiry-lab/vm`; each VM then gets a third adapter on it, with DHCP.
+
 ## Lab Checks
 
 Run `npm run test:lab:iot`, `npm run test:lab:swarm`, `npm run test:lab:k8s` or `npm run test:lab:base`, adding `-- --keep` to leave it running. `tests/labs/run.mjs` starts a disposable PostgreSQL and API (port 18083), runs the lab of `scripts/demo-lab.py` from start to finish, including `check` where a lab has it, then runs `down` and fails if containers, networks, enabled hosts, credentials, assets or Kubernetes clusters remain. It refuses to run while the same lab is up from this folder. See [docs/lab.md](../docs/lab.md).

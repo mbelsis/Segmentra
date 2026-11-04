@@ -249,6 +249,7 @@ export function revertCancelScript(token: string, marker: string): string {
       `case "$(systemctl is-active ${shq(`${unit}.service`)} 2>/dev/null)" in ${ACTIVE_SERVICE_STATES}) exit 9 ;; esac`,
       `if [ -e ${shq(marker)} ]; then exit 9; fi`,
       `systemctl reset-failed ${shq(`${unit}.timer`)} ${shq(`${unit}.service`)} >/dev/null 2>&1`,
+      `rm -f ${shq(revertScriptFile(marker))}`,
       'exit 0'
     ].join('\n');
   }
@@ -259,6 +260,7 @@ export function revertCancelScript(token: string, marker: string): string {
     'sleep 1',
     'if kill -0 "$pid" 2>/dev/null; then exit 1; fi',
     `if [ -e ${shq(marker)} ]; then exit 9; fi`,
+    `rm -f ${shq(revertScriptFile(marker))}`,
     'exit 0'
   ].join('\n');
 }
@@ -272,7 +274,12 @@ export type RevertState = 'pending' | 'running' | 'done' | 'failed' | 'gone' | '
  */
 export function revertFiringScript(marker: string, restoreScript: string): string {
   return `touch ${shq(marker)}; ( ${restoreScript}
-); seg_rrc=$?; echo "$seg_rrc" > ${shq(`${marker}.rc`)}; exit "$seg_rrc"`;
+); seg_rrc=$?; echo "$seg_rrc" > ${shq(`${marker}.rc`)}; rm -f ${shq(revertScriptFile(marker))}; exit "$seg_rrc"`;
+}
+
+/** Where the scheduled revert's script is kept on the host until it fires or is cancelled. */
+export function revertScriptFile(marker: string): string {
+  return `${marker}.sh`;
 }
 
 /**
@@ -488,10 +495,14 @@ async function deployToHost(host: SshHost, opts: DeployOpts): Promise<SshExecuti
     const marker = `${BACKUP_DIR}/revert-fired.${timestamp}-${nonce}`;
     const firingScript = revertFiringScript(marker, restoreScript);
     const delay = Math.max(30, Math.floor(opts.rollbackTimeoutSec));
-    const watchdog = `sleep ${delay}; ${firingScript}`;
+    // The script lives in a file: systemd 252 (RHEL 9, Debian 12) corrupts an inline "sh -c" command when its transient
+    // unit is re-read, and any daemon-reload before the timer fires does that (applying firewalld runs "systemctl enable").
+    const firingFile = revertScriptFile(marker);
+    const watchdog = `sleep ${delay}; /bin/sh ${shq(firingFile)}`;
     const scheduleScript = [
+      `printf '%s\\n' ${shq(firingScript)} > ${shq(firingFile)} && chmod 700 ${shq(firingFile)} || exit 1`,
       'if command -v systemd-run >/dev/null 2>&1 && [ -d /run/systemd/system ] &&',
-      `   systemd-run --quiet --unit=${unit} --on-active=${delay} --timer-property=AccuracySec=1s /bin/sh -c ${shq(firingScript)} >/dev/null 2>&1; then`,
+      `   systemd-run --quiet --unit=${unit} --on-active=${delay} --timer-property=AccuracySec=1s /bin/sh ${shq(firingFile)} >/dev/null 2>&1; then`,
       `  echo "systemd:${unit}"`,
       'else',
       `  nohup sh -c ${shq(watchdog)} >/dev/null 2>&1 </dev/null &`,

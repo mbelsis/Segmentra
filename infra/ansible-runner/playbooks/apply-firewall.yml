@@ -244,15 +244,24 @@
       include_tasks: apply-manager.yml
       when: (segmentra_backend | default('')) in ['firewalld', 'ufw']
 
+    # The revert lives in a file: systemd 252 (RHEL 9, Debian 12) corrupts an inline "sh -c" command when its transient
+    # unit is re-read, and any daemon-reload before the timer fires does that.
+    - name: Write the unattended revert script
+      become: true
+      copy:
+        dest: "{{ seg_revert_marker }}.sh"
+        mode: "0700"
+        content: "{{ seg_revert_cmd }}\n"
+
     - name: Schedule the unattended revert before changing the firewall
       become: true
       shell: |
         PATH="$PATH:/usr/sbin:/sbin"
         if command -v systemd-run >/dev/null 2>&1 && [ -d /run/systemd/system ] &&
-           systemd-run --quiet --unit={{ seg_revert_unit | quote }} --on-active={{ seg_revert_delay }} --timer-property=AccuracySec=1s /bin/sh -c {{ seg_revert_cmd | quote }} >/dev/null 2>&1; then
+           systemd-run --quiet --unit={{ seg_revert_unit | quote }} --on-active={{ seg_revert_delay }} --timer-property=AccuracySec=1s /bin/sh {{ (seg_revert_marker ~ '.sh') | quote }} >/dev/null 2>&1; then
           echo "systemd:{{ seg_revert_unit }}"
         else
-          nohup sh -c {{ ('sleep ' ~ seg_revert_delay ~ '; ' ~ seg_revert_cmd) | quote }} >/dev/null 2>&1 </dev/null &
+          nohup sh -c {{ ('sleep ' ~ seg_revert_delay ~ '; /bin/sh ' ~ ((seg_revert_marker ~ '.sh') | quote)) | quote }} >/dev/null 2>&1 </dev/null &
           echo "pid:$!"
         fi
       register: seg_revert_sched

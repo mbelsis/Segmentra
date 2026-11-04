@@ -519,7 +519,7 @@ async function sendExpiringSoonWarnings() {
     const hoursLeft = Math.round((new Date(dep.expires_at).getTime() - Date.now()) / 3600000);
     await sendNotification({
       eventType: 'POLICY_EXPIRING_SOON',
-      subject: `Policy expiring in ${hoursLeft}h: ${dep.policy_set_name} v${dep.version_number}`,
+      subject: `Policy expiring ${hoursLeft < 1 ? 'in under an hour' : `in ${hoursLeft}h`}: ${dep.policy_set_name} v${dep.version_number}`,
       body: {
         deploymentId: dep.id,
         policySetName: dep.policy_set_name,

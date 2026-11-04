@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { LIVE_HASH_VERSION_PREFIX, checkHostPersistence, readHostFirewallLogs, readHostFirewallRules, type SshHostInfo } from '@segmentra/executor';
 import { activeFirewallSession } from '../services/host-lock.js';
-import { parseFirewallLogs, parseLogTimestamp } from '../services/log-parser.js';
+import { parseFirewallLogs, parseLogTimestamp, expandRuleLabel } from '../services/log-parser.js';
 import { pool } from '../db/pool.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { getSshCredentialForHost, sshAuthFields, type MaterializedSshCredential } from '../services/ssh-credentials.js';
@@ -34,10 +34,19 @@ function sshHostInfo(host: any, cred: MaterializedSshCredential): SshHostInfo {
  * and is NOT comparable with a live read. Hashes recorded by older versions covered the whole
  * ruleset and lack the "v2:" prefix; they cannot be compared.
  */
+function rulesMissingMessage(backend?: string | null): string {
+  if (backend === 'firewalld') return "Segmentra's policies are not active in firewalld on the host: firewalld may be stopped, or the policies were removed";
+  if (backend === 'ufw') return "Segmentra's rules are not active in UFW on the host: UFW may be disabled, or the rules were removed";
+  if (backend === 'nftables') return "Segmentra's nftables table is missing on the host";
+  if (backend === 'iptables') return "Segmentra's iptables chains or their INPUT/OUTPUT jumps are missing on the host";
+  return 'Segmentra firewall table/chain or its INPUT/OUTPUT jump is missing on the host';
+}
+
 function compareHashes(
   currentHash: string | undefined | null,
   lastDeployment: any,
-  segmentraPresent?: boolean
+  segmentraPresent?: boolean,
+  backend?: string | null
 ): { status: ComplianceStatus; message?: string } {
   if (!lastDeployment) return { status: 'unknown', message: 'no successful deployment recorded for this host' };
   // The expiry REMOVE action deliberately stripped Segmentra's rules; a missing table/chain is expected.
@@ -49,7 +58,7 @@ function compareHashes(
   // SEGMENTRA chains at all, which must not be reported as drift.
   if (baseline && !baseline.startsWith(LIVE_HASH_VERSION_PREFIX)) return { status: 'unknown', message: OLD_BASELINE_MESSAGE };
   if (segmentraPresent === false) {
-    return { status: 'drifted', message: 'Segmentra firewall table/chain or its INPUT/OUTPUT jump is missing on the host' };
+    return { status: 'drifted', message: rulesMissingMessage(backend) };
   }
   if (!baseline) return { status: 'unknown', message: NO_LIVE_BASELINE_MESSAGE };
   if (!currentHash) return { status: 'error', message: 'could not compute live ruleset hash' };
@@ -104,7 +113,7 @@ async function checkHost(host: any, lastDeployment: any) {
         lastDeployment: lastDeploymentInfo(lastDeployment)
       };
     }
-    const cmp = compareHashes(readResult.rulesHash, lastDeployment, readResult.segmentraPresent);
+    const cmp = compareHashes(readResult.rulesHash, lastDeployment, readResult.segmentraPresent, readResult.backend ?? host.firewall_backend);
     // Reboot persistence: does the distribution's boot configuration hold the same Segmentra
     // state as the running rules? (read-only; does not change the compliance status)
     const p = await checkHostPersistence(sshHostInfo(host, cred), readResult.backend);
@@ -276,13 +285,23 @@ complianceRouter.get('/hosts/:hostId/firewall-logs', async (req, res) => {
     cred = await getSshCredentialForHost(host.id);
     const read = await readHostFirewallLogs(sshHostInfo(host, cred), limit);
     const active = await activeFirewallSession(host.id);
+    // Kernel log prefixes are short, so long rule names arrive cut off: show the full name from the host's policies.
+    const { rows: knownRules } = await pool.query(
+      `SELECT pr.comment, pr.action FROM policy_rules pr
+         JOIN deployments d ON d.policy_version_id = pr.policy_version_id
+         JOIN deployment_hosts dh ON dh.deployment_id = d.id
+        WHERE dh.host_id = $1 AND dh.status = 'SUCCEEDED' AND pr.comment IS NOT NULL AND pr.comment <> ''
+        ORDER BY dh.finished_at DESC NULLS LAST
+        LIMIT 500`,
+      [host.id]
+    );
     const entries = parseFirewallLogs(read.lines.join('\n'))
       .filter((e) => !e.loopback)
       .map((e) => ({
         at: parseLogTimestamp(e.timestamp),
         timestamp: e.timestamp,
         action: e.action,
-        // Log-only sessions never block. Native firewalld rules also use the FW-AUDIT prefix, and those do enforce.
+        // Log-only sessions never block. firewalld rules deployed by older versions also use the FW-AUDIT prefix, and those do enforce.
         logOnly: e.rawLine.includes('FW-AUDIT') && !['firewalld', 'ufw'].includes(host.firewall_backend),
         direction: e.direction,
         sourceIp: e.sourceIp,
@@ -290,7 +309,7 @@ complianceRouter.get('/hosts/:hostId/firewall-logs', async (req, res) => {
         protocol: e.protocol,
         sourcePort: e.sourcePort ?? null,
         destinationPort: e.destinationPort ?? null,
-        rule: e.ruleLabel ?? null,
+        rule: expandRuleLabel(e.ruleLabel, e.action, knownRules),
         inInterface: e.inInterface ?? null,
         outInterface: e.outInterface ?? null
       }))

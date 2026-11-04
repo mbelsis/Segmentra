@@ -862,8 +862,8 @@ small {
 }
 
 .active-rules-label {
-  display: inline-block;
-  min-width: 110px;
+  display: block;
+  margin-bottom: 2px;
   color: #78644e;
   font-size: 12px;
   text-transform: uppercase;
@@ -944,7 +944,8 @@ small {
   line-height: 1.45;
   max-height: 420px;
   overflow: auto;
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* Firewall logs modal (Inventory -> host -> Peek at Logs) */
@@ -1126,4 +1127,20 @@ button.approval-request-rejected { background: #faf0ee; border-color: #e8c4bf; }
   padding: 8px 0;
   border-top: 1px solid #e8e0d4;
   overflow-wrap: anywhere;
+}
+
+/* Inventory hosts table: the Actions column stays visible when the table is wider than the window */
+.sticky-actions {
+  position: sticky;
+  right: 0;
+  background: #fffdf9;
+  box-shadow: -6px 0 6px -6px rgba(43, 37, 32, 0.25);
+}
+th.sticky-actions {
+  z-index: 2;
+}
+.readiness-row-content {
+  position: sticky;
+  left: 0;
+  max-width: min(860px, 75vw);
 }

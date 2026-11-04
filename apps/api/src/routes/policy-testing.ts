@@ -366,6 +366,12 @@ policyTestingRouter.post('/start', requireRole('operator', 'approver', 'admin'),
     if (message.startsWith('Policy failed to compile')) {
       return res.status(400).json({ error: 'policy_compile_failed', message });
     }
+    if (/not supported for native firewalld\/UFW/.test(message)) {
+      return res.status(409).json({
+        error: 'native_backend_unsupported',
+        message: 'Policy tests are not supported on firewalld or UFW hosts yet. Nothing was changed on the host.'
+      });
+    }
     res.status(500).json({ error: 'test_start_failed', message });
   } finally {
     if (policyFilePath && fs.existsSync(policyFilePath)) { try { fs.unlinkSync(policyFilePath); } catch { /* ignore */ } }

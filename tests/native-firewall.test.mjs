@@ -114,3 +114,30 @@ test('firewalld reload check ignores interface bindings, which NetworkManager ma
   assert.equal(compare(zone('enp0s8 enp0s9', '22/tcp'), zone('', '22/tcp')), true);
   assert.equal(compare(zone('enp0s8', '22/tcp 9999/tcp'), zone('', '22/tcp')), false);
 });
+
+test('UFW persistence check treats a /0 source as no source, as iptables-save prints it', () => {
+  const py = `${SEGMENTRA_MANAGER_PY.split('def main():')[0]}\nimport json as _j, sys as _s\nprint(_j.dumps([normalize_iptables(a) for a in _s.argv[1:]]))`;
+  const same = (a, b) => {
+    const [x, y] = JSON.parse(execFileSync('python3', ['-c', py, a, b], { encoding: 'utf8' }));
+    return JSON.stringify(x) === JSON.stringify(y);
+  };
+  const saved = (src) => `-A SEGMENTRA-IN -p tcp -s ${src} --dport 8083 -m comment --comment "c" -j DROP`;
+  const live = '-A SEGMENTRA-IN -p tcp -m tcp --dport 8083 -m comment --comment "c" -j DROP';
+  assert.equal(same(saved('0.0.0.0/0'), live), true);
+  assert.equal(same(saved('::/0'), live), true);
+  assert.equal(same(saved('10.0.0.0/8'), live), false);
+  assert.equal(same(saved('10.0.0.5'), '-A SEGMENTRA-IN -s 10.0.0.5/32 -p tcp -m tcp --dport 8083 -m comment --comment "c" -j DROP'), true);
+});
+
+test('firewalld log prefixes carry the rule name, so Peek at Logs can show it', () => {
+  const input = policyInput('firewalld');
+  input.rules[0].logMode = 'LOG';
+  input.rules[0].comment = 'Database <clients>';
+  const text = compileHostPolicy(input).text;
+  assert.match(text, /log prefix=\\?"SEGMENTRA: ALLOW Database/);
+  assert.doesNotMatch(text, /FW-AUDIT/);
+});
+
+test('UFW restore deletes Segmentra chains when its block is gone', () => {
+  assert.match(SEGMENTRA_MANAGER_PY, /run\(tool, '-X', chain, optional=True\)/);
+});

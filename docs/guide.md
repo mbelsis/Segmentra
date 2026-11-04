@@ -624,7 +624,7 @@ For `firewalld`/`ufw`, it delegates to `apply-manager.yml`: install the one-shot
 7. **Apply rules** (`nft -f`, replacing only `table inet segmentra`, or the iptables chains and their `INPUT`/`OUTPUT`(/`FORWARD`) jumps)
 8. **On failure: rollback** from this run's backup and fail with an error message
 
-The raw Ansible path has no post-apply reachability check with automatic revert. The native-manager path has both. All Ansible backends ignore canary/progressive gates.
+Both the raw and the native-manager Ansible paths check reachability after applying, and revert by themselves if the host cannot be reached. All Ansible backends ignore canary/progressive gates.
 
 ### Ansible Pros and Cons
 

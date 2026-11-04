@@ -1135,12 +1135,12 @@ function compileFirewalld(input: CompileInput): string {
   const rules: Record<string, string[]> = { 'segmentra-in': [], 'segmentra-out': [], 'segmentra-fwd': [] };
   let priority = -32000;
   const emit = (name: string, family: Family, source: string | null, destination: string | null,
-    protocol: string, ports: Array<[number, number]> | null, action: 'ALLOW' | 'DENY', log = 'NONE') => {
+    protocol: string, ports: Array<[number, number]> | null, action: 'ALLOW' | 'DENY', log = 'NONE', label = '') => {
     for (const port of ports ?? [null]) {
       if (priority >= 30000) throw new CompileError('firewalld policy expansion exceeds rich-rule priority capacity');
       const element = port ? `<port port="${port[0] === port[1] ? port[0] : `${port[0]}-${port[1]}`}" protocol="${protocol}"/>`
         : protocol === 'any' ? '' : `<protocol value="${protocol === 'icmp' && family === 6 ? 'ipv6-icmp' : protocol}"/>`;
-      rules[name].push(`<rule family="ipv${family}" priority="${priority++}">${source ? `<source address="${xml(source)}"/>` : ''}${destination ? `<destination address="${xml(destination)}"/>` : ''}${element}${log === 'NONE' ? '' : `<log prefix="FW-AUDIT: ${action}: ">${log === 'LOG_RATE_LIMITED' ? '<limit value="5/s"/>' : ''}</log>`}<${action === 'ALLOW' ? 'accept' : 'drop'}/></rule>`);
+      rules[name].push(`<rule family="ipv${family}" priority="${priority++}">${source ? `<source address="${xml(source)}"/>` : ''}${destination ? `<destination address="${xml(destination)}"/>` : ''}${element}${log === 'NONE' ? '' : `<log prefix="${xml(`${sanitizeText(`SEGMENTRA: ${action} ${label}`.trim(), NFT_LOG_PREFIX_BODY_MAX_BYTES)}: `)}">${log === 'LOG_RATE_LIMITED' ? '<limit value="5/s"/>' : ''}</log>`}<${action === 'ALLOW' ? 'accept' : 'drop'}/></rule>`);
     }
   };
   for (const family of [4, 6] as Family[]) {
@@ -1157,7 +1157,7 @@ function compileFirewalld(input: CompileInput): string {
       for (const match of forwardMatches(r, sets)) {
         for (const fam of match.family ? [match.family] : [4, 6] as Family[]) {
           for (const source of match.src.iptAddrs.length ? match.src.iptAddrs : [null]) {
-            for (const dest of match.dst.iptAddrs.length ? match.dst.iptAddrs : [null]) emit('segmentra-fwd', fam, source, dest, r.protocol, ports, r.action, r.logMode);
+            for (const dest of match.dst.iptAddrs.length ? match.dst.iptAddrs : [null]) emit('segmentra-fwd', fam, source, dest, r.protocol, ports, r.action, r.logMode, sanitizeText(r.comment, RULE_COMMENT_MAX_BYTES));
           }
         }
       }
@@ -1165,8 +1165,8 @@ function compileFirewalld(input: CompileInput): string {
       for (const target of resolveTargets(r, sets)) {
         for (const fam of target.family ? [target.family] : [4, 6] as Family[]) {
           for (const address of target.iptAddrs.length ? target.iptAddrs : [null]) {
-            if (r.direction === 'IN' || r.direction === 'BOTH') emit('segmentra-in', fam, address, null, r.protocol, ports, r.action, r.logMode);
-            if (r.direction === 'OUT' || r.direction === 'BOTH') emit('segmentra-out', fam, null, address, r.protocol, ports, r.action, r.logMode);
+            if (r.direction === 'IN' || r.direction === 'BOTH') emit('segmentra-in', fam, address, null, r.protocol, ports, r.action, r.logMode, sanitizeText(r.comment, RULE_COMMENT_MAX_BYTES));
+            if (r.direction === 'OUT' || r.direction === 'BOTH') emit('segmentra-out', fam, null, address, r.protocol, ports, r.action, r.logMode, sanitizeText(r.comment, RULE_COMMENT_MAX_BYTES));
           }
         }
       }

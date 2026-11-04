@@ -202,6 +202,12 @@ def restore_state(backend, state):
         for path, content in changes:
             atomic(path, content)
         run('ufw', 'reload')
+        # A reload leaves chains it does not know about. Without Segmentra's block nothing jumps to them, so delete them.
+        for path, tool in zip(UFW_FILES, ('iptables', 'ip6tables')):
+            if not state[str(path)]:
+                for chain in ('SEGMENTRA-IN', 'SEGMENTRA-OUT', 'SEGMENTRA-FWD'):
+                    run(tool, '-F', chain, optional=True)
+                    run(tool, '-X', chain, optional=True)
     else:
         for name in NAMES:
             path = POLICY_DIR / (name + '.xml')
@@ -271,7 +277,12 @@ def normalize_iptables(line):
                      'neighbour-advertisement': '136', 'neighbor-advertisement': '136',
                      'router-solicitation': '133', 'router-advertisement': '134'}.get(value, value)
         if option in ('-s', '-d'):
-            value = str(ipaddress.ip_network(value, strict=False))
+            network = ipaddress.ip_network(value, strict=False)
+            # iptables-save leaves out a source or destination of "anywhere", so a /0 means the same as none.
+            if network.prefixlen == 0:
+                i += 2
+                continue
+            value = str(network)
         parts.append((option, value))
         i += 2
     return sorted(parts)

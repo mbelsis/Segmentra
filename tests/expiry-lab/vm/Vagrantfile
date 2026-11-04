@@ -22,8 +22,11 @@ Vagrant.configure('2') do |config|
         v.cpus = 2
         # Set directly: Vagrant's collision check reported this free port as in use. Loopback only.
         v.customize ['modifyvm', :id, '--natpf1', "seg-ssh,tcp,127.0.0.1,#{vm[:ssh]},,#{vm[:ssh]}"]
+        # Optional host-only network, for manual testing from the Mac with real addresses (VBoxManage hostonlynet).
+        v.customize ['modifyvm', :id, '--nic3', 'hostonlynet', '--host-only-net3', ENV['SEG_HOSTONLY_NET'], '--nictype3', '82540EM'] if ENV['SEG_HOSTONLY_NET']
       end
       c.vm.provision 'shell', path: 'provision.sh', args: [vm[:ssh].to_s, ENV.fetch('SEG_PUBKEY', '')]
+      c.vm.provision 'shell', path: 'hostonly-dhcp.sh' if ENV['SEG_HOSTONLY_NET']
     end
   end
 end

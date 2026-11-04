@@ -2,12 +2,22 @@
 # run in `serial` batches so the 180 s rollback window does not depend on the fleet size). Never fails the
 # host here: failures are recorded in seg_apply_failed_msg and reported by the last play (in serial mode a
 # batch whose hosts all fail would end the whole playbook). Part 1: apply-manager-prepare.yml.
+# The rollback lives in a file: systemd 252 (RHEL 9, Debian 12) corrupts an inline "sh -c" command when its transient
+# unit is re-read, and applying the policy runs "systemctl enable", which reloads systemd.
+- name: Write the unattended rollback script
+  become: true
+  copy:
+    dest: "{{ manager_marker }}.sh"
+    mode: '0700'
+    content: |
+      touch {{ manager_marker | quote }}
+      python3 {{ (segmentra_backup_dir ~ '/segmentra-manager.py') | quote }} {{ segmentra_backend | quote }} restore {{ manager_backup | quote }}
+
 - name: Schedule unattended rollback before changing the native firewall
   become: true
   shell: >-
     systemd-run --quiet --unit={{ manager_unit | quote }} --on-active=180
-    --timer-property=AccuracySec=1s /bin/sh -c
-    {{ ('touch ' ~ manager_marker ~ '; python3 ' ~ segmentra_backup_dir ~ '/segmentra-manager.py ' ~ segmentra_backend ~ ' restore ' ~ manager_backup) | quote }}
+    --timer-property=AccuracySec=1s /bin/sh {{ (manager_marker ~ '.sh') | quote }}
   register: manager_sched
   failed_when: false
 

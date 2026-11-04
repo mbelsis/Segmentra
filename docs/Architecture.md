@@ -937,7 +937,7 @@ Segmentra supports two deployment executors, selectable in **Admin → Deploymen
 
 - Runs `infra/ansible-runner/playbooks/apply-firewall.yml` against all target hosts in one playbook run (Ansible's parallel forks)
 - On a failed apply, a `rescue` block restores the host from that run's scoped backup (raw table/chains or native Segmentra policy objects/blocks)
-- Raw nftables/iptables have no lockout auto-revert; native firewalld/UFW use `apply-manager.yml` with a systemd rollback timer, fresh SSH connection, and strict persistence verification
+- Raw nftables/iptables schedule an unattended revert and check reachability; native firewalld/UFW use `apply-manager.yml` with a systemd rollback timer, fresh SSH connection, and strict persistence verification
 - The `CANARY` / `PROGRESSIVE` gates are not applied: all hosts are deployed in the same run
 - Requires the Ansible container (`segmentra-ansible-runner`) and the Docker socket in the API container
 - Uses `become: true` (sudo) for privileged operations; the sudo password (if any) is passed as `ansible_become_password` in a temporary `host_vars` file, passphrase-protected keys are loaded into an `ssh-agent` in the runner (see [security.md](security.md#how-secrets-are-used-when-connecting-to-hosts))

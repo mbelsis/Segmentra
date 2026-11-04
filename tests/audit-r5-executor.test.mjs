@@ -24,6 +24,7 @@ import {
   parseRevertState,
   remoteTimeoutWrap,
   revertFiringScript,
+  revertScriptFile,
   revertStatusScript
 } from '../packages/executor/dist/index.js';
 
@@ -282,4 +283,22 @@ test('iptables persist on Rocky Linux 9 with iptables-services: stock file is le
   assert.match(out, /merged=[1-9]/);
   assert.match(section('persist-open-file'), /SEGMENTRA_PERSIST status=persisted/);
   assert.match(out, /enabled2=enabled/);
+});
+
+test('the scheduled revert runs from a file, which removes itself, so a systemd reload cannot corrupt it', () => {
+  const dir = tmp();
+  const marker = path.join(dir, 'revert-fired.x');
+  const file = revertScriptFile(marker);
+  assert.equal(file, `${marker}.sh`);
+  fs.writeFileSync(file, `${revertFiringScript(marker, 'true')}\n`);
+  const r = spawnSync('/bin/sh', [file], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(fs.existsSync(marker));
+  assert.ok(!fs.existsSync(file), 'the script removes itself after firing');
+  const src = fs.readFileSync(new URL('../packages/executor/src/run-ssh.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(src, /systemd-run[^\n]*\/bin\/sh -c/);
+  for (const playbook of ['apply-firewall.yml', 'apply-manager.yml']) {
+    const text = fs.readFileSync(new URL(`../infra/ansible-runner/playbooks/${playbook}`, import.meta.url), 'utf8');
+    assert.doesNotMatch(text, /systemd-run[\s\S]{0,200}\/bin\/sh -c/, playbook);
+  }
 });

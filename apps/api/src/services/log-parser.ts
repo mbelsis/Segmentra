@@ -299,3 +299,18 @@ export function groupCommunicationFlows(entries: ParsedLogEntry[], now: Date = n
     .map(({ firstMs: _f, lastMs: _l, ...flow }) => flow)
     .sort((a, b) => b.count - a.count);
 }
+
+/**
+ * Full rule name for a log line. iptables keeps only 29 bytes of a log prefix, so "Legacy service is closed" arrives as
+ * "Legacy serv". `rules` holds the comments of the host's deployed policies, newest first; the newest rule with the same
+ * action whose comment starts with the label wins. A label that matches nothing is returned as it is.
+ */
+export function expandRuleLabel(
+  label: string | null | undefined,
+  action: string,
+  rules: Array<{ comment: string | null; action: string }>
+): string | null {
+  if (!label) return null;
+  const match = rules.find((r) => r.comment && r.action === action && r.comment.startsWith(label));
+  return match?.comment ?? label;
+}

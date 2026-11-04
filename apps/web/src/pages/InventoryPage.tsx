@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 
 import { api } from '../lib/api';
 import { useAuth, hasRole } from '../lib/auth-context';
@@ -1122,12 +1122,13 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                   <th>SSH credential</th>
                   <th>Compliance</th>
                   <th>Enabled</th>
-                  <th>Actions</th>
+                  <th className="sticky-actions">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {hosts.map((h) => (
-                  <tr key={h.id}>
+                  <Fragment key={h.id}>
+                  <tr>
                     <td>
                       <input
                         type="checkbox"
@@ -1184,7 +1185,7 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                       )}
                     </td>
                     <td>{h.enabled ? '✓' : '✗'}</td>
-                    <td>
+                    <td className="sticky-actions">
                       <RowActionsMenu
                         label={`Actions for ${h.hostname}`}
                         items={[
@@ -1222,9 +1223,16 @@ server2,10.0.0.2,2222,Production,db-server,auto,true`}
                           }
                         ]}
                       />
-                      {readinessResults.has(h.id) && <ReadinessSummary result={readinessResults.get(h.id)} />}
                     </td>
                   </tr>
+                  {readinessResults.has(h.id) && (
+                    <tr>
+                      <td colSpan={11}>
+                        <div className="readiness-row-content"><ReadinessSummary result={readinessResults.get(h.id)} /></div>
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 ))}
                 {hosts.length === 0 && (
                   <tr>

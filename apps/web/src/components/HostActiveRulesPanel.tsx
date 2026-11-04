@@ -1,3 +1,4 @@
+import { formatRuleset, rulesMissingMessage } from '../lib/format-ruleset';
 import { Fragment, useEffect, useMemo, useState } from 'react';
 
 import { api } from '../lib/api';
@@ -353,6 +354,7 @@ export function HostActiveRulesPanel({ hostId, hostname, canOperate, onClose }: 
                     </div>
                     {liveError && <p className="error">{liveError}</p>}
                     {expectedError && <p className="error">{expectedError}</p>}
+                    {live?.success && live.segmentraPresent === false && <p className="error">{rulesMissingMessage(live.backend)}</p>}
                     {(live || expected) && (
                       <div className="active-rules-columns">
                         <div>
@@ -360,8 +362,7 @@ export function HostActiveRulesPanel({ hostId, hostname, canOperate, onClose }: 
                           {live ? (
                             live.success ? (
                               <>
-                                {live.segmentraPresent === false && <p className="error">Segmentra's table/chains are not present on this host.</p>}
-                                <pre className="active-rules-pre">{live.rulesText || '(empty)'}</pre>
+                                <pre className="active-rules-pre">{formatRuleset(live.rulesText)}</pre>
                               </>
                             ) : (
                               <p className="error">{live.error}</p>
@@ -372,7 +373,7 @@ export function HostActiveRulesPanel({ hostId, hostname, canOperate, onClose }: 
                         </div>
                         <div>
                           <h4>Expected (compiled from the active version) {expected ? <span className="active-rules-muted">({expected.backend})</span> : null}</h4>
-                          {expected ? <pre className="active-rules-pre">{expected.text}</pre> : <p className="active-rules-muted">Not compiled yet.</p>}
+                          {expected ? <pre className="active-rules-pre">{formatRuleset(expected.text)}</pre> : <p className="active-rules-muted">Not compiled yet.</p>}
                         </div>
                       </div>
                     )}

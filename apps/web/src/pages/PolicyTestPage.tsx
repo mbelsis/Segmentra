@@ -195,13 +195,13 @@ export function PolicyTestPage() {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <div>
               <label style={{ fontSize: '0.85em', fontWeight: 600, color: '#5c4633' }}>Policy Version</label>
-              {!canTestUnreviewed && (
-                <div style={{ fontSize: '0.8em', color: '#78644e', marginBottom: 4 }}>Only APPROVED or DEPLOYED versions are listed (testing other versions requires approver/admin).</div>
-              )}
               <select value={startForm.policyVersionId} onChange={e => setStartForm(f => ({ ...f, policyVersionId: e.target.value }))} style={{ width: '100%' }}>
                 <option value="">Select policy version...</option>
                 {policyVersions.map(v => <option key={v.id} value={v.id}>{v.policySetName} v{v.version_number} ({v.status})</option>)}
               </select>
+              {!canTestUnreviewed && (
+                <div style={{ fontSize: '0.8em', color: '#78644e', marginTop: 4 }}>Only APPROVED or DEPLOYED versions are listed (testing other versions requires approver/admin).</div>
+              )}
             </div>
             <div>
               <label style={{ fontSize: '0.85em', fontWeight: 600, color: '#5c4633' }}>Target Host</label>
@@ -209,6 +209,7 @@ export function PolicyTestPage() {
                 <option value="">Select host...</option>
                 {hosts.map(h => <option key={h.id} value={h.id}>{h.hostname} ({h.mgmt_ip})</option>)}
               </select>
+              <div style={{ fontSize: '0.8em', color: '#78644e', marginTop: 4 }}>Hosts using firewalld or UFW cannot run policy tests yet.</div>
             </div>
             <div>
               <label style={{ fontSize: '0.85em', fontWeight: 600, color: '#5c4633' }}>Duration (minutes)</label>
