@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { compileHostPolicy, CompileError } from '../packages/compiler/dist/index.js';
 import { SEGMENTRA_MANAGER_PY, hashLiveRuleset, parsePersistenceOutput, persistSnippet } from '../packages/executor/dist/index.js';
@@ -102,4 +102,15 @@ except RuntimeError:
 `;
   const result = spawnSync('python3', ['-c', checks], { input: JSON.stringify({ helper: SEGMENTRA_MANAGER_PY, policy: JSON.parse(compileHostPolicy(policyInput('ufw')).text) }), encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
+});
+
+test('firewalld reload check ignores interface bindings, which NetworkManager manages', () => {
+  const zone = (interfaces, ports) => `public${interfaces ? ' (active)' : ''}\n  target: default\n  interfaces: ${interfaces}\n  ports: ${ports}\n`;
+  const py = `${SEGMENTRA_MANAGER_PY.split('def main():')[0]}\nimport json as _j, sys as _s\nprint(_j.dumps([normalize_info(a) for a in _s.argv[1:]]))`;
+  const compare = (a, b) => {
+    const [x, y] = JSON.parse(execFileSync('python3', ['-c', py, a, b], { encoding: 'utf8' }));
+    return JSON.stringify(x) === JSON.stringify(y);
+  };
+  assert.equal(compare(zone('enp0s8 enp0s9', '22/tcp'), zone('', '22/tcp')), true);
+  assert.equal(compare(zone('enp0s8', '22/tcp 9999/tcp'), zone('', '22/tcp')), false);
 });

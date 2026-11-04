@@ -41,6 +41,7 @@ npm run test:lab:iot                  # (also test:lab:swarm, test:lab:k8s, test
 npm run test:integration:ssh-docker   # Docker-based SSH deployment integration test
 npm run test:integration:expiry       # Policy expiry on a disposable stack (tests/expiry-lab): NOTIFY_ONLY, REMOVE, REVERT, warnings, unreachable hosts; real traffic and webhooks, about 15 minutes
 npm run test:integration:expiry-matrix # REVERT and REMOVE with both executors on systemd containers (Debian, Ubuntu, Rocky; iptables, nftables, UFW, firewalld, gateways), with reboots; tests/expiry-lab/matrix
+npm run test:integration:expiry-vm    # REVERT and REMOVE with real kernel reboots on VirtualBox VMs (Debian 12, Rocky 9; `-- --lab ubuntu`, `-- --lab rhel`); needs VirtualBox, Vagrant, Docker Desktop on Apple silicon; tests/expiry-lab/vm
 npm run test:integration:ot-gateway   # Docker lab: Debian IoT/OT gateway between an IT and an OT network, FORWARD rules, real traffic (tests/ot-gateway-lab)
 
 # Workspace-specific

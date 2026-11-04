@@ -101,7 +101,9 @@ def normalize_info(value):
     lines = value.splitlines()
     # CLI headers annotate runtime objects with "active" and "default" flags;
     # these are display metadata, not configuration differences.
-    return sorted([lines[0].split(' (')[0]] + [line.strip() for line in lines[1:] if line.strip()])
+    # A zone's interfaces are runtime bindings: NetworkManager adds them on every normal RHEL-family host, they are not
+    # in the permanent zone, and a reload keeps them. Treating them as unsaved settings refused every deployment there.
+    return sorted([lines[0].split(' (')[0]] + [line.strip() for line in lines[1:] if line.strip() and not line.strip().startswith('interfaces:')])
 
 def kernel_state(backend):
     if backend == 'ufw':

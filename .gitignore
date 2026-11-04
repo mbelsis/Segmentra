@@ -39,3 +39,9 @@ tests/docker-ssh-integration/.runtime/
 
 # database dumps written by scripts/segmentra-backup.sh
 backups/
+
+# Vagrant state of tests/expiry-lab/vm
+tests/expiry-lab/vm/.vagrant/
+
+# Test SSH key of the RHEL VM
+tests/expiry-lab/vm/rhel/.key/

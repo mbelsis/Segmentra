@@ -1,0 +1,29 @@
+# Real VMs for run.mjs, two at a time (see its --lab option): real kernels, real reboots. arm64 boxes, for VirtualBox on Apple silicon.
+# SEG_PUBKEY is the test key that run.mjs generates. Each VM's sshd also listens on its forwarded port, because a Segmentra
+# policy keeps only the host's configured SSH port open.
+VMS = {
+  'seg-deb' => { box: 'bento/debian-12', ip: '192.168.77.11', ssh: 22101 },
+  'seg-roc' => { box: 'bento/rockylinux-9', ip: '192.168.77.12', ssh: 22102 },
+  'seg-ubu' => { box: 'bento/ubuntu-24.04', ip: '192.168.77.13', ssh: 22103 },
+}
+Vagrant.configure('2') do |config|
+  config.vm.box_architecture = 'arm64'
+  config.vm.synced_folder '.', '/vagrant', disabled: true
+  config.vm.boot_timeout = 600
+  VMS.each do |name, vm|
+    config.vm.define name do |c|
+      c.vm.box = vm[:box]
+      c.vm.box_version = '202510.26.0'
+      c.vm.hostname = name
+      c.vm.network 'private_network', ip: vm[:ip], virtualbox__intnet: 'segmentra-expiry'
+      c.vm.provider('virtualbox') do |v|
+        v.name = name
+        v.memory = 1536
+        v.cpus = 2
+        # Set directly: Vagrant's collision check reported this free port as in use. Loopback only.
+        v.customize ['modifyvm', :id, '--natpf1', "seg-ssh,tcp,127.0.0.1,#{vm[:ssh]},,#{vm[:ssh]}"]
+      end
+      c.vm.provision 'shell', path: 'provision.sh', args: [vm[:ssh].to_s, ENV.fetch('SEG_PUBKEY', '')]
+    end
+  end
+end

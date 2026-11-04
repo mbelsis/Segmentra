@@ -25,7 +25,7 @@ Backups and rollback contain only Segmentra's configuration. UFW restoration rep
 
 The manual `scripts/restore-previous-policy.sh` command also recognizes native-manager JSON backups with `--latest` or an explicit timestamp/identifier and invokes the helper installed on the host.
 
-Firewalld activation needs a reload, which normally discards unsaved runtime changes. Segmentra checks unrelated zones, policies, ipsets, and direct configuration against their permanent counterparts and refuses deployment/removal when it finds unsaved runtime differences. Resolve those differences deliberately before retrying. Do not edit the manager concurrently with an in-progress deployment or rollback.
+Firewalld activation needs a reload, which normally discards unsaved runtime changes. Segmentra checks unrelated zones (other than their interface bindings, which NetworkManager manages and a reload keeps), policies, ipsets, and direct configuration against their permanent counterparts and refuses deployment/removal when it finds unsaved runtime differences. Resolve those differences deliberately before retrying. Do not edit the manager concurrently with an in-progress deployment or rollback.
 
 ## Rule semantics and limits
 
@@ -38,6 +38,8 @@ Learning/log-only sessions are currently rejected for both native managers befor
 Drift hashes include Segmentra's permanent configuration and live kernel/native-manager state. Unrelated administrator rules and counters are excluded. Compliance also reports reboot persistence separately using the existing persistence fields; no database migration is needed.
 
 ## Verification
+
+On 2026-11-04, firewalld on Rocky 9 and RHEL 9.8 VMs with NetworkManager and SELinux enforcing, and UFW on an Ubuntu 24.04 VM, passed deployment, `REVERT`, `REMOVE` and real reboots with both executors (`npm run test:integration:expiry-vm`).
 
 On 2026-10-09, the Docker Desktop integration suite passed against Ubuntu 24.04 containers running actual firewalld and UFW. Both completed SSH auto-detection/readiness, deployment/readback, IPv4/IPv6 allowed/blocked TCP checks, native reload, container restart persistence, drift, scoped rollback, removal, post-removal connectivity, and administrator-rule preservation. Native learning-session rejection was verified without changing live/permanent ACLs. This establishes the tested host SSH path, not native Ansible end-to-end, routed gateway enforcement, or a full systemd VM/server reboot.
 

@@ -26,6 +26,7 @@
     "test:integration:ot-gateway": "node tests/ot-gateway-lab/run.mjs",
     "test:integration:expiry": "node tests/expiry-lab/run.mjs",
     "test:integration:expiry-matrix": "node tests/expiry-lab/matrix/matrix.mjs",
+    "test:integration:expiry-vm": "node tests/expiry-lab/vm/run.mjs",
     "test:lab:base": "node tests/labs/run.mjs base",
     "test:lab:iot": "node tests/labs/run.mjs iot",
     "test:lab:swarm": "node tests/labs/run.mjs swarm",
