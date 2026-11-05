@@ -26,15 +26,19 @@
 
 "Production" doesn't mean hardened: the UI is plain HTTP and the API container mounts the Docker socket by default. Before exposing it, read [Security hardening](#security-hardening).
 
-**On Windows:** to try or use Segmentra, run `.\install.ps1 --production`. To work on the code, use development mode inside WSL2. See [Windows](#windows).
+**On Windows:** to try or use Segmentra, run `.\install.ps1 --production`. To work on the code, use native development mode or WSL2. See [Windows](#windows).
 
 ### Windows
 
-Results of a test on Windows 11 with Docker Desktop and PowerShell 5.1:
+Results of tests on Windows 11 with Docker Desktop and PowerShell 5.1:
 
 - **Production (`.\install.ps1 --production`) works end to end.** That covers install, the UI, deployments with the Ansible runner, readiness, drift, live rules and SIEM forwarding.
-- **Native development mode (`.\install.ps1 --development`, `.\run.ps1 -start -development`) installs and runs.** The API, the UI and editing work. Anything that connects to a host over SSH may not work: deployments, readiness checks, live rules, drift, learning, policy tests and Peek at Logs. In development mode the API calls Windows' own `ssh.exe`. In the test, `ssh.exe` ran the remote command and then never exited, so every host failed after the 5-minute SSH timeout. That test ran over an SSH login with no desktop session, so it isn't known yet whether a normal desktop terminal has the same problem. Native development mode also has no `sshpass` (password logins) and no askpass helper (passphrase-protected keys), and the Ansible runner isn't started.
-- **Development with deployments:** use WSL2, below. It runs the normal Linux scripts with Linux `ssh` and `sshpass`.
+- **Native development mode (`.\install.ps1 --development`, then `start.bat dev` or `.\run.ps1 -start -development`) works from a normal terminal on the desktop.** The API, the UI and the demo lab work, including deployments with the API's own SSH (`python scripts\demo-lab.py up --set-executor-ssh`: the policy was deployed and live traffic matched it). The API calls Windows' own `ssh.exe` there. Some limits remain:
+  - There is no `sshpass`, so credentials with a login password don't work.
+  - There is no askpass helper, so passphrase-protected keys don't work. Use keys without a passphrase.
+  - The Ansible runner isn't started.
+  - Started over an SSH login with no desktop session, `ssh.exe` ran each remote command and then never exited, so every host failed after the 5-minute SSH timeout. Start development mode from a desktop terminal.
+- **WSL2** runs the Linux scripts with Linux `ssh` and `sshpass`, without these limits.
 
 #### Development in WSL2
 
@@ -56,6 +60,7 @@ This uses only the Linux scripts that are tested on Linux and macOS. WSL2 itself
 #### Native development mode details
 
 - `run.ps1` and `start.bat` keep the host keys of managed hosts in `data\ssh\known_hosts` in the checkout, not in your `%USERPROFILE%\.ssh\known_hosts`. Set `SEGMENTRA_KNOWN_HOSTS` to use another file.
+- Windows limits a command line to 32,767 characters, and some deployment steps carry the host scripts (tens of KB). On Windows, SSH commands longer than 8,000 characters are therefore sent to the host on stdin and run from there, instead of as an `ssh` argument.
 - On Windows a new file inherits its folder's permissions, and Win32-OpenSSH refuses a private key that other accounts can read ("Bad permissions"). This happens, for example, for a checkout under `C:\` instead of your user folder. Segmentra therefore restricts the key files it writes to the current user with `icacls`.
 
 ---

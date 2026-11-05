@@ -415,11 +415,34 @@ export function runSshCommand(
   // Non-root login shells on Debian-family hosts don't have the sbin directories in PATH, so
   // `command -v nft` / `iptables` lookups would fail even though the tools are installed.
   // (Commands run through sudo use sudo's secure_path and are unaffected.)
-  const remoteCommand = `${REMOTE_PATH_PREFIX}${command}`;
-  const w = withAuth(host, 'ssh', [...args, remoteCommand]);
+  const t = sshCommandTransport(`${REMOTE_PATH_PREFIX}${command}`, opts.input);
+  const w = withAuth(host, 'ssh', [...args, t.remote]);
   return withPasswordRetry(host, () =>
-    spawnWithTimeout(w.cmd, w.args, { env: w.env, timeoutMs: opts.timeoutMs, input: opts.input, detached: w.detached })
+    spawnWithTimeout(w.cmd, w.args, { env: w.env, timeoutMs: opts.timeoutMs, input: t.input, detached: w.detached })
   ).then((r) => scrubResult(host, r));
+}
+
+/**
+ * Longest remote command passed as an ssh argument on Windows. CreateProcess allows 32,767
+ * characters for the whole command line, and quoting can double a command's length.
+ */
+export const WINDOWS_MAX_SSH_COMMAND_ARG = 8000;
+
+/**
+ * How a remote command reaches the host. Normally it is the last ssh argument. Some commands
+ * embed the host scripts (tens of KB), which exceeds the Windows command-line limit (spawn
+ * ENAMETOOLONG). Then the command is sent at the start of stdin instead: the short remote
+ * command reads exactly its byte length with dd and evals it in the login shell, so the rest
+ * of stdin (sudo password line, input) is left for the command as before.
+ */
+export function sshCommandTransport(
+  command: string,
+  input: string | undefined,
+  viaStdin = process.platform === 'win32' && command.length > WINDOWS_MAX_SSH_COMMAND_ARG
+): { remote: string; input: string | undefined } {
+  if (!viaStdin) return { remote: command, input };
+  const n = Buffer.byteLength(command, 'utf8');
+  return { remote: `seg_cmd=$(dd bs=1 count=${n} 2>/dev/null) && eval "$seg_cmd"`, input: command + (input ?? '') };
 }
 
 /** Prepended to every remote command: make the standard admin tool directories available. */
