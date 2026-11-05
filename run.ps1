@@ -132,6 +132,8 @@ if ($Mode -eq "development") {
             $kek = (& node packages/db/scripts/dev-env.js get SEGMENTRA_KEK_B64)
             if ($kek) { $env:SEGMENTRA_KEK_B64 = $kek }
             if (-not $env:BUNDLES_DIR) { $env:BUNDLES_DIR = "./data/bundles" }
+            # Keep the host keys of managed hosts out of the user's own ~\.ssh\known_hosts.
+            if (-not $env:SEGMENTRA_KNOWN_HOSTS) { $env:SEGMENTRA_KNOWN_HOSTS = Join-Path $PSScriptRoot "data\ssh\known_hosts" }
             Set-DevJwtSecret
             New-Item -ItemType Directory -Force -Path $env:BUNDLES_DIR | Out-Null
 

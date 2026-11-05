@@ -26,7 +26,37 @@
 
 "Production" doesn't mean hardened: the UI is plain HTTP and the API container mounts the Docker socket by default. Before exposing it, read [Security hardening](#security-hardening).
 
-**On Windows, use `.\install.ps1 --production`.** In development mode, the code that deploys firewall rules runs directly on Windows. It needs tools like `sshpass`, which Windows doesn't normally have, so password-based SSH logins would probably fail. The Ansible runner container isn't started in development mode either. Production mode has `sshpass` in the API image and starts the runner. This comes from reading the code and hasn't been tested on Windows.
+**On Windows:** to try or use Segmentra, run `.\install.ps1 --production`. To work on the code, use development mode inside WSL2. See [Windows](#windows).
+
+### Windows
+
+Results of a test on Windows 11 with Docker Desktop and PowerShell 5.1:
+
+- **Production (`.\install.ps1 --production`) works end to end.** That covers install, the UI, deployments with the Ansible runner, readiness, drift, live rules and SIEM forwarding.
+- **Native development mode (`.\install.ps1 --development`, `.\run.ps1 -start -development`) installs and runs.** The API, the UI and editing work. Anything that connects to a host over SSH may not work: deployments, readiness checks, live rules, drift, learning, policy tests and Peek at Logs. In development mode the API calls Windows' own `ssh.exe`. In the test, `ssh.exe` ran the remote command and then never exited, so every host failed after the 5-minute SSH timeout. That test ran over an SSH login with no desktop session, so it isn't known yet whether a normal desktop terminal has the same problem. Native development mode also has no `sshpass` (password logins) and no askpass helper (passphrase-protected keys), and the Ansible runner isn't started.
+- **Development with deployments:** use WSL2, below. It runs the normal Linux scripts with Linux `ssh` and `sshpass`.
+
+#### Development in WSL2
+
+1. In an administrator PowerShell, install WSL with Ubuntu, then restart if asked:
+   ```powershell
+   wsl --install -d Ubuntu
+   ```
+2. In Docker Desktop, open **Settings → Resources → WSL integration**, turn it on for Ubuntu, and click **Apply & restart**. In the Ubuntu terminal, `docker version` should now show the server.
+3. In the Ubuntu terminal, clone the repository into the Linux file system, for example `~/Segmentra`, **not** under `/mnt/c`. Files on `/mnt/c` ignore `chmod`, so `ssh` refuses the key files Segmentra writes for deployments. File watching is also slow there.
+   ```bash
+   cd ~ && git clone <repository URL> Segmentra && cd Segmentra
+   ./install.sh --development      # offers to install Node.js with apt
+   ./run.sh --start --development
+   ```
+4. Open `http://localhost:5173` in a Windows browser. WSL2 forwards `localhost` to Ubuntu. The demo lab works from the same terminal: `python3 scripts/demo-lab.py up`.
+
+This uses only the Linux scripts that are tested on Linux and macOS. WSL2 itself hasn't been tested with Segmentra yet.
+
+#### Native development mode details
+
+- `run.ps1` and `start.bat` keep the host keys of managed hosts in `data\ssh\known_hosts` in the checkout, not in your `%USERPROFILE%\.ssh\known_hosts`. Set `SEGMENTRA_KNOWN_HOSTS` to use another file.
+- On Windows a new file inherits its folder's permissions, and Win32-OpenSSH refuses a private key that other accounts can read ("Bad permissions"). This happens, for example, for a checkout under `C:\` instead of your user folder. Segmentra therefore restricts the key files it writes to the current user with `icacls`.
 
 ---
 
@@ -58,7 +88,7 @@
 .\install.ps1 --production
 ```
 
-`--hardened` is not available in `install.ps1` yet. The Windows scripts have not been run on real Windows yet, so please report anything that goes wrong.
+`--hardened` is not available in `install.ps1` yet. For what has been tested on Windows, see [Windows](#windows).
 
 `--production` generates `JWT_SECRET`, `SEGMENTRA_KEK_B64`, `POSTGRES_PASSWORD` and `SEGMENTRA_ADMIN_PASSWORD` into `.env` (kept if already present) and prints the initial admin password. Back up `.env`: losing `SEGMENTRA_KEK_B64` makes stored SSH/LDAP secrets unrecoverable.
 

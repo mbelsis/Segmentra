@@ -11,7 +11,7 @@
  *  - sudo password: first line of the remote command's stdin, read by `sudo -S`.
  * Every secret of the target is scrubbed from the stdout/stderr returned to callers.
  */
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -79,6 +79,52 @@ export function defaultTimeout(): number {
 
 function ensureDir(dir: string): void {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+}
+
+let windowsUserSid: string | null | undefined;
+
+/** SID of the account running this process (Windows only), or null when it cannot be read. */
+function currentWindowsUserSid(): string | null {
+  if (windowsUserSid !== undefined) return windowsUserSid;
+  try {
+    const out = execFileSync('whoami', ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true, timeout: 15_000 });
+    windowsUserSid = /"(S-1-[0-9-]+)"/.exec(out)?.[1] ?? null;
+  } catch {
+    windowsUserSid = null;
+  }
+  return windowsUserSid;
+}
+
+/**
+ * Make `file` readable and writable by the current user only. On POSIX this is chmod 0600.
+ * On Windows the mode argument of fs calls is ignored and a new file inherits its folder's
+ * ACL; Win32-OpenSSH then refuses a private key that other accounts can read ("Bad
+ * permissions", e.g. BUILTIN\Users under C:\). There the inherited ACEs are removed and
+ * only the current user is granted access (icacls). Throws when that fails.
+ */
+export function restrictFileToCurrentUser(file: string): void {
+  if (process.platform !== 'win32') {
+    fs.chmodSync(file, 0o600);
+    return;
+  }
+  const sid = currentWindowsUserSid();
+  const who = sid ? `*${sid}` : os.userInfo().username;
+  try {
+    execFileSync('icacls', [file, '/inheritance:r', '/grant:r', `${who}:F`], { stdio: 'ignore', windowsHide: true, timeout: 15_000 });
+  } catch (err) {
+    throw new Error(`Could not restrict the permissions of ${file} to the current user (icacls): ${(err as Error).message}`);
+  }
+}
+
+/**
+ * Write a private file (SSH key, secret) readable by the current user only. The file is
+ * created empty and restricted before the content is written, so the content is never
+ * readable through inherited permissions. Overwrites an existing file.
+ */
+export function writePrivateFileSync(file: string, data: string): void {
+  fs.writeFileSync(file, '', { mode: 0o600 });
+  restrictFileToCurrentUser(file);
+  fs.writeFileSync(file, data, { encoding: 'utf8', mode: 0o600 });
 }
 
 /** Resolve the known_hosts file and checking mode. */
@@ -511,7 +557,7 @@ export async function checkPrivateKey(pem: string, passphrase?: string): Promise
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'segmentra-keycheck-'));
   const file = path.join(dir, 'key');
   try {
-    fs.writeFileSync(file, pem.endsWith('\n') ? pem : `${pem}\n`, { mode: 0o600 });
+    writePrivateFileSync(file, pem.endsWith('\n') ? pem : `${pem}\n`);
     const plainEnv: NodeJS.ProcessEnv = { ...process.env };
     for (const k of ['SSH_ASKPASS', 'SSH_ASKPASS_REQUIRE', ASKPASS_SECRET_ENV, 'SSHPASS']) delete plainEnv[k];
     const plain = await spawnWithTimeout('ssh-keygen', ['-y', '-f', file], { env: plainEnv, timeoutMs: 15_000, detached: true });

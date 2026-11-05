@@ -336,7 +336,8 @@ def deploy(api, version_id, host_ids):
             hint = ""
             if "Host key verification failed" in details:
                 hint = ("\nA machine has a new SSH host key (its image was rebuilt from scratch). Remove its old entry from the"
-                        " known_hosts file of the user running the API, then run this again.")
+                        " API's known_hosts file (SEGMENTRA_KNOWN_HOSTS; by default ~/.ssh/known_hosts of the user running the API,"
+                        " data\\ssh\\known_hosts in Windows development), then run this again.")
             raise LabError(f"The deployment ended as {status}:\n{details}{hint}")
         time.sleep(2)
     raise LabError("The deployment did not finish within 5 minutes.")

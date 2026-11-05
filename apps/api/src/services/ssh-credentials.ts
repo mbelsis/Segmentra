@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { writePrivateFileSync } from '@segmentra/executor';
+
 import { pool } from '../db/pool.js';
 import { readSecretPlaintext } from './secrets.js';
 
@@ -199,7 +201,7 @@ export async function materializeSshCredential(cred: any, dir?: string): Promise
   const sudo = await materializeSudo(cred, undefined);
   const keyDir = dir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'segmentra-key-'));
   const keyPath = path.join(keyDir, `ssh_key_${cred.id ?? 'cred'}_${process.pid}_${Date.now()}`);
-  fs.writeFileSync(keyPath, keyPem.endsWith('\n') ? keyPem : `${keyPem}\n`, { encoding: 'utf8', mode: 0o600 });
+  writePrivateFileSync(keyPath, keyPem.endsWith('\n') ? keyPem : `${keyPem}\n`);
 
   return {
     authMethod: 'key',

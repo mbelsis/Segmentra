@@ -26,6 +26,7 @@ Thumbs.db
 
 # Deployment bundles (contain SSH keys)
 data/bundles/
+data/ssh/
 apps/api/data/
 
 # Temp files

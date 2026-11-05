@@ -155,6 +155,8 @@ exit /b 1
 REM Set optional environment variables with defaults
 if "%PORT%"=="" set "PORT=8080"
 if "%BUNDLES_DIR%"=="" set "BUNDLES_DIR=./data/bundles"
+REM Keep the host keys of managed hosts out of the user's own %USERPROFILE%\.ssh\known_hosts.
+if "%SEGMENTRA_KNOWN_HOSTS%"=="" set "SEGMENTRA_KNOWN_HOSTS=%~dp0data\ssh\known_hosts"
 if "%ANSIBLE_RUNNER_CONTAINER%"=="" set "ANSIBLE_RUNNER_CONTAINER=segmentra-ansible-runner"
 
 echo [segmentra] Configuration:
